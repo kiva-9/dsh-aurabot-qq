@@ -21,6 +21,19 @@ async function until(fn, ms = 8000) {
   throw new Error('等不到条件成立')
 }
 
+/** 等上一个用例迟到的回复都发完（发送数连续 ms 毫秒不再变），免得算到这个用例头上。 */
+async function settle(ms = 600, max = 10000) {
+  const t = Date.now()
+  let last = -1
+  let since = Date.now()
+  while (Date.now() - t < max) {
+    const n = mock.calls.filter((c) => c.action.startsWith('send_')).length
+    if (n !== last) { last = n; since = Date.now() }
+    else if (Date.now() - since >= ms) return
+    await sleep(50)
+  }
+}
+
 function fakePng(w, h, salt = 0) {
   const b = Buffer.alloc(64 + salt)
   b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47
@@ -226,6 +239,7 @@ test('群管：她在群里只是普通成员时，主人要求也做不了，�
 })
 
 test('QQ 命令：主人 /silent 后群里 @ 她也不回，/active 恢复；群友发命令不算', async () => {
+  await settle()
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
   let n = sentTo('group', '555').length
   mock.push(grp('555', '777', text('/silent')))
@@ -608,6 +622,7 @@ test('#6 改资料：默认仅主人私聊，昵称 / 签名 / 头像走 SnowLum
 })
 
 test('#6 改资料：群里默认没有这些工具；调成「所有人」后群友也能改；「关」了谁都不行', async () => {
+  await settle()
   const n = mock.sent('set_qq_profile').length
   mock.push(grp('555', OWNER, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 改昵称测试一' } }], 'xiaoming'))
   let c = await lastCall('改昵称测试一')
