@@ -460,6 +460,18 @@ test('发送记录：她回的每一段都落库并记下 QQ 消息 ID', async (
   assert.ok(s.storage.counts.requests > 0, '每次交给她都登记了请求')
 })
 
+test('引用：回复之前那张图说改一下，被引用的原话和那张图都交给她', async () => {
+  const pic = priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + fakePng(320, 240, 21).toString('base64') } }, { type: 'text', data: { text: '这张海边' } }])
+  mock.push(pic)
+  await until(() => fake.turns.at(-1)?.userText.includes('这张海边'))
+  const before = fake.turns.length
+  mock.push(priv(OWNER, [{ type: 'reply', data: { id: String(pic.message_id) } }, { type: 'text', data: { text: '把它改成夜景' } }]))
+  await until(() => fake.turns.length > before && fake.turns.at(-1).userText.includes('改成夜景'))
+  const t = fake.turns.at(-1)
+  assert.match(t.userText, /回复 xiaoming 的「\[图片\]这张海边」/)
+  assert.equal(t.images, 1, '被引用那条里的图带上了')
+})
+
 test('连发合并：一口气发两句，她只回一次', async () => {
   const before = fake.turns.length
   mock.push(priv(OWNER, text('第一句')))

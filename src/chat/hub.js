@@ -899,6 +899,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
         if (last) last.text = msg.text
       }
     }
+    // 引用：找回被引用的那条（原话和里面的图），一起交给她
+    const quote = msg.replyId ? await quotedOf(msg.chatId, msg.replyId) : null
     // 图片、语音登记后在后台处理，调度器等它们好了（或等到上限）再交给她
     media.register({ messageId: dbId, msg, account: selfId, wantTranscript: cfg.voice.asr })
     lastChatAt = now
@@ -906,7 +908,35 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
     onActivity?.({ kind: 'in', chatId: msg.chatId, userId: msg.userId, nickname: msg.nickname, text: msg.text, direct: msg.kind === 'private' || msg.mentioned || mode === 'must', owner: isOwner(cfg, msg.userId) })
 
     const stickerOnly = msg.stickers.length > 0 && !msg.images.length && !msg.records.length && !msg.text.replace(/\[[^\]]*\]/g, '').trim()
-    scheduler.add(chat, { messageId: dbId, actorId: msg.userId, mentioned: msg.mentioned, stickerOnly, mode, msg, wantVoice: wantsVoice(msg.text) })
+    scheduler.add(chat, { messageId: dbId, actorId: msg.userId, mentioned: msg.mentioned, stickerOnly, mode, msg, quote, wantVoice: wantsVoice(msg.text) })
+  }
+
+  /**
+   * 被引用的消息：先查主库，再查她自己发过的（outbox），都没有就问网关要（顺手登记进主库、下载里面的图）。
+   * 返回 { messageId, name, text, isBot }；找不到返回 null。
+   */
+  async function quotedOf(chatId, replyId) {
+    try {
+      const stored = storage.messages.byPlatformId(chatId, replyId)
+      if (stored) return { messageId: stored.id, name: stored.authorName || stored.authorId, text: stored.text, isBot: false }
+      const mine = outbox.byPlatformId(chatId, replyId)
+      if (mine) {
+        const text = (mine.payload.message || []).filter((s) => s.type === 'text').map((s) => s.data.text).join('') || mine.payload.note || ''
+        return { messageId: null, name: '你自己', text, isBot: true }
+      }
+      const raw = await onebot.call('get_msg', { message_id: Number(replyId) || replyId }, { timeoutMs: 8000 })
+      if (!raw) return null
+      const ev = { message_type: chatId.startsWith('group:') ? 'group' : 'private', group_id: chatId.slice(6), user_id: raw.sender?.user_id ?? raw.user_id, message_id: replyId, time: raw.time, sender: raw.sender || {}, message: raw.message ?? raw.content ?? [] }
+      const qm = parseMessageEvent(ev, selfId)
+      const isBot = String(qm.userId) === String(selfId)
+      if (isBot) return { messageId: null, name: '你自己', text: qm.text, isBot: true }
+      const ing = storage.messages.ingest({ account: selfId, chatId, eventKind: 'message', platformMsgId: replyId, authorId: qm.userId, authorName: qm.nickname, platformTime: qm.platformTime, text: qm.text, segments: Array.isArray(ev.message) ? ev.message : [] })
+      if (!ing.duplicate) media.register({ messageId: ing.id, msg: { ...qm, chatId }, account: selfId, wantTranscript: false })
+      return { messageId: ing.id, name: qm.nickname, text: qm.text, isBot: false }
+    } catch (error) {
+      log.debug('找不到被引用的消息：', error.message)
+      return null
+    }
   }
 
   /** 把消息里的「[合并转发]」换成里面的聊天记录（最多 40 条，嵌套的转发不再展开）。 */
@@ -1006,7 +1036,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       }
     },
     canSteer: (chatId) => running.has(chatId),
-    mediaReady: (e) => media.isReady(e.messageId),
+    mediaReady: (e) => media.isReady(e.messageId) && (!e.quote?.messageId || media.isReady(e.quote.messageId)),
     dispatch: (chat, batch, info) => dispatch(chat, batch, info),
     log,
   })
@@ -1014,6 +1044,10 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
   /** 一条消息交给她时的文字：原文 + 语音转写；图片下载失败的说一声。 */
   function entryText(e, res) {
     let text = e.msg.text
+    if (e.quote) {
+      const q = String(e.quote.text || '').replace(/\s+/g, ' ').slice(0, 120)
+      text = `（回复 ${e.quote.name} 的「${q || '图片'}」）` + text
+    }
     const cfg = getConfig()
     if (e.msg.records.length) {
       const voice = res.transcripts.length ? res.transcripts.map((t) => `[语音] ${t}`).join(' ') : cfg.voice.asr ? '[发来一条语音，没听清]' : '[发来一条语音]'
@@ -1031,6 +1065,11 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
     // 图片按消息顺序收集，最多 4 张
     const images = []
     for (const e of batch.entries) for (const im of results.get(e.messageId).images) if (images.length < 4) images.push({ ...im, messageId: e.msg.messageId })
+    // 被引用的那条里的图排在后面（只给提出请求的消息带，当上下文的不带）
+    for (const e of batch.entries) {
+      if (e.mode === 'context' || !e.quote?.messageId) continue
+      for (const im of media.resultsOf(e.quote.messageId).images) if (images.length < 4) images.push({ ...im, messageId: 'quote-' + e.msg.replyId })
+    }
     const texts = []
     for (const e of batch.entries) {
       const text = entryText(e, results.get(e.messageId))

@@ -130,7 +130,13 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
     return db.run("UPDATE outbox SET state = 'canceled', last_error = ?, updated_at = ? WHERE chat_id = ? AND state = 'pending'", reason, now(), chatId).changes
   }
 
-  return { enqueue, deliver, summary, recover, cancelPending, rows: rowsOf }
+  /** 她自己发出去的某条 QQ 消息（引用回复她时用来找回原话）。 */
+  const byPlatformId = (chatId, pid) => {
+    const r = db.get('SELECT * FROM outbox WHERE chat_id = ? AND platform_msg_id = ? LIMIT 1', chatId, String(pid))
+    return r ? row(r) : null
+  }
+
+  return { enqueue, deliver, summary, recover, cancelPending, rows: rowsOf, byPlatformId }
 }
 
 function row(r) {
