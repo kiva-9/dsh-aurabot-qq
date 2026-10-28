@@ -1,0 +1,30 @@
+{
+  "source_commit": "6acbf9dfdf3e8008f671ce7914eac48208e7dc6a",
+  "method": "Temporary data and fake model; no external calls.",
+  "results": [
+    {
+      "check": "sequential_duplicate_add_is_deduplicated",
+      "verified": true,
+      "details": {
+        "stored_records": 1,
+        "same_record_updated": true
+      }
+    },
+    {
+      "check": "negated_preference_merges_without_conflict_record",
+      "verified": true,
+      "details": {
+        "similarity": 0.8235294117647058,
+        "stored_records": 1,
+        "same_record_updated": true
+      }
+    },
+    {
+      "check": "unchanged_profile_evidence_repeats_model_call",
+      "verified": true,
+      "details": {
+        "calls_with_unchanged_source_facts": 2
+      }
+    }
+  ]
+}

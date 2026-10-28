@@ -1,5 +1,16 @@
 # Aurabot · 住在 QQ 里的大肥鱼
 
+## Fork 重构方案
+
+当前 fork 已完成重构前审计与方案整理，业务重构尚未开始。接续开发请先阅读：
+
+- [完整重构方案 v2](docs/REFACTOR-PLAN.md)：功能范围、架构、实施顺序和验收要求。
+- [审计与 MaiBot 对照](docs/AUDIT-COMPARISON.md)：源码依据和 22 个定向模拟场景。
+- [外部审计报告复核](docs/EXTERNAL-AUDIT-REVIEW.md)：补充建议、取舍与额外验证。
+- [开发说明](docs/DEVELOPMENT.md)：Windows 接续、依赖安装、测试基线和本地 DSH 联调。
+
+以下功能与安装说明描述当前实现；重构后的独立发行信息将在实际实现和发布时更新。
+
 DeepSeek Harness（DSH）插件。DSH 里的 AI 以独立 QQ 号「大肥鱼」的身份住进 QQ：有人格、心情和记忆，能看图、发语音、听语音、发和收表情包、用自己的声音翻唱、写 QQ 空间日记、逛空间回评论、刷 B 站发评论，还会主动找你聊天。
 
 ```
