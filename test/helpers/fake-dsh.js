@@ -18,9 +18,11 @@ export function createFakeDsh({ brain }) {
   function makeAgent(sessionId, preset) {
     const tools = new Map()
     const contexts = new Map()
+    const sections = new Map()
     const events = []
     let turn = 0
     let chain = Promise.resolve()
+    let canceled = null // 当前这一轮被取消的原因（和 DSH 一样：截断这一轮，turn/end 记 aborted）
     const session = {
       id: sessionId,
       append: (type, data) => events.push({ type, data }),
@@ -31,16 +33,28 @@ export function createFakeDsh({ brain }) {
       session,
       tools,
       contexts,
+      sections,
       events,
+      status: 'idle',
+      injected: [],
+      cancels: [],
       denied: new Set(),
       ctx: {
         tools: {
           register: (t) => { tools.set(t.name, t); return () => tools.delete(t.name) },
           restrict: ({ deny = [] }) => { for (const n of deny) agent.denied.add(n); return () => { for (const n of deny) agent.denied.delete(n) } },
         },
-        systemPrompt: { context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) } },
+        systemPrompt: {
+          context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) },
+          section: (s) => { sections.set(s.name, s); return () => sections.delete(s.name) },
+        },
       },
       steered: [],
+      inject(msg) { agent.injected.push(msg) },
+      cancel(cause) {
+        agent.cancels.push(cause)
+        if (agent.status === 'running') canceled = cause
+      },
       // 假的 steer：记下来，并当作下一步输入（这里简化成排在当前这一轮之后再跑一轮）
       steer(msg) {
         agent.steered.push(msg)
@@ -50,10 +64,12 @@ export function createFakeDsh({ brain }) {
         chain = chain.then(async () => {
           turn++
           const myTurn = turn
+          agent.status = 'running'
+          canceled = null
           const text = msg.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
           const images = msg.content.filter((c) => c.type === 'image')
           const ctxText = [...contexts.values()].map((c) => c.text()).filter(Boolean).join('\n')
-          const persona = variables.get('aurabot_persona')?.() || ''
+          const persona = sections.get('deployment:persona-prefix')?.text?.() ?? variables.get('aurabot_persona')?.({ agent }) ?? ''
           const calls = []
           const callTool = async (name, args) => {
             const t = tools.get(name)
@@ -62,7 +78,15 @@ export function createFakeDsh({ brain }) {
             calls.push({ name, args, result })
             return result
           }
-          const reply = await brain({ preset, text, images, ctxText, persona, callTool, toolNames: [...tools.keys()] })
+          const reply = await brain({ preset, text, images, ctxText, persona, callTool, toolNames: [...tools.keys()], agent })
+          agent.status = 'idle'
+          if (canceled) {
+            turns.push({ sessionId, preset, userText: text, images: images.length, reply, toolCalls: calls, ctxText, aborted: true })
+            emit('session/event', session, { type: 'assistant/message', data: { turn: myTurn, interrupted: true, message: { content: [{ type: 'text', text: reply }] } } })
+            emit('session/event', session, { type: 'turn/end', data: { turn: myTurn, reason: { kind: 'aborted', reason: canceled } } })
+            canceled = null
+            return
+          }
           turns.push({ sessionId, preset, userText: text, images: images.length, reply, toolCalls: calls, ctxText })
           emit('session/event', session, { type: 'assistant/message', data: { turn: myTurn, message: { content: [{ type: 'text', text: reply }] } } })
           emit('session/event', session, { type: 'turn/end', data: { turn: myTurn, reason: { kind: 'completed' } } })
@@ -128,6 +152,7 @@ export function createFakeDsh({ brain }) {
           return { sessionId: id, agentPreset }
         },
         async rename() { return {} },
+        async cancel({ sessionId }) { agents.get(sessionId)?.cancel({ kind: 'user' }, { keepInbox: true }) },
         async resolveAgent(id) {
           const a = agents.get(id)
           return a ? { agent: a } : { error: { code: 'session/not-found', message: 'not found' } }

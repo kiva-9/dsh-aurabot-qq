@@ -109,6 +109,32 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 2,
+    name: '发送记录（outbox）：每一段单独记状态和 QQ 回执',
+    up: `
+      CREATE TABLE outbox (
+        id TEXT PRIMARY KEY,
+        batch_id TEXT NOT NULL,             -- 同一次回复的几段
+        seq INTEGER NOT NULL,               -- 段在这次回复里的顺序
+        chat_id TEXT NOT NULL,
+        request_id TEXT,
+        epoch INTEGER NOT NULL,             -- 生成时的会话代次；代次变了就不发
+        kind TEXT NOT NULL,                 -- text / voice / sticker / image / poke / other
+        payload_json TEXT NOT NULL,         -- { message: OneBot 消息段, note, delayMs }
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'sending', 'delivered', 'failed', 'unknown', 'canceled', 'skipped')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        platform_msg_id TEXT,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (batch_id, seq)
+      );
+      CREATE INDEX outbox_state ON outbox(state, created_at);
+      CREATE INDEX outbox_chat ON outbox(chat_id, created_at);
+    `,
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1).version

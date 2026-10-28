@@ -19,6 +19,7 @@ import { mimeOf } from './inbound.js'
 import { redact } from '../core/redact.js'
 import { defaultModel, pickReasoningEffort, canSeeImages } from '../core/llm.js'
 import { resolveChatModel } from './chat-model.js'
+import { probeAgent } from '../runtime/host-contract.js'
 
 // QQ 会话的工作区目录，第一次收到消息时自动创建。老安装沿用 C:\Aurabot\qq-chats；新安装放在用户目录下（不用往 C 盘根目录写）
 const LEGACY_WORKSPACE = 'C:\\Aurabot\\qq-chats'
@@ -71,6 +72,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   let lastChatAt = 0
   let lastOwnerChatAt = 0
   let lastBotToOwner = { at: 0, text: '' } // 她在主人私聊里最后说的话
+  let agentCaps = null // 第一个会话探出来的会话级能力（宿主契约检查）
 
   function bump(k) {
     const d = new Date().toDateString()
@@ -203,6 +205,10 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
     }
     sessionToChat.set(sessionKey(sid), chat.chatId)
+    if (!agentCaps) {
+      agentCaps = probeAgent(agent)
+      if (agentCaps.missing.length) log.info('这个版本的 DSH 缺少：' + agentCaps.missing.map((m) => m.what).join('、'))
+    }
     mount(agent, chat, level)
     return { agent, sessionId: sid, level }
   }
@@ -1191,6 +1197,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     get lastOwnerChatAt() { return lastOwnerChatAt },
     get lastBotToOwner() { return lastBotToOwner },
     get selfId() { return selfId },
+    agentCaps: () => agentCaps,
     groupNames,
   }
 }

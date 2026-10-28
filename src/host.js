@@ -32,6 +32,7 @@ import { createBridge } from './core/bridge.js'
 import { BUILTINS } from './modules/index.js'
 import { createStorage } from './storage/index.js'
 import { preflight, backupLegacy } from './migrate/legacy.js'
+import { probeHost } from './runtime/host-contract.js'
 
 export const name = 'aurabot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
@@ -394,6 +395,7 @@ export function apply(ctx) {
       personas: listPersonas(),
       modules: mods.status(),
       storage: storage ? { ok: true, ...storage.info() } : { ok: false, message: storageError },
+      host: { ...probeHost(ctx), agent: hub.agentCaps() },
       bridge: { dshTools: cfg.bridge.dshTools, http: cfg.bridge.http, hasToken: Boolean(cfg.bridge.token), tools: bridge.deniedTools(), toolsService: Boolean(ctx.get?.('tools')) },
     }
   }

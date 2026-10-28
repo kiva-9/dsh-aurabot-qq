@@ -4,13 +4,22 @@
 const RECONNECT_MIN = 2000
 const RECONNECT_MAX = 30000
 
+/**
+ * outcome 说明请求到底有没有到网关（发消息时决定能不能重发）：
+ *   rejected 网关回了失败 / not_sent 根本没发出去（没连上、连接被拒）/ unknown 发出去了但没等到回应（超时、中途断线），可能已经送达
+ */
 export class OneBotError extends Error {
-  constructor(action, data) {
+  constructor(action, data, outcome = 'rejected') {
     super(`${action} 失败：${data?.message || data?.wording || data?.retcode || '未知错误'}`)
     this.action = action
     this.data = data
+    this.outcome = outcome
   }
 }
+
+// 这些网络错误说明请求没到对方，可以换条路再试
+const NOT_SENT_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH'])
+const notSent = (error) => NOT_SENT_CODES.has(error?.cause?.code || error?.code)
 
 /**
  * @param {object} o
@@ -50,8 +59,10 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
         throw new OneBotError(action, j)
       } catch (error) {
         if (error instanceof OneBotError) throw error
+        // 超时、读响应时断线：请求可能已经被执行了，不能换 WS 再发一遍（发消息会重复）
+        if (!notSent(error)) throw new OneBotError(action, { message: error.name === 'AbortError' ? '超时' : error.message }, 'unknown')
         if (ws && ws.readyState === 1) return callWs(action, params, timeoutMs)
-        throw new OneBotError(action, { message: error.name === 'AbortError' ? '超时' : error.message })
+        throw new OneBotError(action, { message: error.message }, 'not_sent')
       } finally {
         clearTimeout(t)
       }
@@ -60,12 +71,12 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
   }
 
   function callWs(action, params, timeoutMs) {
-    if (!ws || ws.readyState !== 1) return Promise.reject(new OneBotError(action, { message: '没连上 QQ 网关' }))
+    if (!ws || ws.readyState !== 1) return Promise.reject(new OneBotError(action, { message: '没连上 QQ 网关' }, 'not_sent'))
     const echo = `ab-${Date.now()}-${++echoSeq}`
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => {
         pending.delete(echo)
-        reject(new OneBotError(action, { message: '超时' }))
+        reject(new OneBotError(action, { message: '超时' }, 'unknown'))
       }, timeoutMs)
       pending.set(echo, { resolve, reject, t, action })
       ws.send(JSON.stringify({ action, params, echo }))
@@ -116,7 +127,7 @@ export function createOneBotClient({ endpoint, onEvent, onState, log }) {
       if (ws === sock) ws = null
       for (const [k, p] of pending) {
         clearTimeout(p.t)
-        p.reject(new OneBotError(p.action, { message: '连接断开' }))
+        p.reject(new OneBotError(p.action, { message: '连接断开' }, 'unknown'))
         pending.delete(k)
       }
       if (!stopped) {

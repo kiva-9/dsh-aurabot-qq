@@ -367,6 +367,8 @@ test('面板接口：概览、人格切换', async () => {
   assert.equal(s.config.snowluma.httpTokenSet, true)
   assert.equal(s.storage.ok, true, s.storage.message)
   assert.equal(s.storage.version, s.storage.latest, '主库升到了最新结构')
+  assert.equal(s.host.ok, true, JSON.stringify(s.host.missing))
+  assert.equal(s.host.agent.caps['agent.cancel'], true, '会话能力探过了')
   const p = (await fake.call('/personas')).json()
   assert.ok(p.list.some((x) => x.id === 'dafeiyu'))
   const saved = (await fake.call('/persona/save', { id: 'test2', name: '测试', body: '你是测试人格小蓝。' })).json()
