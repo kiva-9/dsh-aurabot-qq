@@ -81,6 +81,8 @@ test/                  单元测试 + 端到端测试（假 DSH 宿主 + 模拟 
 
 ## 测试
 
+开发环境初始化、测试命令和 fork 的 Git 工作流见 [开发说明](docs/DEVELOPMENT.md)。
+
 ```
 npm test
 ```
