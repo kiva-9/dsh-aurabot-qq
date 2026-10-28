@@ -1127,6 +1127,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             cur && ping[cur] ? h('span', { className: 'ab-muted ab-small' }, ping[cur]) : null),
         ),
         h(ChatModels, { draft, setDraft, list }),
+        h(RoleModels, { draft, setDraft, list }),
         h(Card, { title: '可用的模型', desc: '点「测速」会真的问一次模型（花一点点额度），看它回一句话要多久。' },
           list === null ? h(Empty, { icon: '⏳', text: '加载中…' }) : list.length === 0 ? h(Empty, { text: 'DSH 没有列出模型' }) :
             h('table', { className: 'ab-table' }, h('tbody', null, list.map((m) => h('tr', { key: key(m) },
@@ -1135,6 +1136,31 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h('td', { style: { textAlign: 'right' } }, h(Btn, { small: true, kind: 'ghost', onClick: () => test(m) }, '测速'), h(Btn, { small: true, kind: 'ghost', onClick: () => { setDraft(setPath(setPath(draft, 'model.provider', m.provider), 'model.model', m.model)); toast('选好了，记得保存') } }, '用这个')))))),
         ),
       )
+    }
+
+    const ROLES = [
+      { id: 'replyer', label: '回复改写', hint: '不选 = 不改写，聊天会话直接写最终回复（最快）。选了会多一次模型调用，按人设的说话方式改措辞。', inherit: '不改写' },
+      { id: 'vision', label: '看图起名 / 识图', hint: '给表情包起名字、描述图片。必须是能看图的模型。' },
+      { id: 'memory', label: '整理记忆', hint: '从聊天里提炼长期记忆、整理人物资料。' },
+      { id: 'learning', label: '学说话方式', hint: '回顾相处经验、学群里的说话方式。' },
+      { id: 'judge', label: '判断心情', hint: '聊完一轮判断心情变化（「心情与记忆」里打开了才用）。' },
+    ]
+    /** 各个后台角色用哪个模型；留空跟随上面的聊天模型。 */
+    function RoleModels({ draft, setDraft, list }) {
+      const key = (m) => m.provider + '::' + m.model
+      return h(Card, { title: '各项工作用哪个模型', desc: '后台的活不一定要用聊天那个模型：便宜快的模型干杂活，能看图的模型识图。不选就跟着上面的聊天模型。' },
+        ROLES.map((ro) => {
+          const r = (draft.roles || {})[ro.id] || {}
+          const cur = r.provider && r.model ? r.provider + '::' + r.model : ''
+          const m = cur && list ? list.find((x) => key(x) === cur) : null
+          const warn = ro.id === 'vision' && m && m.vision === false ? '（DSH 说这个模型看不了图）' : ''
+          return h(Row, { key: ro.id, label: ro.label, hint: ro.hint + warn },
+            h(Select, {
+              value: cur, width: 280,
+              options: [{ value: '', label: ro.inherit || '跟随聊天模型' }].concat((list || []).map((x) => ({ value: key(x), label: x.name, desc: x.provider + (x.vision === true ? ' · 能看图' : ''), group: x.provider }))),
+              onChange: (v) => { const [p, ...mm] = v.split('::'); setDraft(setPath(draft, 'roles.' + ro.id, v ? { provider: p, model: mm.join('::'), reasoningEffort: '' } : { provider: '', model: '', reasoningEffort: '' })) },
+            }))
+        }))
     }
 
     function Voice({ st, draft, setDraft, toast, reload }) {
@@ -2108,7 +2134,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         stickers: Stickers, imagegen: ImageGen, speakup: SpeakUp, mood: Mood, song: Song, bili: Bili, local: LocalApi, modules: Modules, logs: Logs,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
-      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge'], model: ['model', 'chatModels'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], local: ['local'] }
+      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge'], model: ['model', 'chatModels', 'roles'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], local: ['local'] }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }

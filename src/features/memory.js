@@ -213,6 +213,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     const out = []
     for (const part of chunks) {
       const r = await askModel(dsh, {
+        role: 'memory',
         cfg: getConfig(),
         system: '你帮一个叫「大肥鱼」的聊天角色从旧档案（设定、聊天笔记、以前的记忆文件）里挑出值得长期记住的事：别人的名字/称呼、喜好、身份、约定、重要经历、和她的关系。不要记她自己的人设和外貌（那些在人格里），不要记无关的说明文字。每条一句话、主语写清楚。只输出 JSON 数组，例如 [{"text":"小明喜欢吃辣","about":"小明","importance":0.6}]。',
         text: part,
@@ -381,6 +382,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     const name = mine.filter((m) => m.aboutName).at(-1)?.aboutName || ''
     const old = profileOf(qq)?.text || ''
     const out = await askModel(dsh, {
+      role: 'memory',
       cfg,
       system: '你是「大肥鱼」。根据你记得的关于一个人的事，写一张给自己看的人物小档案：TA 是谁、怎么称呼、和你什么关系、性格和喜好、最近在忙什么。只写记忆里明确有的，不要推测性格、不要编，也不要写「应该」「可能」这种猜的话；旧档案和新记忆矛盾时以新记忆为准。用第三人称，一段话，100 字以内，不要标题和列表。',
       text: `${String(qq) === String(cfg.ownerQQ) ? `这是你的${cfg.ownerName || '主人'}。\n` : ''}旧档案：${old || '（还没有）'}\n\n记得的事（越往下越新）：\n${mine.slice(-40).map((m) => `- [${whenText(m.at)}] ${m.text}`).join('\n')}`,
@@ -431,6 +433,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     const oldStyle = styleOf(key)
     const who = chat.kind === 'group' ? '这个群' : '对方'
     const out = await askModel(dsh, {
+      role: 'learning',
       cfg: getConfig(),
       system: '你是「大肥鱼」，在回顾自己和' + who + '的相处。输出一个 JSON 对象 {"insights":[...],"style":[...]}。\n'
         + 'insights：「怎么相处更好」的经验。概括性的、可复用的相处之道（比如「他累的时候不想多聊，简单安慰就好」「喜欢被吐槽，不喜欢太正经」），不要记具体事件和事实细节；和已有经验重复的合并，过时或被证伪的删掉，不超过 8 条，每条不超过 30 字。\n'
@@ -501,6 +504,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     const related = relatedTo(chatId, transcript)
     const known = new Map(related.map((m) => [m.id, m]))
     const out = await askModel(dsh, {
+      role: 'memory',
       cfg,
       system: `你帮一个叫「大肥鱼」的聊天角色整理长期记忆。下面是一段聊天，说话人后面括号里是 QQ 号。挑出以后值得记住的事实：别人的名字/称呼、喜好、讨厌的东西、身份、近况和重要经历、约定、你们之间的关系变化。不要记寒暄、日常琐事、一次性的问答；不要记大肥鱼自己的人设和喜好（她本来就知道），只记关于别人、以及你们之间的事。每条一句话，主语写清楚是谁。QQ 号是 ${cfg.ownerQQ} 的人是她的${cfg.ownerName || '主人'}。` +
         (related.length ? '\n每条新事实先和「已经记得的事」比一比：全新的写 "op":"add"；是对某条旧记忆的补充或更准确的说法，写 "op":"update"、"id" 填那条的编号、"text" 写合并后的完整说法；和某条旧记忆矛盾、说明那条已经过时（比如以前喜欢现在不喜欢了、换了工作、搬家了、分手了），写 "op":"outdated"、"id" 填旧的编号、"text" 写现在的新事实。拿不准是不是矛盾就当 add；已经记得、没有新信息的不要输出。' : '') +
@@ -622,6 +626,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     if (pool.length < 3) return
     try {
       const out = await askModel(dsh, {
+        role: 'learning',
         cfg: getConfig(),
         system: '你是「大肥鱼」。下面是你和不同的人聊天时注意到的说话习惯，以及你自己已经养成的说法。挑出你和大家聊久了、自然会被带上的说话方式（口头禅、语气词、发消息的节奏），保持你原本的性格，不超过 6 条，每条不超过 20 字。只输出 JSON 数组。',
         text: `已经养成的：\n${styleOf('self').map((x) => '- ' + x).join('\n') || '（还没有）'}\n\n大家的说话习惯：\n${pool.map((x) => '- ' + x).join('\n')}`,

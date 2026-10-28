@@ -2,6 +2,16 @@
 
 import { randomUUID } from 'node:crypto'
 
+export const MODEL_ROLES = ['replyer', 'vision', 'memory', 'learning', 'judge']
+
+/** 某个角色用的模型：设置里给这个角色单独选了就用它，否则用全局模型（再不行用 DSH 默认）。 */
+export function roleModel(dsh, cfg, role) {
+  const r = role && cfg?.roles?.[role]
+  if (r && r.provider && r.model) return { provider: r.provider, model: r.model, reasoningEffort: r.reasoningEffort || undefined, role, own: true }
+  const t = defaultModel(dsh, cfg)
+  return t ? { ...t, role: role || '', own: false } : null
+}
+
 export function defaultModel(dsh, cfg) {
   if (cfg?.model?.provider && cfg?.model?.model) return { provider: cfg.model.provider, model: cfg.model.model }
   try {
@@ -137,14 +147,19 @@ async function runStream (llm, params) {
 
 /**
  * @param {object} dsh 宿主 ctx
- * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object}} o
+ * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object, role?:string}} o
+ *   role：用哪个角色的模型（vision / memory / learning / judge / replyer），没设就用全局模型
  * @returns {Promise<string>}
  */
 export async function askModel (dsh, o) {
   const llm = dsh.llm || dsh.get('llm')
   if (!llm || typeof llm.stream !== 'function') throw new Error('宿主没有 llm 服务')
-  const t = defaultModel(dsh, o.cfg)
+  const t = roleModel(dsh, o.cfg, o.role)
   if (!t) throw new Error('拿不到默认模型')
+  // 选中的模型明确看不了图：不能悄悄把图丢掉只发文字（结果会是胡编），直接说清楚
+  if (o.images?.length && t.own && (await modelVision(dsh, t.provider, t.model)) === false) {
+    throw Object.assign(new Error(`「${o.role}」用的模型 ${t.model} 看不了图，换一个能看图的模型`), { code: 'NO_VISION' })
+  }
   let content = [{ type: 'text', text: o.text }]
   for (const img of o.images || []) content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: 'aurabot-image' })
   // 图片要先交给 DSH 的附件服务登记成附件块，模型适配层只认附件
@@ -162,7 +177,7 @@ export async function askModel (dsh, o) {
     maxTokens: o.maxTokens || 600,
     temperature: o.temperature ?? 0.3,
   }
-  let effort = await pickReasoningEffort(dsh, t.provider, t.model, o.reasoningEffort === undefined ? 'low' : o.reasoningEffort)
+  let effort = await pickReasoningEffort(dsh, t.provider, t.model, o.reasoningEffort === undefined ? (t.reasoningEffort || 'low') : o.reasoningEffort)
   for (let attempt = 0; ; attempt++) {
     try {
       return await runStream(llm, effort ? { ...base, reasoningEffort: effort } : base)

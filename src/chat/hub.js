@@ -71,7 +71,7 @@ function withMessageRef(tool) {
     },
   }
 }
-export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels }) {
+export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, replyer, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels }) {
   // 心情对行为的影响（表情 / 语音概率、回复快慢、插话积极程度），没接就是 1
   const mood = () => (typeof moodEffects === 'function' ? moodEffects() : null) || { sticker: 1, voice: 1, delay: 1, chatty: 1 }
   const mapFile = () => dataDir('sessions.json')
@@ -546,6 +546,12 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, sti
       } catch (error) {
         log.warn('扩展模块改写回复出错：', error.message)
       }
+    }
+    // Replyer：面板里给「回复改写」选了模型时，按人设的说话方式再改一遍措辞（不碰内容和标记，没通过检查就用原文）
+    if (typeof replyer === 'function' && !opts.simulate) {
+      const rw = await replyer(text, { chatId, persona: opts.persona })
+      if (rw?.rewritten) text = rw.text
+      else if (rw?.reason && rw.reason !== '没开') log.debug(`${chatId}：回复没改写（${rw.reason}）`)
     }
     const r = parseReply(text)
     if (r.silent) {

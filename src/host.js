@@ -30,6 +30,7 @@ import { rulesText } from './persona/personas.js'
 import { createPersonaService } from './persona/service.js'
 import { compilePersona } from './persona/compiler.js'
 import { normalizeLayers } from './persona/store.js'
+import { rewriteReply } from './chat/replyer.js'
 import { createModules, API_VERSION } from './core/modules.js'
 import { createBridge } from './core/bridge.js'
 import { BUILTINS } from './modules/index.js'
@@ -233,6 +234,10 @@ export function apply(ctx) {
     onebot,
     storage,
     personaOf: (chat) => personas.snapshotFor(chat.chatId),
+    replyer: async (text, { persona }) => {
+      if (!cfg.roles.replyer.model) return { text, rewritten: false, reason: '没开' }
+      return rewriteReply(text, { persona, ask: (o) => askModel(ctx, { cfg: getConfig(), ...o }) })
+    },
     stickers,
     tts,
     buildTools: (where) => mods.buildTools(where),
