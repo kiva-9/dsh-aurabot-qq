@@ -30,6 +30,8 @@ import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaTe
 import { createModules, API_VERSION } from './core/modules.js'
 import { createBridge } from './core/bridge.js'
 import { BUILTINS } from './modules/index.js'
+import { createStorage } from './storage/index.js'
+import { preflight, backupLegacy } from './migrate/legacy.js'
 
 export const name = 'aurabot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
@@ -60,6 +62,25 @@ export function apply(ctx) {
   }
   secrets()
   seedPersonas()
+
+  // ---------- 主库 ----------
+  // 打不开（比如库比插件新）时不崩：聊天照旧走老路径，面板「概览」显示原因
+  let storage = null
+  let storageError = ''
+  try {
+    storage = createStorage({ file: dataDir('aurabot.db'), filesDir: dataDir('assets'), log: logger.child('storage') })
+    // 第一次用上主库：先给旧数据做预检和备份（只做一次，原文件不动）
+    if (!storage.meta.get('legacy.backup')) {
+      const report = preflight(dataDir())
+      const backup = report.items.length ? backupLegacy(dataDir(), report) : null
+      storage.meta.set('legacy.preflight', report)
+      storage.meta.set('legacy.backup', backup ? { dir: backup.dir, copied: backup.copied, skipped: backup.skipped } : { dir: '', copied: [], skipped: [] })
+      if (backup) log.info(`旧数据已备份到 ${backup.dir}（跳过：${backup.skipped.join('、') || '无'}）`)
+    }
+  } catch (error) {
+    storageError = error.message
+    log.error('主库打不开：', error.message)
+  }
 
   // ---------- 人格与规则：通过提示词变量注入到 Aurabot 的两个 preset ----------
   const variable = (n, fn) => ctx.effect(() => ctx.systemPrompt.variable(n, fn), `aurabot: 变量 ${n}`)
@@ -270,7 +291,7 @@ export function apply(ctx) {
 
   // ---------- 模块 ----------
   const core = {
-    hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null,
+    hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null, storage,
     root: ROOT,
     ask: (opts) => askModel(ctx, { cfg: getConfig(), ...opts }),
     listModels,
@@ -327,6 +348,7 @@ export function apply(ctx) {
     mods.dispose()
     onebot.stop()
     snowluma.dispose()
+    storage?.close()
   }, 'aurabot: 收尾')
 
   // ---------- 面板接口 ----------
@@ -371,6 +393,7 @@ export function apply(ctx) {
       workspaceDir: WORKSPACE_DIR,
       personas: listPersonas(),
       modules: mods.status(),
+      storage: storage ? { ok: true, ...storage.info() } : { ok: false, message: storageError },
       bridge: { dshTools: cfg.bridge.dshTools, http: cfg.bridge.http, hasToken: Boolean(cfg.bridge.token), tools: bridge.deniedTools(), toolsService: Boolean(ctx.get?.('tools')) },
     }
   }
