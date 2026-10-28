@@ -48,16 +48,21 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     if ((RANK[entry.mode] ?? 3) > (RANK[b.mode] ?? 3)) b.mode = entry.mode
     // 纯表情、只当上下文的消息不重新计停顿
     const extendsQuiet = !(entry.stickerOnly && b.entries.length > 1) && entry.mode !== 'context'
-    const s = settings(chat)
+    const s = effective(chat)
     if (extendsQuiet) b.quietAt = now + (entry.mentioned ? Math.min(s.waitMs, s.mentionWaitMs) : s.waitMs)
     if (entry.mentioned) b.mentioned = true
     arm(b, s)
     return true
   }
 
-  function arm(b, s = settings(b.chat)) {
+  /** 关掉合并 = 不等停顿、不设上限，但图片 / 语音没处理完时照样等一会儿（不能交一轮没图的「编辑这张图」）。 */
+  function effective(chat) {
+    const s = settings(chat)
+    return s.enabled ? s : { ...s, waitMs: 0, maxMs: 0, mentionWaitMs: 0 }
+  }
+
+  function arm(b, s = effective(b.chat)) {
     timers.clearTimeout(b.timer)
-    if (!s.enabled) return mature(b.chat.chatId)
     const now = timers.now()
     const media = !b.entries.every((e) => mediaReady(e))
     const cap = b.firstAt + s.maxMs + (media ? s.mediaExtraMs : 0)
@@ -68,7 +73,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
   function onTimer(chatId) {
     const b = open.get(chatId)
     if (!b) return
-    const s = settings(b.chat)
+    const s = effective(b.chat)
     const now = timers.now()
     const media = !b.entries.every((e) => mediaReady(e))
     const hardCap = b.firstAt + s.maxMs + s.mediaExtraMs

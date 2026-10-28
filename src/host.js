@@ -79,8 +79,10 @@ export function apply(ctx) {
       if (backup) log.info(`旧数据已备份到 ${backup.dir}（跳过：${backup.skipped.join('、') || '无'}）`)
     }
   } catch (error) {
+    // 退回内存库：这次运行照常收发，只是重启后不留记录；面板「概览」显示原因
     storageError = error.message
-    log.error('主库打不开：', error.message)
+    log.error('主库打不开，这次先用内存库（重启后不保留记录）：', error.message)
+    storage = createStorage({ file: ':memory:', filesDir: dataDir('assets'), log: logger.child('storage') })
   }
 
   // ---------- 人格与规则：通过提示词变量注入到 Aurabot 的两个 preset ----------
@@ -114,6 +116,7 @@ export function apply(ctx) {
   let loginOk = false
   let wrongAccount = ''
   let hub = null
+  let outboxRecovered = false
   async function checkLogin() {
     let uin = ''
     try {
@@ -131,6 +134,11 @@ export function apply(ctx) {
     if (await snowluma.confirmLogin(uin)) {
       loginOk = true
       wrongAccount = ''
+      if (!outboxRecovered && hub) {
+        // 第一次核对通过：上次没发完的接着发（太旧的作废，可能已送达的不重发）
+        outboxRecovered = true
+        hub.recoverOutbox().then((r) => { if (r.stuck || r.stale || r.resumed) log.info(`上次没发完的：接着发 ${r.resumed} 批，作废 ${r.stale} 段，${r.stuck} 段不确定发没发出去`) }).catch((error) => log.warn('恢复发送记录出错：', error.message))
+      }
     } else {
       wrongAccount = uin
       onebot.stop()
@@ -210,6 +218,7 @@ export function apply(ctx) {
     getConfig,
     log: logger.child('chat'),
     onebot,
+    storage,
     stickers,
     tts,
     buildTools: (where) => mods.buildTools(where),
@@ -394,7 +403,7 @@ export function apply(ctx) {
       workspaceDir: WORKSPACE_DIR,
       personas: listPersonas(),
       modules: mods.status(),
-      storage: storage ? { ok: true, ...storage.info() } : { ok: false, message: storageError },
+      storage: { ok: !storageError, message: storageError, ...storage.info() },
       host: { ...probeHost(ctx), agent: hub.agentCaps() },
       bridge: { dshTools: cfg.bridge.dshTools, http: cfg.bridge.http, hasToken: Boolean(cfg.bridge.token), tools: bridge.deniedTools(), toolsService: Boolean(ctx.get?.('tools')) },
     }

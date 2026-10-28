@@ -150,3 +150,21 @@ export function bubbleDelay(next = '', rand = Math.random) {
   const typing = 350 + len * 110 // 大约每秒 9 个字
   return Math.round(Math.min(4500, Math.max(700, typing)) * (0.8 + rand() * 0.5))
 }
+
+/**
+ * 条数超了上限：前面的照常，多出来的文字（含语音的文字）合进最后一条，不丢尾巴；
+ * 多出来的图片保留（是内容），表情和戳一戳这种点缀丢掉。
+ */
+export function capItems(items, max) {
+  if (!Array.isArray(items) || items.length <= max) return items
+  const head = items.slice(0, Math.max(0, max - 1))
+  const tail = items.slice(Math.max(0, max - 1))
+  const words = tail.filter((i) => i.kind === 'text' || i.kind === 'voice').map((i) => i.value)
+  const out = [...head]
+  if (words.length) {
+    const first = tail.find((i) => i.kind === 'text' || i.kind === 'voice')
+    out.push({ kind: 'text', value: words.join('\n'), ...(first.replyTo ? { replyTo: first.replyTo } : {}) })
+  }
+  for (const i of tail) if (i.kind === 'image') out.push(i)
+  return out
+}

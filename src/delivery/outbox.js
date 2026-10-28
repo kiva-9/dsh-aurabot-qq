@@ -24,7 +24,7 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
   const db = storage.db
   const inflight = new Map() // batchId → Promise（同一批不并发发两次）
 
-  /** 登记一次回复的几段。items: [{ kind, message, note, delayMs }]。返回 batchId。 */
+  /** 登记一次回复的几段。items: [{ kind, message, note, delayMs, force }]（force：总开关关着也发，主人命令的回执用）。返回 batchId。 */
   function enqueue({ chatId, requestId = null, epoch, items }) {
     if (!Array.isArray(items) || !items.length) throw new Error('没有要发的内容')
     const batchId = newId('obx')
@@ -35,7 +35,7 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
         db.run(`INSERT INTO outbox(id, batch_id, seq, chat_id, request_id, epoch, kind, payload_json, idempotency_key, created_at, updated_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         newId('out'), batchId, seq, chatId, requestId, ep, it.kind || 'other',
-        toJson({ message: it.message, note: it.note || '', delayMs: it.delayMs || 0 }), `${batchId}:${seq}`, t, t)
+        toJson({ message: it.message, note: it.note || '', delayMs: it.delayMs || 0, ...(it.force ? { force: true } : {}) }), `${batchId}:${seq}`, t, t)
       })
     })
     return batchId
@@ -56,7 +56,7 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
       setState(r.id, 'sending', { attempt: true })
       try {
         const message = await resolve(r.payload.message)
-        const res = await send(r.chatId, message, { note: r.payload.note, kind: r.kind, outboxId: r.id, requestId: r.requestId })
+        const res = await send(r.chatId, message, { note: r.payload.note, kind: r.kind, outboxId: r.id, requestId: r.requestId, force: Boolean(r.payload.force) })
         if (res === null || res === undefined) {
           setState(r.id, 'skipped')
           return 'skipped'

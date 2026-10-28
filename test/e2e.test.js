@@ -43,7 +43,9 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
   if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '画好啦' : '画不了' }
   if (text.includes('禁言')) {
-    const r = await callTool('qq_group_admin', { action: 'ban', user_id: '999', minutes: 5 })
+    // 群里混着别人说话时，写明在执行主人的哪一条（模拟模型按提示词里的编号引用）
+    const ref = Number((text.match(/\[(\d+)\] [^\n]*\(10000001\)[^\n]*禁言/) || [])[1]) || undefined
+    const r = await callTool('qq_group_admin', { action: 'ban', user_id: '999', minutes: 5, ...(text.includes('引用群友那条') ? { for_message: 1 } : ref ? { for_message: ref } : {}) })
     return r && r.ok ? '好 禁了' : '你谁啊 我只听主人的'
   }
   if (text.includes('跑个慢任务')) { await new Promise((r) => setTimeout(r, 1500)); return '慢任务跑完了' }
@@ -193,6 +195,15 @@ test('群管：群友和主人的话合并成一轮时，主人的要求照样�
   mock.push(grp('555', OWNER, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 他太吵了 把999禁言' } }], 'xiaoming'))
   await until(() => mock.sent('set_group_ban').length === n + 1)
   assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, true)
+})
+
+test('群管：混在一轮里时，不写编号、或者写的是群友那条，都不能借主人的权限', async () => {
+  const n = mock.sent('set_group_ban').length
+  mock.push(grp('555', '777', [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 把999禁言 引用群友那条' } }]))
+  mock.push(grp('555', OWNER, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 你好呀' } }], 'xiaoming'))
+  await until(() => fake.turns.at(-1)?.userText.includes('引用群友那条') && fake.turns.at(-1).toolCalls.length)
+  assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, false, '编号指向群友的消息')
+  assert.equal(mock.sent('set_group_ban').length, n)
 })
 
 test('群管：她在群里只是普通成员时，主人要求也做不了，并说明原因', async () => {
@@ -423,6 +434,30 @@ test('明确要语音但她只打了字：插件强制转成语音', async () =>
   mock.push(priv(OWNER, text('用语音说你好')))
   await until(() => sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'record'), 20000)
   assert.ok(!sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'text' && c.params.message[0].data.text === '你好呀'))
+})
+
+test('重放：网关重连后重发同一条消息（同一个 QQ 消息 ID），只处理一次；没有 ID 的同文连发两条都算', async () => {
+  const before = fake.turns.length
+  const ev = priv(OWNER, text('重放测试'))
+  mock.push(ev)
+  await sleep(100)
+  mock.push(ev)
+  await until(() => fake.turns.length > before)
+  await sleep(800)
+  assert.equal(fake.turns.length, before + 1)
+  assert.equal((fake.turns.at(-1).userText.match(/重放测试/g) || []).length, 1, '重放的那条没并进来')
+  const b2 = fake.turns.length
+  mock.push(priv(OWNER, text('哈哈同文'), { message_id: 0 }))
+  await sleep(50)
+  mock.push(priv(OWNER, text('哈哈同文'), { message_id: 0 }))
+  await until(() => fake.turns.length > b2)
+  assert.equal((fake.turns.at(-1).userText.match(/哈哈同文/g) || []).length, 2, '没有可靠 ID 的不按内容去重')
+})
+
+test('发送记录：她回的每一段都落库并记下 QQ 消息 ID', async () => {
+  const s = (await fake.call('/state')).json()
+  assert.ok(s.storage.counts.messages > 0, '收到的消息进了主库')
+  assert.ok(s.storage.counts.requests > 0, '每次交给她都登记了请求')
 })
 
 test('连发合并：一口气发两句，她只回一次', async () => {

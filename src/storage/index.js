@@ -128,7 +128,7 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
         id, messageId ?? null, chatId, String(authorId), segIndex, kind, toJson(remote), toJson(scope), t, t)
       return id
     },
-    ready: (id, assetId) => db.run("UPDATE asset_occurrences SET state = 'ready', asset_id = ?, error = NULL, updated_at = ? WHERE id = ?", assetId, now(), id).changes,
+    ready: (id, assetId, analysis) => db.run("UPDATE asset_occurrences SET state = 'ready', asset_id = ?, error = NULL, analysis_json = COALESCE(?, analysis_json), updated_at = ? WHERE id = ?", assetId ?? null, analysis ? toJson(analysis) : null, now(), id).changes,
     failed: (id, error, state = 'failed') => db.run('UPDATE asset_occurrences SET state = ?, error = ?, updated_at = ? WHERE id = ?', state, String(error || '').slice(0, 500), now(), id).changes,
     get: (id) => rowOccurrence(db.get('SELECT * FROM asset_occurrences WHERE id = ?', id)),
     ofMessage: (messageId) => db.all('SELECT * FROM asset_occurrences WHERE message_id = ? ORDER BY seg_index', messageId).map(rowOccurrence),
@@ -210,7 +210,7 @@ function rowOccurrence(r) {
   if (!r) return null
   return {
     id: r.id, messageId: r.message_id, chatId: r.chat_id, authorId: r.author_id, segIndex: Number(r.seg_index), kind: r.kind,
-    assetId: r.asset_id, remote: fromJson(r.remote_json, {}), state: r.state, error: r.error, scope: fromJson(r.scope_json, null),
+    assetId: r.asset_id, remote: fromJson(r.remote_json, {}), state: r.state, error: r.error, scope: fromJson(r.scope_json, null), analysis: fromJson(r.analysis_json, {}),
     createdAt: r.created_at, updatedAt: r.updated_at,
   }
 }

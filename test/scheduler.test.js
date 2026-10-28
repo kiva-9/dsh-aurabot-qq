@@ -154,8 +154,22 @@ test('关掉合并：每条马上交；交接失败也会放开', async () => {
   let n = 0
   const sch = createScheduler({ timers, settings: () => ({ ...S, enabled: false }), dispatch: async () => { n++; throw new Error('boom') } })
   sch.add(pm, msg('a'))
+  timers.advance(0)
   await flushMicro()
   await flushMicro()
   assert.equal(n, 1)
   assert.equal(sch.isBusy(pm.chatId), false, '失败后不卡住')
+})
+
+test('关掉合并时图片没下载好也照样等一会儿', async () => {
+  const media = new Set(['img'])
+  const { timers, runs, sch } = setup({ settings: { ...S, enabled: false }, media })
+  sch.add(pm, msg('img'))
+  timers.advance(0)
+  await flushMicro()
+  assert.equal(runs.length, 0, '图片没好不交')
+  media.delete('img')
+  sch.mediaSettled(pm.chatId)
+  await flushMicro()
+  assert.equal(runs.length, 1)
 })

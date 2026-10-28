@@ -310,3 +310,23 @@ test('#6 头像来源：只收网址或「刚才那张」，本地路径不收',
   assert.equal(avatarSource('file:///etc/passwd').ok, false)
   assert.equal(avatarSource('base64://AAAA').ok, false)
 })
+
+test('条数超限：多出来的文字合进最后一条不丢尾巴，图片保留，表情丢掉', async () => {
+  const { capItems } = await import('../src/chat/reply.js')
+  const items = [{ kind: 'text', value: '一' }, { kind: 'text', value: '二' }, { kind: 'text', value: '三', replyTo: 2 }, { kind: 'voice', value: '四' }, { kind: 'sticker', value: 'x' }, { kind: 'image', value: 'http://a/b.png' }]
+  const out = capItems(items, 3)
+  assert.deepEqual(out.map((i) => i.kind), ['text', 'text', 'text', 'image'])
+  assert.equal(out[2].value, '三\n四')
+  assert.equal(out[2].replyTo, 2)
+  assert.equal(capItems(items.slice(0, 2), 3).length, 2, '没超就原样')
+})
+
+test('文件类型：WAV 不会被认成 WebP；音频格式能认出来', async () => {
+  const { mimeOf } = await import('../src/chat/inbound.js')
+  const riff = (kind) => Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from(kind), Buffer.alloc(8)])
+  assert.equal(mimeOf(riff('WAVE')), 'audio/wav')
+  assert.equal(mimeOf(riff('WEBP')), 'image/webp')
+  assert.equal(mimeOf(Buffer.concat([Buffer.from('#!SILK_V3'), Buffer.alloc(8)])), 'audio/silk')
+  assert.equal(mimeOf(Buffer.concat([Buffer.from([0x02]), Buffer.from('#!SILK_V3'), Buffer.alloc(8)])), 'audio/silk', 'QQ 的 silk 前面多一个字节')
+  assert.equal(mimeOf(Buffer.concat([Buffer.from('ID3'), Buffer.alloc(12)])), 'audio/mpeg')
+})

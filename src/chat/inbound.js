@@ -26,7 +26,9 @@ export function isStickerSegment(seg) {
  *   kind: 'private'|'group', chatId: string, userId: string, groupId: string,
  *   nickname: string, role: string, messageId: string, text: string,
  *   mentioned: boolean, replyId: string, images: object[], stickers: object[], records: object[],
+ *   media: {seg: object, kind: 'image'|'sticker'|'record', index: number}[], platformTime: number|null,
  * }}
+ * media 按原消息里的顺序列出图片 / 表情 / 语音，index 是在原消息段里的位置（登记出现记录用）。
  */
 export function parseMessageEvent(event, selfId) {
   const self = String(selfId || event.self_id || '')
@@ -41,7 +43,10 @@ export function parseMessageEvent(event, selfId) {
   const stickers = []
   const records = []
   const forwards = [] // 合并转发的 id
-  for (const seg of segmentsOf(event)) {
+  const media = []
+  const segs = segmentsOf(event)
+  for (let index = 0; index < segs.length; index++) {
+    const seg = segs[index]
     const d = seg.data || {}
     switch (seg.type) {
       case 'text':
@@ -61,14 +66,17 @@ export function parseMessageEvent(event, selfId) {
       case 'mface':
         if (isStickerSegment(seg)) {
           stickers.push(seg)
+          media.push({ seg, kind: 'sticker', index })
           texts.push(d.summary ? `${d.summary}` : '[表情包]')
         } else {
           images.push(seg)
+          media.push({ seg, kind: 'image', index })
           texts.push('[图片]')
         }
         break
       case 'record':
         records.push(seg)
+        media.push({ seg, kind: 'record', index })
         break
       case 'video':
         texts.push('[视频]')
@@ -112,6 +120,8 @@ export function parseMessageEvent(event, selfId) {
     stickers,
     records,
     forwards,
+    media,
+    platformTime: Number(event.time) > 0 ? Number(event.time) * 1000 : null,
   }
 }
 
@@ -177,7 +187,15 @@ export function mimeOf(buf) {
   if (!buf || buf.length < 12) return 'application/octet-stream'
   if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png'
   if (buf[0] === 0x47 && buf[1] === 0x49) return 'image/gif'
-  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57) return 'image/webp'
+  const tag = (a, b) => buf.toString('latin1', a, b)
+  // RIFF 容器：WEBP 是图，WAVE 是音频（都在第 8 字节是 W，不能只看一个字节）
+  if (tag(0, 4) === 'RIFF' && tag(8, 12) === 'WEBP') return 'image/webp'
+  if (tag(0, 4) === 'RIFF' && tag(8, 12) === 'WAVE') return 'audio/wav'
   if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg'
+  if (buf[0] === 0x42 && buf[1] === 0x4d) return 'image/bmp'
+  if (tag(0, 3) === 'ID3' || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) return 'audio/mpeg'
+  if (tag(0, 4) === 'OggS') return 'audio/ogg'
+  if (tag(1, 7) === '#!SILK' || tag(0, 6) === '#!SILK') return 'audio/silk'
+  if (tag(0, 5) === '#!AMR') return 'audio/amr'
   return 'application/octet-stream'
 }

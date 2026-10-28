@@ -135,6 +135,13 @@ export const MIGRATIONS = [
       CREATE INDEX outbox_chat ON outbox(chat_id, created_at);
     `,
   },
+  {
+    version: 3,
+    name: '出现记录的识别结果（语音转写等）',
+    up: `
+      ALTER TABLE asset_occurrences ADD COLUMN analysis_json TEXT NOT NULL DEFAULT '{}';
+    `,
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1).version
