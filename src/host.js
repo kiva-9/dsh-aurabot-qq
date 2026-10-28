@@ -26,7 +26,8 @@ import { mimeOf } from './chat/inbound.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { createUpdateChecker, changelogSection } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
-import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaText, rulesText, seedPersonas } from './persona/personas.js'
+import { rulesText } from './persona/personas.js'
+import { createPersonaService } from './persona/service.js'
 import { createModules, API_VERSION } from './core/modules.js'
 import { createBridge } from './core/bridge.js'
 import { BUILTINS } from './modules/index.js'
@@ -62,7 +63,6 @@ export function apply(ctx) {
     return cfg
   }
   secrets()
-  seedPersonas()
 
   // ---------- 主库 ----------
   // 打不开（比如库比插件新）时不崩：聊天照旧走老路径，面板「概览」显示原因
@@ -85,12 +85,23 @@ export function apply(ctx) {
     storage = createStorage({ file: ':memory:', filesDir: dataDir('assets'), log: logger.child('storage') })
   }
 
+  // ---------- 人设 ----------
+  // 存在主库里：草稿 / 不可变的发布版本 / 按聊天绑定。旧版 personas/*.md 第一次启动时原样导入（原文件不动）
+  const personas = createPersonaService({ storage, legacyDir: dataDir('personas'), legacyCurrent: cfg.persona.current, log: logger.child('persona') })
+  /** 某个会话这一轮用的人设：正在跑的一轮用开始时冻结的版本，否则按绑定现查。 */
+  const personaSnapshot = (agent) => {
+    const sid = agent?.id
+    if (!sid || !hub) return personas.snapshotFor('private:0')
+    return hub.turnPersona(sid) || personas.snapshotFor(hub.chatOfSession(sid))
+  }
+
   // ---------- 人格与规则：通过提示词变量注入到 Aurabot 的两个 preset ----------
   const variable = (n, fn) => ctx.effect(() => ctx.systemPrompt.variable(n, fn), `aurabot: 变量 ${n}`)
   const rulesOpts = (kind) => (mods ? { off: mods.builtinOff(), extra: mods.rules(kind) } : {})
   // 扩展模块能整段改写人格和规则（同步：提示词变量不能等）
   const rewrite = (event, text, ...args) => { const r = mods ? mods.filterSync(event, text, ...args) : text; return typeof r === 'string' ? r : r === null ? '' : text }
-  variable('aurabot_persona', () => rewrite('persona', currentPersonaText(cfg.persona.current)))
+  // 提示词变量的 provider 会拿到当前 agent：每个聊天按自己绑定的人设出正文
+  variable('aurabot_persona', (c) => rewrite('persona', personas.textOf(personaSnapshot(c?.agent))))
   variable('aurabot_rules_private', () => rewrite('rules', rulesText('private', cfg, rulesOpts('private')), 'private'))
   variable('aurabot_rules_social', () => rewrite('rules', rulesText('social', cfg, rulesOpts('social')), 'social'))
 
@@ -205,10 +216,10 @@ export function apply(ctx) {
     library: () => use('stickers')?.library?.() ?? { items: [] },
   }
   const tts = {
-    speak: async (text) => {
+    speak: async (text, profile) => {
       const v = use('voice')
       if (!v?.speak) throw new Error('语音模块关着')
-      return v.speak(text)
+      return v.speak(text, profile || {})
     },
   }
 
@@ -219,6 +230,7 @@ export function apply(ctx) {
     log: logger.child('chat'),
     onebot,
     storage,
+    personaOf: (chat) => personas.snapshotFor(chat.chatId),
     stickers,
     tts,
     buildTools: (where) => mods.buildTools(where),
@@ -307,7 +319,7 @@ export function apply(ctx) {
     listModels,
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
-    personas: { list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current) },
+    personas: { list: () => personas.compat.list(), read: (id) => personas.compat.read(id), current: () => personas.textOf(personas.snapshotFor('private:0')), service: personas },
     getConfig, setConfig,
   }
   mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
@@ -397,11 +409,11 @@ export function apply(ctx) {
       speakUp: use('speakup')?.state?.() ?? { count: 0 },
       memory: { lastConsolidate: memory?.lastConsolidate?.() ?? 0 },
       avatar: avatarInfo(),
-      voice: { edgeInstalled: use('voice')?.edgeInstalled?.() ?? false },
+      voice: { provider: cfg.voice.provider },
       song: use('song')?.status?.() ?? null,
       sessions: hub.sessions(),
       workspaceDir: WORKSPACE_DIR,
-      personas: listPersonas(),
+      personas: personas.compat.list(),
       modules: mods.status(),
       storage: { ok: !storageError, message: storageError, ...storage.info() },
       host: { ...probeHost(ctx), agent: hub.agentCaps() },
@@ -526,30 +538,58 @@ export function apply(ctx) {
     return { ok: true, message: n ? `归档了 ${n} 个会话，下一条消息起她会重新开始` : '本来就没有会话' }
   })
 
-  // 人格
-  route('/personas', async () => ({ ok: true, list: listPersonas(), current: cfg.persona.current }))
+  // 人格（旧面板接口，内部已经是带版本的人设库）
+  const syncCurrent = () => {
+    const g = personas.globalId()
+    if (g && g !== cfg.persona.current) setConfig({ ...cfg, persona: { ...cfg.persona, current: g } })
+  }
+  route('/personas', async () => ({ ok: true, list: personas.compat.list(), current: personas.globalId() }))
   route('/persona/get', async (req) => {
-    const p = readPersona(query(req).id)
+    const p = personas.compat.read(query(req).id)
     return p ? { ok: true, persona: p } : { ok: false, message: '没有这个人格' }
   })
   route('/persona/save', async (req) => {
     const b = await readBody(req)
-    const p = savePersona(b.id, b)
-    return { ok: true, persona: p, message: '人格已保存，下一轮起生效' }
+    const p = personas.compat.save(b.id, b)
+    return { ok: true, persona: p, message: `人格已保存为第 ${p.revision} 版，下一轮起生效` }
   })
   route('/persona/delete', async (req) => {
     const b = await readBody(req)
-    if (b.id === cfg.persona.current) return { ok: false, message: '正在用的人格不能删' }
-    deletePersona(b.id)
-    return { ok: true, list: listPersonas() }
+    if (b.id === personas.globalId()) return { ok: false, message: '正在用的人格不能删' }
+    personas.compat.remove(b.id)
+    return { ok: true, list: personas.compat.list() }
   })
   route('/persona/use', async (req) => {
     const b = await readBody(req)
-    if (!readPersona(b.id)) return { ok: false, message: '没有这个人格' }
-    setConfig({ ...cfg, persona: { current: b.id } })
+    if (!personas.compat.read(b.id)) return { ok: false, message: '没有这个人格' }
+    personas.compat.use(b.id)
+    syncCurrent()
     log.info(`切换人格 → ${b.id}`)
     return { ok: true, current: b.id, message: '切换好了，下一轮回复起生效' }
   })
+
+  // 人设（新接口：分层、草稿 / 发布 / 回滚、按聊天绑定）
+  const ps = personas.store
+  route('/persona/full', async (req) => ({ ok: true, persona: ps.get(query(req).id), revisions: ps.revisions(query(req).id) }))
+  route('/persona/revision', async (req) => ({ ok: true, revision: ps.revision(query(req).id, query(req).revision) }))
+  route('/persona/create', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.create({ id: b.id, name: b.name, layers: b.layers }) } })
+  route('/persona/draft', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.saveDraft(b.id, { layers: b.layers, name: b.name }, { editRevision: b.editRevision }) } })
+  route('/persona/publish', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.publish(b.id, { editRevision: b.editRevision, note: b.note }), message: '发布了，下一轮起生效' } })
+  route('/persona/discard', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.discardDraft(b.id, { editRevision: b.editRevision }) } })
+  route('/persona/rollback', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.rollback(b.id, b.revision, { editRevision: b.editRevision }) } })
+  route('/persona/duplicate', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.duplicate(b.id, b.newId, b.name) } })
+  route('/persona/archive', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.archive(b.id, { editRevision: b.editRevision }) } })
+  route('/persona/unarchive', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.unarchive(b.id) } })
+  route('/persona/bindings', async () => ({ ok: true, bindings: ps.bindings() }))
+  route('/persona/bind', async (req) => {
+    const b = await readBody(req)
+    const out = ps.bind(b.scope, b.personaId)
+    syncCurrent()
+    return { ok: true, bindings: out, message: '绑定好了，下一轮起生效（换了身份的聊天会开新会话）' }
+  })
+  route('/persona/resolve', async (req) => ({ ok: true, ...personas.snapshotFor(query(req).chatId) }))
+  route('/persona/export', async (req) => ({ ok: true, card: ps.exportCard(query(req).id) }))
+  route('/persona/import', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.importCard(b.card, { id: b.id }) } })
 
   // 本地接口
   const openFolder = (dir) => {

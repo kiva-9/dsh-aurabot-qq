@@ -123,7 +123,7 @@ before(async () => {
     allow: { private: [OWNER, FRIEND], groups: ['777', '888'] },
     group: { interjectChance: 0 },
     snowluma: { autoStart: false, autoAttach: false, httpUrl: mock.httpUrl, wsUrl: mock.wsUrl, httpToken: mock.token, wsToken: mock.token, dir: join(dataDir, 'no-snowluma') },
-    voice: { engine: 'windows', autoChance: 0 }, stickers: { autoChance: 0 },
+    voice: { autoChance: 0 }, stickers: { autoChance: 0 },
     merge: { waitSec: 0.2, maxSec: 2 },
     modules: { bili: { enabled: false } },
   }))

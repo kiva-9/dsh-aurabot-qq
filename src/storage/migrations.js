@@ -142,6 +142,41 @@ export const MIGRATIONS = [
       ALTER TABLE asset_occurrences ADD COLUMN analysis_json TEXT NOT NULL DEFAULT '{}';
     `,
   },
+  {
+    version: 4,
+    name: '人设：卡片、不可变的发布版本、草稿、绑定、删除记录',
+    up: `
+      CREATE TABLE personas (
+        id TEXT PRIMARY KEY,                -- 稳定 ID，只能是字母数字 - _（不合法直接拒绝，不删字符凑别名）
+        name TEXT NOT NULL,
+        origin TEXT NOT NULL,               -- builtin / user / legacy / import
+        current_revision INTEGER,           -- 当前发布版本（没发布过为空）
+        draft_json TEXT,                    -- 草稿（没有未发布的改动时为空）
+        draft_base INTEGER,                 -- 草稿是从哪个版本改的
+        edit_revision INTEGER NOT NULL DEFAULT 1, -- 每次保存 +1；保存时带旧值，对不上就拒绝（防止覆盖别人的改动）
+        archived_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE persona_revisions (
+        persona_id TEXT NOT NULL REFERENCES personas(id),
+        revision INTEGER NOT NULL,
+        layers_json TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (persona_id, revision)
+      );
+      CREATE TABLE persona_bindings (
+        scope TEXT PRIMARY KEY,             -- chat:group:123 / chat:private:456 / kind:group / kind:private / global
+        persona_id TEXT NOT NULL REFERENCES personas(id),
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE persona_tombstones (
+        id TEXT PRIMARY KEY,                -- 用户删掉的卡（内置卡不会因此再被自动导入）
+        deleted_at INTEGER NOT NULL
+      );
+    `,
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1).version

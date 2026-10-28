@@ -1,9 +1,9 @@
-// 内置模块：语音。把她的话念出来发语音条（edge-tts / Windows 语音 / CosyVoice / GPT-SoVITS / 本地接口），
+// 内置模块：语音。把她的话念出来发语音条（外部语音接口：兼容 OpenAI 的 /audio/speech 或自己配的 HTTP 映射；本地接口优先），
 // 面板里的试听、语音识别自检也在这里。
-// 导出 speak(text) → { file, engine }：聊天中枢发语音时找它。替换这个模块就能换成任何你想要的念法。
+// 导出 speak(text, profile) → { file, engine }：聊天中枢发语音时找它；profile 是当前人设的音色。替换这个模块就能换成任何你想要的念法。
 
 import { existsSync, readFileSync } from 'node:fs'
-import { textToSpeech, edgeInstalled, installEdge } from '../../voice/tts.js'
+import { textToSpeech } from '../../voice/tts.js'
 import { toMono16k } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
 
@@ -17,24 +17,23 @@ export default {
   setup(api) {
     const { hub, onebot, local, http } = api.core
 
-    async function speak(text) {
-      // 本地接口接管语音合成；出错退回内置
+    async function speak(text, profile = {}) {
+      // 本地接口接管语音合成；出错退回语音接口
       if (local.active('tts')) {
         try {
-          const file = fileOf(await local.call('tts', { text }))
+          const file = fileOf(await local.call('tts', { text, voice: profile.voice || '' }))
           if (file && existsSync(file)) return { file, engine: 'local' }
         } catch (error) {}
       }
-      return textToSpeech(text, api.config().voice, api.log)
+      return textToSpeech(text, api.config().voice, profile)
     }
 
     api.route('/voice/test', async (req) => {
       const b = await http.body(req)
       const { file, engine } = await speak(String(b.text || '你好呀，我是大肥鱼'))
       const buf = readFileSync(file)
-      return { ok: true, engine, mime: file.endsWith('.wav') ? 'audio/wav' : 'audio/mpeg', data: buf.toString('base64') }
+      return { ok: true, engine, mime: file.endsWith('.wav') ? 'audio/wav' : file.endsWith('.ogg') ? 'audio/ogg' : 'audio/mpeg', data: buf.toString('base64') }
     })
-    api.route('/voice/install', async () => installEdge(api.log))
 
     // DSH 自带语音识别：看状态 / 下载模型
     const stt = () => api.dsh.get('speechToText')
@@ -63,13 +62,14 @@ export default {
       const text = await hub.localTranscribe(last.seg)
       return { ok: Boolean(text), heard: text, at: new Date(last.time * 1000).toLocaleString(), ms: Date.now() - t }
     })
-    // 自检「听语音」：Windows 语音念一句 → 转 16k 单声道 → DSH 自带识别 → 看能不能认回来
+    // 自检「听语音」：用配好的语音合成念一句 → 转 16k 单声道 → DSH 自带识别 → 看能不能认回来
     api.route('/voice/asr-test', async (req) => {
       const b = await http.body(req)
       const s0 = stt()
       if (!s0 || typeof s0.resolve !== 'function') return { ok: false, message: 'DSH 里没有开启语音识别（设置 → 插件 → 语音输入）' }
       const text = String(b.text || '今天想吃白米饭')
-      const { file } = await textToSpeech(text, { engine: 'windows' })
+      let file
+      try { ({ file } = await speak(text)) } catch (error) { return { ok: false, message: '先在上面配好语音合成服务（自检要用它念一句）：' + error.message } }
       const t = Date.now()
       const spec = s0.resolve({ audio: new Uint8Array(toMono16k(readFileSync(file))) })
       const r = await s0.transcribe(spec, AbortSignal.timeout(120000))
@@ -77,6 +77,6 @@ export default {
       return { ok: Boolean(heard), said: text, heard, ms: Date.now() - t }
     })
 
-    return { speak, edgeInstalled }
+    return { speak }
   },
 }

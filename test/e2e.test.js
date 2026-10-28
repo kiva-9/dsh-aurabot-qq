@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startMockOneBot } from './helpers/mock-onebot.js'
 import { createFakeDsh } from './helpers/fake-dsh.js'
+import { startMockTts } from './helpers/mock-tts.js'
 
 const OWNER = '10000001'
 const BOT = '20000002'
@@ -60,6 +61,7 @@ async function brain({ preset, text, images, callTool }) {
 }
 
 let mock
+let tts
 let fake
 let api
 let dataDir
@@ -69,6 +71,7 @@ before(async () => {
   process.env.AURABOT_DATA_DIR = dataDir
   process.env.AURABOT_WORKSPACE = join(dataDir, 'ws')
   mock = await startMockOneBot({ selfId: BOT })
+  tts = await startMockTts()
   mkdirSync(dataDir, { recursive: true })
   writeFileSync(join(dataDir, 'config.json'), JSON.stringify({
     enabled: true,
@@ -78,7 +81,7 @@ before(async () => {
     ownerQQ: OWNER,
     allow: { private: [OWNER], groups: ['555', '557', '558', '559'] },
     snowluma: { autoStart: false, autoAttach: false, httpUrl: mock.httpUrl, wsUrl: mock.wsUrl, httpToken: mock.token, wsToken: mock.token, dir: join(dataDir, 'no-snowluma') },
-    voice: { engine: 'windows', autoChance: 0 },
+    voice: { provider: 'openai', openai: { baseUrl: tts.baseUrl, apiKey: 'tts-key', model: 'tts-1', voice: 'alloy' }, autoChance: 0 },
     stickers: { autoChance: 0 },
     // 大多数用例要的是「每次都回」，刹车放宽；558/559 专门测一段一回和刹车
     group: { interjectChance: 0, burstMax: 50, overrides: { 557: { interjectChance: 1, minRelevance: 0, minRecentMessages: 0, cooldownSec: 0, quietHours: [0, 0] }, 559: { burstMax: 2 } } },
@@ -94,6 +97,7 @@ before(async () => {
 after(async () => {
   fake?.dispose()
   await mock?.close()
+  await tts?.close()
   setTimeout(() => process.exit(0), 200).unref()
 })
 
@@ -483,7 +487,18 @@ test('连发合并：一口气发两句，她只回一次', async () => {
   assert.match(fake.turns.at(-1).userText, /第一句[\s\S]*第二句/)
 })
 
-test('本地 CosyVoice：裸 PCM 包成 WAV 发出语音', async () => {
+test('语音接口：兼容 OpenAI 的 /audio/speech，带密钥和音色', async () => {
+  const n = tts.calls.length
+  const r = (await fake.call('/voice/test', { text: '试一下' })).json()
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.engine, 'openai')
+  const c = tts.calls.slice(n).at(-1)
+  assert.equal(c.auth, 'Bearer tts-key')
+  assert.equal(c.json.input, '试一下')
+  assert.equal(c.json.voice, 'alloy')
+})
+
+test('语音接口：自己配的 HTTP 映射（CosyVoice 预设），裸 PCM 包成 WAV', async () => {
   const http = await import('node:http')
   let got = null
   const srv = http.createServer(async (req, res) => {
@@ -493,14 +508,16 @@ test('本地 CosyVoice：裸 PCM 包成 WAV 发出语音', async () => {
     res.end(Buffer.alloc(22050 * 2 * 0.5))
   })
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-  await fake.call('/save', { voice: { engine: 'cosyvoice', cosyvoice: { url: `http://127.0.0.1:${srv.address().port}`, spkId: '中文女' } } })
+  const base = `http://127.0.0.1:${srv.address().port}`
+  await fake.call('/save', { voice: { provider: 'http', httpApi: { method: 'POST', url: `${base}/inference_sft`, bodyType: 'form', body: 'tts_text={text}&spk_id=%E4%B8%AD%E6%96%87%E5%A5%B3', response: 'audio', sampleRate: 22050 } } })
   const r = (await fake.call('/voice/test', { text: '你好呀' })).json()
   srv.close()
-  await fake.call('/save', { voice: { engine: 'windows' } })
+  await fake.call('/save', { voice: { provider: 'openai' } })
   assert.equal(r.ok, true, r.message)
-  assert.equal(r.engine, 'cosyvoice')
+  assert.equal(r.engine, 'http')
   assert.equal(got.url, '/inference_sft')
   assert.equal(got.body.get('tts_text'), '你好呀')
+  assert.equal(got.body.get('spk_id'), '中文女')
   assert.equal(Buffer.from(r.data, 'base64').toString('ascii', 0, 4), 'RIFF')
 })
 

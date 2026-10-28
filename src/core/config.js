@@ -4,6 +4,7 @@ import { dataDir, readJson, writeJson } from './store.js'
 import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
+import { legacyTtsMapping, TTS_PROVIDERS } from '../voice/tts.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
@@ -46,14 +47,12 @@ export const DEFAULTS = {
   group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
   voice: {
     enabled: true,
-    // auto = 先 edge-tts，不行用 Windows 语音；edge / windows / cosyvoice / gptsovits / http = 指定引擎（失败都会退回 Windows 语音）
-    engine: 'auto',
-    cosyvoice: { url: 'http://127.0.0.1:50000', mode: 'sft', spkId: '中文女', instruct: '', sampleRate: 22050 },
-    gptsovits: { url: 'http://127.0.0.1:9880', refAudio: '', promptText: '', promptLang: 'zh', textLang: 'zh' },
-    http: { urlTemplate: '' }, // 通用：GET 这个地址（{text} 会替换成要念的话），返回音频
-    voice: 'zh-CN-XiaoyiNeural',
-    rate: '+0%',
-    pitch: '+0Hz',
+    // 语音合成走外部接口：none 没配 / openai 兼容 OpenAI 的 /audio/speech / http 自己配的固定映射（CosyVoice、GPT-SoVITS 用它的预设）
+    provider: 'none',
+    openai: { baseUrl: '', apiKey: '', model: 'tts-1', voice: 'alloy', format: 'mp3' },
+    httpApi: { method: 'POST', url: '', headers: {}, bodyType: 'json', body: '', response: 'audio', jsonPath: '', sampleRate: 24000, apiKey: '' },
+    defaultVoice: '', // 人设没指定音色时用这个
+    speed: 1,
     autoChance: 0.15, // 短回复自动变语音的概率
     autoMaxChars: 80,
     asr: true, // 听语音
@@ -222,9 +221,19 @@ export function normalize(raw) {
   c.merge.mediaExtraSec = num(c.merge.mediaExtraSec, 3, 0, 60)
   g.burstMax = num(g.burstMax, 8, 1, 50)
   g.burstWindowSec = num(g.burstWindowSec, 120, 10, 3600)
-  if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http'].includes(c.voice.engine)) c.voice.engine = 'auto'
-  c.voice.cosyvoice.sampleRate = num(c.voice.cosyvoice.sampleRate, 22050, 8000, 48000)
-  if (!['sft', 'instruct'].includes(c.voice.cosyvoice.mode)) c.voice.cosyvoice.mode = 'sft'
+  // 旧设置（engine = cosyvoice / gptsovits / http）第一次读到时换成新的 http 映射；edge-tts、Windows 语音已不再支持
+  if (!raw?.voice?.provider) {
+    const mapped = legacyTtsMapping(raw?.voice || {})
+    if (mapped) { c.voice.provider = 'http'; c.voice.httpApi = { ...DEFAULTS.voice.httpApi, ...mapped } }
+  }
+  if (!TTS_PROVIDERS.includes(c.voice.provider)) c.voice.provider = 'none'
+  const ha = c.voice.httpApi
+  ha.method = ha.method === 'GET' ? 'GET' : 'POST'
+  if (!['none', 'json', 'form'].includes(ha.bodyType)) ha.bodyType = 'json'
+  if (!['audio', 'json-base64', 'json-url'].includes(ha.response)) ha.response = 'audio'
+  ha.sampleRate = num(ha.sampleRate, 24000, 8000, 48000)
+  if (!isObj(ha.headers)) ha.headers = {}
+  c.voice.speed = num(c.voice.speed, 1, 0.5, 2)
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
@@ -256,7 +265,7 @@ export function normalize(raw) {
 }
 
 // 面板里不回传原文的字段：路径（几层都行）
-const SECRETS = [['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
+const SECRETS = [['voice', 'openai', 'apiKey'], ['voice', 'httpApi', 'apiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
 // 扩展模块设置里的密码类字段（模块加载时登记）：['ext', 模块id, 字段]
 const extraSecrets = new Map()
 export function registerSecretField(path) { extraSecrets.set(path.join('\u0000'), path) }

@@ -71,7 +71,7 @@ function withMessageRef(tool) {
     },
   }
 }
-export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels }) {
+export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels }) {
   // 心情对行为的影响（表情 / 语音概率、回复快慢、插话积极程度），没接就是 1
   const mood = () => (typeof moodEffects === 'function' ? moodEffects() : null) || { sticker: 1, voice: 1, delay: 1, chatty: 1 }
   const mapFile = () => dataDir('sessions.json')
@@ -165,7 +165,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
     return chat.userId === getConfig().ownerQQ ? `QQ · ${owner}私聊` : `QQ 私聊 · ${chat.nickname || chat.userId}`
   }
 
-  async function createSession(chat, level) {
+  async function createSession(chat, level, persona) {
     const ws = await ensureWorkspace()
     const preset = presetFor(level, getConfig())
     const r = await controller().create({ workspaceId: ws.id, agentPreset: preset })
@@ -176,7 +176,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       log.debug('改会话标题失败：', error.message)
     }
     const m = map()
-    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat) }
+    m.chats[chat.chatId] = { sessionId: sid, preset, level, createdAt: Date.now(), title: titleFor(chat), ...(persona?.personaId ? { personaId: persona.personaId } : {}) }
     saveMap(m)
     log.info(`为 ${chat.chatId} 新建了 DSH 会话 ${sid.slice(-8)}（${preset}）`)
     return sid
@@ -192,12 +192,23 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
   }
 
   /** 拿到这个 QQ 会话对应的活 agent（没有就建，权限档位变了就换新会话）。 */
-  async function agentFor(chat) {
+  async function agentFor(chat, persona) {
     const cfg = getConfig()
     const level = chat.kind === 'system' ? (chat.noTools ? 'chat' : 'social') : levelFor(cfg, chat)
     const preset = presetFor(level, cfg)
     const entry = map().chats[chat.chatId]
     let sid = entry && entry.preset === preset && entry.level === level ? entry.sessionId : ''
+    // 换了身份（绑定到另一张卡）：开新会话、代次 +1，旧角色没说完的话和习惯不带过来；旧会话归档（侧栏里还能找回）
+    if (sid && persona?.personaId && entry.personaId && entry.personaId !== persona.personaId) {
+      log.info(`${chat.chatId} 换了人设（${entry.personaId} → ${persona.personaId}），开新会话`)
+      switchIdentity(chat.chatId, sid)
+      sid = ''
+    } else if (sid && persona?.personaId && !entry.personaId) {
+      // 老会话还没记人设：记上当前的（不算换身份）
+      const m0 = map()
+      m0.chats[chat.chatId].personaId = persona.personaId
+      saveMap(m0)
+    }
     let agent = null
     if (sid) {
       try {
@@ -214,7 +225,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       }
     }
     if (!sid) {
-      sid = await createSession(chat, level)
+      sid = await createSession(chat, level, persona)
       agent = await resolveAgent(sid)
     }
     // 模型 / 思考强度和设置不一致就切过去（面板改了模型，下一条消息起生效）
@@ -436,9 +447,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
   }
 
   /** 文字转成语音段（先存成资产）。转不出来返回 null。 */
-  async function voiceItem(text) {
+  async function voiceItem(text, profile) {
     try {
-      const { file, engine } = await tts.speak(text)
+      const { file, engine } = await tts.speak(text, profile)
       const buf = readFileSync(file)
       const asset = storage.assets.put(buf, { mime: audioMime(buf), sourceKind: 'generated' })
       return { kind: 'voice', message: [{ type: 'record', data: { file: 'asset:' + asset.id } }], note: `[语音·${engine}] ${text.slice(0, 40)}`, fallbackText: text }
@@ -580,7 +591,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       if (it.replyTo && !replyId) log.debug(`${chatId}：引用的编号 ${it.replyTo} 对不上，正常发`)
       let out = null
       if (it.kind === 'text') out = textItem(it.value, replyId)
-      else if (it.kind === 'voice') out = cfg.voice.enabled ? (await voiceItem(it.value)) || textItem(it.value, replyId) : textItem(it.value, replyId)
+      else if (it.kind === 'voice') out = cfg.voice.enabled ? (await voiceItem(it.value, opts.persona?.layers?.voice)) || textItem(it.value, replyId) : textItem(it.value, replyId)
       else if (it.kind === 'sticker') out = stickerItem(it.value, replyId)
       else if (it.kind === 'image') out = await imageItem(it.value)
       else if (it.kind === 'poke') { if (!opts.simulate) groups.push('poke', []); continue }
@@ -650,6 +661,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       const sys = st.system
       const wantVoice = Boolean(st.wantVoice)
       const epoch = st.epoch
+      const persona = st.persona
       const requestId = st.requests?.[0]?.id ?? null
       for (const q of st.requests || []) storage.requests.setState(q.id, completed ? 'answered' : 'ended')
       st.text = ''
@@ -674,7 +686,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
         return release(chatId)
       }
       // 发完再放开：发送期间来的消息也攒到下一段
-      deliver(chatId, text, { wantVoice, userText: st.lastText || '', epoch, requestId }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
+      deliver(chatId, text, { wantVoice, userText: st.lastText || '', epoch, requestId, persona }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
     }
   }
 
@@ -1113,6 +1125,14 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
         for (let i = 0; i < images.length; i++) content.push({ type: 'image', data: images[i].data, mediaType: images[i].mediaType, name: `qq-${images[i].messageId}-${i + 1}` })
       }
     }
+    // 人设：按绑定找这一轮的卡；绑定坏了（卡不存在 / 归档 / 没发布）就不扮演任何角色，只告诉主人
+    const persona = typeof personaOf === 'function' ? personaOf(chat) : null
+    if (persona?.error) {
+      log.error(`${chat.chatId}：${persona.error}，这一轮不交给她`)
+      if (chat.kind === 'private' && isOwner(cfg, chat.userId)) await sendText(chat.chatId, `（人设配置有误：${persona.error}。请到面板「人格」页检查）`)
+      release(chat.chatId)
+      return
+    }
     // 请求：每个提出请求的人一份（只当上下文的消息不算），提出者由这里确定，模型和工具改不了
     const byActor = new Map()
     for (const e of batch.entries) {
@@ -1123,7 +1143,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
     const requests = [...byActor.entries()].map(([actorId, ids]) => storage.requests.create({ chatId: chat.chatId, actorId, sourceMessageIds: ids }))
     const actors = [...byActor.keys()]
     await pushToSession(chat, content, actors[0], {
-      wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests,
+      wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests, persona,
     })
   }
 
@@ -1181,9 +1201,11 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
         log.warn('扩展模块改提示词出错：', error.message)
       }
     }
-    const { agent, sessionId } = await agentFor(chat)
+    const { agent, sessionId } = await agentFor(chat, opts.persona)
     const key = sessionKey(sessionId)
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
+    // 这一轮用的人设版本在开始时冻结（插话沿用当前这一轮的）；面板改了卡，从下一轮起生效
+    if (!opts.steer || !st.persona) st.persona = opts.persona || null
     if (senderId) st.senders.add(String(senderId))
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
     // 这一轮在回哪些请求（插话时追加），以及开始时的会话代次
@@ -1285,6 +1307,21 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
       try { agent?.cancel?.({ kind: 'hook', reason }, { keepInbox: false }) } catch (error) { log.debug('停下这一轮失败：', error.message) }
     }
     running.delete(chatId)
+  }
+
+  /** 换身份：代次 +1、作废上一代没发出去的段、停下旧会话、归档。攒着的新消息不丢（它们要交给新角色）。 */
+  function switchIdentity(chatId, sessionId) {
+    try { storage.epochs.bump(chatId, '换人设') } catch (error) {}
+    try { outbox.cancelPending(chatId, '换人设') } catch (error) {}
+    const agent = dsh.agents?.get?.(sessionId) || dsh.agents?.get?.('session-' + sessionId)
+    try { if (agent?.status === 'running') agent.cancel?.({ kind: 'hook', reason: '换人设' }, { keepInbox: false }) } catch (error) {}
+    const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
+    Promise.resolve(reg?.archiveSession?.(sessionId)).catch((error) => log.debug('归档旧会话失败：', error.message))
+    sessionToChat.delete(sessionKey(sessionId))
+    turnState.delete(sessionKey(sessionId))
+    const m = map()
+    delete m.chats[chatId]
+    saveMap(m)
   }
 
   /** 只让一个聊天重新开始：归档它的会话，下一条消息开新会话。 */
@@ -1391,6 +1428,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, stickers, tts,
     get lastBotToOwner() { return lastBotToOwner },
     get selfId() { return selfId },
     agentCaps: () => agentCaps,
+    /** 正在跑的这一轮用的人设快照（没在跑返回 null）。 */
+    turnPersona: (sessionId) => (running.has(chatOfSession(sessionId)) ? turnState.get(sessionKey(sessionId))?.persona || null : null),
     groupNames,
   }
 }
