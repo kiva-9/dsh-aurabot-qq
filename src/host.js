@@ -55,7 +55,7 @@ export function apply(ctx) {
   let mods = null
   let bridge = null
   const getConfig = () => cfg
-  const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); registerSecret(cfg.bridge.token) }
+  const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); for (const p of cfg.imageGen.profiles || []) registerSecret(p.apiKey); registerSecret(cfg.voice.openai.apiKey); registerSecret(cfg.voice.httpApi.apiKey); registerSecret(cfg.bridge.token) }
   const setConfig = (next) => {
     const before = cfg
     cfg = saveConfig(next)

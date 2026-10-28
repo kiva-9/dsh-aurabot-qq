@@ -177,6 +177,70 @@ export const MIGRATIONS = [
       );
     `,
   },
+  {
+    version: 5,
+    name: '可恢复任务：任务、每次外部尝试、生成血缘、额度预留',
+    up: `
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,                 -- image / ……
+        chat_id TEXT NOT NULL,
+        request_id TEXT,
+        actor_id TEXT NOT NULL,             -- 谁要的（取消、额度都按这个人）
+        epoch INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        output_json TEXT NOT NULL DEFAULT '{}',
+        parent_job_id TEXT,
+        profile_id TEXT,
+        lease_owner TEXT,
+        lease_until INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        not_before INTEGER NOT NULL DEFAULT 0,
+        provider_task_id TEXT,
+        error_kind TEXT,
+        error TEXT,
+        trace_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+      CREATE INDEX jobs_state ON jobs(state, not_before);
+      CREATE INDEX jobs_chat ON jobs(chat_id, created_at);
+      CREATE INDEX jobs_actor ON jobs(chat_id, actor_id, created_at);
+      CREATE TABLE job_attempts (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES jobs(id),
+        n INTEGER NOT NULL,
+        provider_task_id TEXT,
+        billing TEXT NOT NULL DEFAULT 'unknown', -- charged / free / unknown / none（确定没执行）
+        state TEXT NOT NULL,                -- running / done / failed / unknown / canceled
+        error_kind TEXT,
+        error TEXT,
+        started_at INTEGER NOT NULL,
+        finished_at INTEGER
+      );
+      CREATE INDEX job_attempts_job ON job_attempts(job_id, n);
+      CREATE TABLE generation_lineage (
+        job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+        parent_job_id TEXT,
+        inputs_json TEXT NOT NULL,          -- [{ assetId, role, occurrenceId, sourceMessageId, selectionReason }]
+        outputs_json TEXT NOT NULL,         -- [assetId]
+        intent TEXT NOT NULL DEFAULT '',
+        params_json TEXT NOT NULL DEFAULT '{}'
+      );
+      CREATE TABLE quota_reservations (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL,
+        scope TEXT NOT NULL,                -- user:QQ号 / chat:聊天
+        day TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('held', 'used', 'released')),
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX quota_scope ON quota_reservations(scope, day, state);
+    `,
+  },
 ]
 
 export const LATEST_VERSION = MIGRATIONS.at(-1).version

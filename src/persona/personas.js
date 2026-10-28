@@ -101,7 +101,7 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
   // 只在功能真的能用时告诉她，免得答应了做不到
   const who = (ownerOnly) => (ownerOnly ? `只给${owner}` : '')
   const g = cfg.imageGen || {}
-  if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画。`)
+  if (!off.has('imagegen') && ((g.enabled && g.profiles?.length) || cfg.local?.image)) common.push(`- 你会画画：${who(g.ownerOnly)}画，别人让你画图、照着图画、改图时用 qq_draw_image（后台画，画好自动发出来），别说自己不会画。要照着这段里的图画或改，按图的编号引用；想取消用 qq_cancel_image。`)
   if (!off.has('bili') && cfg.bili?.enabled) common.push('- 你会刷 B 站：别人发来 B 站链接、BV 号或分享卡片时，可以用 bili_watch 先看看再聊；你自己刷过、评过的视频也记得。')
   const s = cfg.song || {}
   if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)

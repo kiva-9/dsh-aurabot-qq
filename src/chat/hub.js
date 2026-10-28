@@ -544,6 +544,27 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     }
   }
 
+  /** 把几张已经存好的图（资产）发出去，比如画好的图。返回 outbox 汇总。 */
+  async function sendImageAssets(chatId, assetIds, note, { text } = {}) {
+    const items = assetIds.map((id) => ({ kind: 'image', message: [{ type: 'image', data: { file: 'asset:' + id } }], note: note || '[图片]' }))
+    if (text) items.push(textItem(text))
+    return sendItems(chatId, items)
+  }
+
+  /** 给这个聊天的会话留一条说明（不叫醒她，下一轮能看到），比如「刚才那张图已经发出去了」。 */
+  function noteToSession(chatId, text) {
+    const sid = map().chats[chatId]?.sessionId
+    const agent = sid && (dsh.agents?.get?.(sid) || dsh.agents?.get?.('session-' + sid))
+    if (!agent || typeof agent.inject !== 'function') return false
+    try {
+      agent.inject({ id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: SOURCE_KIND } })
+      return true
+    } catch (error) {
+      log.debug('给会话留说明失败：', error.message)
+      return false
+    }
+  }
+
   async function sendImage(chatId, src) {
     const it = await imageItem(src)
     if (!it) return null
@@ -1101,12 +1122,14 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     const results = new Map(batch.entries.map((e) => [e.messageId, media.resultsOf(e.messageId)]))
     // 图片按消息顺序收集，最多 4 张
     const images = []
-    for (const e of batch.entries) for (const im of results.get(e.messageId).images) if (images.length < 4) images.push({ ...im, messageId: e.msg.messageId })
-    // 被引用的那条里的图排在后面（只给提出请求的消息带，当上下文的不带）
+    // 每张图记下是谁发的、哪条消息、哪次出现：生图时按编号引用，不靠「最近一张图」去猜
+    for (const e of batch.entries) for (const im of results.get(e.messageId).images) if (images.length < 4) images.push({ ...im, messageId: e.msg.messageId, dbMessageId: e.messageId, actorId: e.actorId, nick: e.msg.nickname, source: 'attachment', context: e.mode === 'context' })
+    // 被引用的那条里的图排在后面（只给提出请求的消息带，当上下文的不带）；算作引用它的那个人的请求
     for (const e of batch.entries) {
       if (e.mode === 'context' || !e.quote?.messageId) continue
-      for (const im of media.resultsOf(e.quote.messageId).images) if (images.length < 4) images.push({ ...im, messageId: 'quote-' + e.msg.replyId })
+      for (const im of media.resultsOf(e.quote.messageId).images) if (images.length < 4) images.push({ ...im, messageId: 'quote-' + e.msg.replyId, dbMessageId: e.quote.messageId, actorId: e.actorId, nick: e.msg.nickname, source: 'quote', quotedName: e.quote.name })
     }
+    images.forEach((im, i) => { im.n = i + 1 })
     const texts = []
     for (const e of batch.entries) {
       const text = entryText(e, results.get(e.messageId))
@@ -1148,6 +1171,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
         log.debug(`模型不支持看图：${chat.chatId} 的 ${images.length} 张图换成文字提示`)
       } else {
         for (let i = 0; i < images.length; i++) content.push({ type: 'image', data: images[i].data, mediaType: images[i].mediaType, name: `qq-${images[i].messageId}-${i + 1}` })
+        // 告诉她每张图的编号和来历（画图、改图时按编号引用）
+        content.push({ type: 'text', text: '【这段里的图】' + images.map((im) => `图${im.n}：${im.source === 'quote' ? `${im.nick} 引用的「${im.quotedName}」那条里的` : `${im.nick} 发的`}${im.kind === 'sticker' ? '表情' : ''}`).join('；') })
       }
     }
     // 人设：按绑定找这一轮的卡；绑定坏了（卡不存在 / 归档 / 没发布）就不扮演任何角色，只告诉主人
@@ -1169,6 +1194,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     const actors = [...byActor.keys()]
     await pushToSession(chat, content, actors[0], {
       wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests, persona,
+      images: images.map(({ data, ...rest }) => rest),
     })
   }
 
@@ -1234,6 +1260,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     if (senderId) st.senders.add(String(senderId))
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
     if (!opts.steer) st.toolCalls = 0
+    // 这一轮能按编号引用的图（插话时接着编号）
+    if (!opts.steer) st.images = opts.images || []
+    else if (opts.images?.length) st.images = [...(st.images || []), ...opts.images.map((im, i) => ({ ...im, n: (st.images?.length || 0) + i + 1 }))]
     // 这一轮在回哪些请求（插话时追加），以及开始时的会话代次
     st.requests = opts.steer ? [...(st.requests || []), ...(opts.requests || [])] : [...(opts.requests || [])]
     if (!opts.steer || st.epoch === undefined) st.epoch = storage.epochs.current(chat.chatId)
@@ -1276,6 +1305,32 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     }).finally(() => clearTimeout(timer))
     await agent.followup({ id: randomUUID(), role: 'user', content: [{ type: 'text', text: prompt }], source: { kind: SOURCE_KIND } })
     return result
+  }
+
+  /** 这一轮能按编号引用的图：[{ n, assetId, occurrenceId, dbMessageId, actorId, source, kind }]。 */
+  function turnImages(sessionId) {
+    return turnState.get(sessionKey(sessionId))?.images || []
+  }
+
+  /**
+   * 工具在替谁做事：这一轮只有一个人提出请求就是他；好几个人时要靠 for_message 指明是哪一条。
+   * 返回 { actorId, requestId } 或 { error }。
+   */
+  function turnActor(sessionId) {
+    const reqs = turnRequests(sessionId)
+    if (reqs.length === 1) return { actorId: reqs[0].actorId, requestId: reqs[0].id }
+    if (!reqs.length) {
+      const st = turnState.get(sessionKey(sessionId))
+      const s = [...(st?.senders || [])]
+      return s.length === 1 ? { actorId: s[0], requestId: null } : { error: '不知道是在替谁做' }
+    }
+    const ref = callRef.getStore()?.forMessage
+    const chatId = chatOfSession(sessionId)
+    const mid = ref && chatId.startsWith('group:') ? (groupRefs.get(chatId.slice(6)) || {})[ref] : null
+    if (mid) {
+      for (const q of reqs) if (q.sourceMessageIds.some((id) => storage.messages.get(id)?.platformMsgId === String(mid))) return { actorId: q.actorId, requestId: q.id }
+    }
+    return { error: '这一段里好几个人都提了要求：调用时用 for_message 写明在执行哪一条' }
   }
 
   /** 这一轮在回的请求：[{ id, actorId, sourceMessageIds, ... }]。 */
@@ -1430,6 +1485,10 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     turnSendersAllOwner,
     turnHasOwner,
     turnRequests,
+    turnImages,
+    turnActor,
+    sendImageAssets,
+    noteToSession,
     recoverOutbox: (o) => outbox.recover(o),
     resetChat,
     joinTopic: (gid) => groupEngaged.set(String(gid), Date.now() + ENGAGE_MS),

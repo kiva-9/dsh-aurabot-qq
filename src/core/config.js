@@ -44,13 +44,15 @@ export const DEFAULTS = {
   merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15, mentionWaitSec: 1.5, mediaExtraSec: 3 }, // 连发合并：对方停顿 waitSec 秒再一起回，最多等 maxSec 秒；群里等得久一点，把一段话攒齐；被 @ 时最多等 mentionWaitSec；图片 / 语音还没处理完最多再等 mediaExtraSec
   imageGen: {
     enabled: false,
-    provider: 'openai', // openai = 兼容 OpenAI /v1/images/generations 的服务（硅基流动、通义、本地 ComfyUI 代理……）
-    baseUrl: '',
-    apiKey: '',
-    model: '',
+    // 生图服务可以配好几个，每个是一种协议：openai 兼容 / gemini 原生 / comfyui 工作流 / http 自己配的映射
+    // capabilities 是主人声明的能力（模式、最多几张输入图、尺寸），和适配器自己能做的取交集
+    profiles: [],
+    defaultProfile: '',
     size: '1024x1024',
     stylePrompt: '', // 每次生图自动加在前面的风格描述
     ownerOnly: true, // 只有主人能让她画
+    quota: { perUserPerDay: 20, ownerUnlimited: true }, // 每人每天最多画几张；主人不限
+    waitInputSec: 30, // 参考图还没下载好时最多等多久
   },
   persona: { current: 'dafeiyu' },
   group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
@@ -250,6 +252,18 @@ export function normalize(raw) {
   ha.sampleRate = num(ha.sampleRate, 24000, 8000, 48000)
   if (!isObj(ha.headers)) ha.headers = {}
   c.voice.speed = num(c.voice.speed, 1, 0.5, 2)
+  // 旧设置只有一个 OpenAI 兼容服务：第一次读到时变成一个 profile（旧版只会文生图）
+  if (!Array.isArray(raw?.imageGen?.profiles) && raw?.imageGen?.baseUrl) {
+    c.imageGen.profiles = [{ id: 'default', name: '原来的生图服务', protocol: 'openai', baseUrl: raw.imageGen.baseUrl, apiKey: raw.imageGen.apiKey || '', model: raw.imageGen.model || '', capabilities: { modes: ['text'] }, extra: {} }]
+    c.imageGen.defaultProfile = 'default'
+  }
+  c.imageGen.profiles = normalizeImageProfiles(c.imageGen.profiles)
+  if (!c.imageGen.profiles.some((p) => p.id === c.imageGen.defaultProfile)) c.imageGen.defaultProfile = c.imageGen.profiles[0]?.id || ''
+  for (const k of ['provider', 'baseUrl', 'apiKey', 'model']) delete c.imageGen[k]
+  if (!isObj(c.imageGen.quota)) c.imageGen.quota = {}
+  c.imageGen.quota.perUserPerDay = num(c.imageGen.quota.perUserPerDay, 20, 0, 1000)
+  c.imageGen.quota.ownerUnlimited = bool(c.imageGen.quota.ownerUnlimited, true)
+  c.imageGen.waitInputSec = num(c.imageGen.waitInputSec, 30, 5, 300)
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
@@ -281,7 +295,37 @@ export function normalize(raw) {
 }
 
 // 面板里不回传原文的字段：路径（几层都行）
-const SECRETS = [['voice', 'openai', 'apiKey'], ['voice', 'httpApi', 'apiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
+const IMAGE_PROTOCOLS = ['openai', 'gemini', 'comfyui', 'http']
+const IMAGE_MODES = ['text', 'reference', 'edit', 'mask']
+/** 生图服务列表归一化：ID 唯一且合法，协议认识，能力字段规整。 */
+export function normalizeImageProfiles(list) {
+  const out = []
+  const seen = new Set()
+  for (const p of Array.isArray(list) ? list : []) {
+    if (!isObj(p)) continue
+    const id = String(p.id || '').trim()
+    if (!/^[A-Za-z0-9_-]{1,40}$/.test(id) || seen.has(id)) continue
+    seen.add(id)
+    const caps = isObj(p.capabilities) ? p.capabilities : {}
+    out.push({
+      id,
+      name: String(p.name || id).slice(0, 40),
+      protocol: IMAGE_PROTOCOLS.includes(p.protocol) ? p.protocol : 'openai',
+      baseUrl: String(p.baseUrl || '').trim(),
+      apiKey: String(p.apiKey || ''),
+      model: String(p.model || '').trim(),
+      capabilities: {
+        modes: (Array.isArray(caps.modes) ? caps.modes : ['text']).filter((m) => IMAGE_MODES.includes(m)),
+        maxInputs: num(caps.maxInputs, 4, 0, 16),
+        sizes: (Array.isArray(caps.sizes) ? caps.sizes : []).map(String).filter((s) => /^\d{3,4}x\d{3,4}$/.test(s)).slice(0, 12),
+      },
+      extra: isObj(p.extra) ? p.extra : {},
+    })
+  }
+  return out
+}
+
+const SECRETS = [['voice', 'openai', 'apiKey'], ['voice', 'httpApi', 'apiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
 // 扩展模块设置里的密码类字段（模块加载时登记）：['ext', 模块id, 字段]
 const extraSecrets = new Map()
 export function registerSecretField(path) { extraSecrets.set(path.join('\u0000'), path) }
@@ -361,6 +405,8 @@ export function publicConfig(cfg) {
     p[`${k}Set`] = Boolean(p[k])
     p[k] = ''
   }
+  // 生图服务的密钥在数组里：同样只告诉面板有没有填
+  for (const p of c.imageGen?.profiles || []) { p.apiKeySet = Boolean(p.apiKey); p.apiKey = '' }
   return c
 }
 
@@ -376,6 +422,17 @@ export function mergeFromPanel(current, incoming) {
     else if (v === undefined || v === '') p[k] = getAt(current, path) ?? ''
     delete p[`${k}Set`]
     delete p[`${k}Hint`]
+  }
+  // 生图服务列表整张替换；没改的密钥（空串）按服务 ID 保留原值，null = 清空
+  if (Array.isArray(incoming?.imageGen?.profiles)) {
+    const old = new Map((current.imageGen?.profiles || []).map((p) => [p.id, p]))
+    next.imageGen.profiles = incoming.imageGen.profiles.map((p) => {
+      const q = { ...p }
+      if (q.apiKey === null) q.apiKey = ''
+      else if (!q.apiKey) q.apiKey = old.get(q.id)?.apiKey || ''
+      delete q.apiKeySet
+      return q
+    })
   }
   // 联动密钥只由插件生成，面板不能改
   next.bridge.token = current.bridge?.token || ''

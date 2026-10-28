@@ -56,7 +56,9 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('慢慢想') && !text.includes('补充')) { await sleep(2500); return '想好了' }
   if (text.includes('引用测试') && text.startsWith('【群聊')) { const n = (text.match(/\[(\d+)\][^\n]*引用测试/) || [])[1]; return n ? `<reply:${n}>收到这条啦\n别的我就不挨个回了` : '没看到编号' }
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
-  if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '画好啦' : '画不了' }
+  if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '在画了' : '画不了' }
+  if (text.includes('照着这张')) { const r = await callTool('qq_draw_image', { prompt: '改成雨天', images: [{ n: 1, role: 'base' }] }); return r && r.ok ? '在改了' : r.message }
+  if (text.includes('用别人的图画')) { const r = await callTool('qq_draw_image', { prompt: '画成雨天', images: [{ n: 1, role: 'identity' }] }); return r && r.ok ? '在画了' : r.message }
   if (text.includes('禁言')) {
     // 群里混着别人说话时，写明在执行主人的哪一条（模拟模型按提示词里的编号引用）
     const ref = Number((text.match(/\[(\d+)\] [^\n]*\(10000001\)[^\n]*禁言/) || [])[1]) || undefined
@@ -547,28 +549,76 @@ test('语音接口：自己配的 HTTP 映射（CosyVoice 预设），裸 PCM �
   assert.equal(Buffer.from(r.data, 'base64').toString('ascii', 0, 4), 'RIFF')
 })
 
-test('生图：主人让她画图，调生图服务并把图发出去', async () => {
+let imgSrv = null
+const imgCalls = []
+async function imageServer() {
+  if (imgSrv) return imgSrv
   const http = await import('node:http')
-  let body = null
-  const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+  const png = fakePng(64, 64, 33)
   const srv = http.createServer(async (req, res) => {
-    let b = ''
-    for await (const c of req) b += c
-    body = JSON.parse(b)
+    const parts = []
+    for await (const c of req) parts.push(c)
+    const raw = Buffer.concat(parts)
+    imgCalls.push({ url: req.url, type: req.headers['content-type'] || '', auth: req.headers.authorization || '', raw })
     res.setHeader('content-type', 'application/json')
     res.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }))
   })
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
-  await fake.call('/save', { imageGen: { enabled: true, baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, model: 'test-model', apiKey: 'img-key-123456', stylePrompt: '可爱风' } })
+  imgSrv = `http://127.0.0.1:${srv.address().port}/v1`
+  srv.unref() // 整个文件跑完进程会退出，不用单独关
+  return imgSrv
+}
+
+test('生图：主人让她画图 → 后台任务画好直接发出来；密钥不回传', async () => {
+  const base = await imageServer()
+  await fake.call('/save', { imageGen: { enabled: true, stylePrompt: '可爱风', defaultProfile: 'p1', profiles: [{ id: 'p1', name: '测试服务', protocol: 'openai', baseUrl: base, model: 'test-model', apiKey: 'img-key-123456', capabilities: { modes: ['text', 'reference', 'edit'], maxInputs: 4 } }] } })
   const n = sentTo('private', OWNER).length
+  const before = imgCalls.length
   mock.push(priv(OWNER, text('画一只鲸鱼')))
   await until(() => sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'image'), 10000)
-  srv.close()
+  const call = imgCalls.slice(before).find((c) => c.url.endsWith('/images/generations'))
+  const body = JSON.parse(call.raw.toString('utf8'))
   assert.equal(body.model, 'test-model')
   assert.match(body.prompt, /可爱风.*一只蓝色小鲸鱼/)
+  assert.equal(call.auth, 'Bearer img-key-123456')
   const st = (await fake.call('/state')).json()
-  assert.equal(st.config.imageGen.apiKey, '', '生图密钥不回传')
-  assert.equal(st.config.imageGen.apiKeySet, true)
+  assert.equal(st.config.imageGen.profiles[0].apiKey, '', '生图密钥不回传')
+  assert.equal(st.config.imageGen.profiles[0].apiKeySet, true)
+  const jobs = (await fake.call('/imagegen/jobs')).json().list
+  assert.equal(jobs[0].state, 'delivered')
+  assert.equal(jobs[0].lineage.outputs.length, 1, '画好的图存成了资产并记了血缘')
+})
+
+test('改图：主人发图说「照着这张改」，按编号把那张当底图交给编辑接口，血缘里记着用了哪张', async () => {
+  await imageServer()
+  const before = imgCalls.length
+  const n = sentTo('private', OWNER).length
+  mock.push(priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + fakePng(300, 200, 41).toString('base64') } }, { type: 'text', data: { text: '照着这张改成雨天' } }]))
+  await until(() => sentTo('private', OWNER).slice(n).some((c) => c.params.message[0].type === 'image'), 10000)
+  const t = fake.turns.find((x) => x.userText.includes('照着这张'))
+  assert.match(t.userText, /【这段里的图】图1：xiaoming 发的/)
+  const edit = imgCalls.slice(before).find((c) => c.url.endsWith('/images/edits'))
+  assert.ok(edit, '走了编辑接口')
+  assert.match(edit.type, /multipart\/form-data/)
+  assert.ok(edit.raw.includes(Buffer.from('name="image"')), '底图作为 image 字段上传')
+  const job = (await fake.call('/imagegen/jobs')).json().list[0]
+  assert.equal(job.input.mode, 'edit')
+  assert.equal(job.lineage.inputs[0].role, 'base')
+  assert.ok(job.lineage.inputs[0].occurrenceId, '记下了是哪条消息里的哪张图')
+})
+
+test('参考图归属：群友 A 不能拿群友 B 刚发的图当自己的参考', async () => {
+  await settle()
+  await fake.call('/save', { imageGen: { ownerOnly: false } })
+  const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
+  mock.push(grp('555', '777', at('用别人的图画')))
+  await sleep(100)
+  mock.push(grp('555', '778', [{ type: 'image', data: { sub_type: 0, file: 'base64://' + fakePng(200, 300, 51).toString('base64') } }], '路人乙'))
+  await until(() => fake.turns.at(-1)?.userText.includes('用别人的图画') && fake.turns.at(-1).toolCalls.length)
+  const r = fake.turns.at(-1).toolCalls[0].result
+  await fake.call('/save', { imageGen: { ownerOnly: true } })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /路人乙 发的，不能拿来给别人画/)
 })
 
 test('每日整理：往日的临时流水整理后清空，今天的保留', async () => {
