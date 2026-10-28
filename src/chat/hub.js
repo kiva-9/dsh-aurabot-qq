@@ -78,7 +78,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     stats[k]++
   }
 
-  // ---------- 聊天流水（给空间日记、主动搭话、面板用） ----------
+  // ---------- 聊天流水（给记忆整理、主动搭话、面板用） ----------
   function logChat(chatId, who, text, uid = '') {
     try {
       const d = new Date()
@@ -1057,7 +1057,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     } catch (error) {}
   }
 
-  /** 后台任务（写日记、主动搭话的草稿）：在专用会话里跑一轮，拿到正文但不自动转发。 */
+  /** 后台任务（主动搭话的草稿等）：在专用会话里跑一轮，拿到正文但不自动转发。 */
   async function runSystemTurn(name, title, prompt, { timeoutMs = 180000, noTools = false } = {}) {
     const chat = { chatId: `system:${name}`, kind: 'system', title, noTools: !!noTools }
     const { agent, sessionId } = await agentFor(chat)

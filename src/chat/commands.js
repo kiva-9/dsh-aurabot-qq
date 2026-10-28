@@ -32,7 +32,7 @@ const ALIASES = {
   正常: 'normal',
   模型: 'model', 换模型: 'model',
   唱: 'sing', 点歌: 'sing', 翻唱: 'sing',
-  状态: 'status', 心情: 'mood', 日记: 'diary', 记住: 'remember', 记一下: 'remember',
+  状态: 'status', 心情: 'mood', 记住: 'remember', 记一下: 'remember',
   重开: 'reset', 开机: 'on', 关机: 'off', 帮助: 'help', 命令: 'help', h: 'help',
 }
 
@@ -47,7 +47,6 @@ const COMMANDS = {
   sing: '让她翻唱一首：/sing 小幸运 田馥甄；后面加 +12 / -3 之类可以变调（原唱是男声一般 +12）',
   status: '看她现在的状态',
   mood: '看她现在的心情',
-  diary: '马上写一篇空间日记',
   remember: '让她记住一件事，如 /remember 我不吃香菜',
   reset: '这个聊天重新开始（旧的对话在 DSH 侧栏里还能找回）',
   on: '打开总开关',
@@ -93,10 +92,10 @@ export function createMutes() {
 
 /**
  * 执行命令，返回要回给主人的话。
- * @param {object} deps { getConfig, setConfig, mutes, hub, mood, memory, qzone, onebot }
+ * @param {object} deps { getConfig, setConfig, mutes, hub, mood, memory, onebot }
  */
 export async function runCommand(cmd, msg, deps) {
-  const { getConfig, setConfig, mutes, hub, mood, memory, qzone } = deps
+  const { getConfig, setConfig, mutes, hub, mood, memory } = deps
   const cfg = getConfig()
   const inGroup = msg.kind === 'group'
   const here = inGroup ? '这个群' : '这里'
@@ -180,11 +179,6 @@ export async function runCommand(cmd, msg, deps) {
     }
     case 'mood':
       return mood ? `现在${mood.label()}` : '心情模块关着'
-    case 'diary': {
-      if (!qzone) return '空间日记没开'
-      const r = await qzone.writeDiary()
-      return r.ok ? (r.dryRun ? '写好了，不过现在是试运行，没真发' : '写好发出去啦，去空间看看') : '没写成：' + (r.message || '不知道为啥')
-    }
     case 'remember': {
       if (!memory) return '记忆模块关着'
       if (!cmd.arg) return '要我记住什么呀？比如 /remember 我不吃香菜'

@@ -5,7 +5,7 @@
 // 面板在侧栏「自动化任务」下面（网页半边见 client/client.js），这里提供它要的 /aurabot/api/* 接口。
 //
 // 这个文件只管「核心」：配置、QQ 网关、聊天中枢、人格、面板接口、模块内核和联动。
-// 表情、语音、记忆、空间、B 站、翻唱、生图……都是模块（src/modules/），能单独关掉，也能用自己写的替换。
+// 表情、语音、记忆、B 站、翻唱、生图……都是模块（src/modules/），能单独关掉，也能用自己写的替换。
 //
 // ⚠ 安全默认：总开关关、试运行开。不手动打开，一句都不会真的发到 QQ。
 
@@ -200,7 +200,7 @@ export function apply(ctx) {
       const cmd = parseCommand(msg.text, mods.commands())
       if (!cmd) return null
       if (cmd.ext) return String((await cmd.ext.run(cmd.arg, msg)) ?? '')
-      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
+      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), song: use('song'), listModels, defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
     },
     isMuted: (chatId) => mutes.muted(chatId),
     moodEffects: () => use('mood')?.effects?.() ?? null,
@@ -350,7 +350,6 @@ export function apply(ctx) {
         login = { uin: String(info?.user_id ?? ''), nickname: info?.nickname || '' }
       } catch (error) {}
     }
-    const diary = use('diary')
     const memory = use('memory')
     return {
       ok: true,
@@ -363,8 +362,6 @@ export function apply(ctx) {
       // 模块关着时给个空壳，面板照常显示
       mood: use('mood')?.state?.() ?? { value: 0, label: '心情模块关着', reason: '', history: [] },
       stickers: { count: stickers.library().items.length },
-      diary: diary ? { next: diary.nextTime(), last: diary.history()[0] || null } : { next: 0, last: null },
-      qzoneSocial: use('qzone-social')?.state?.() ?? null,
       speakUp: use('speakup')?.state?.() ?? { count: 0 },
       memory: { lastConsolidate: memory?.lastConsolidate?.() ?? 0 },
       avatar: avatarInfo(),
@@ -716,7 +713,6 @@ export function apply(ctx) {
   return {
     hub, onebot, snowluma, getConfig, setConfig, logger, modules: mods, bridge, ready: booted,
     get stickers() { return use('stickers') },
-    get qzone() { return use('diary') },
     get mood() { return use('mood') },
     get memory() { return use('memory') },
   }

@@ -46,7 +46,6 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
   const sockets = new Set()
   let msgSeq = 1000
   const faces = new Map()
-  const qzone = new Map()
   const state = { failRecord: false, roles: {}, favorites: [] } // favorites：机器人号 QQ 收藏表情的地址 // roles: 群号 → 机器人在群里的身份（默认群主）
 
   function handle(action, params) {
@@ -68,16 +67,6 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
       case 'fetch_custom_face': return state.favorites.slice(0, params.count || 48)
       case 'modify_custom_face': faces.set(params.emoji_id, params.desc); return null
       case 'delete_custom_face': faces.delete(params.emoji_id); return null
-      case 'send_qzone_msg': {
-        const tid = 'tid-' + (qzone.size + 1)
-        qzone.set(tid, params)
-        return { tid }
-      }
-      case 'delete_qzone_msg': qzone.delete(params.tid); return null
-      case 'get_qzone_msg_list': return { total: (state.qzoneList || []).length, msglist: state.qzoneList || [] }
-      case 'get_qzone_msg_detail': return (state.qzoneDetail || {})[params.tid] || { tid: params.tid, content: '', comment_num: 0, comments: [] }
-      case 'get_qzone_feeds': return { feeds: state.feeds || [], has_more: false }
-      case 'comment_qzone': case 'like_qzone': return null
       case 'get_forward_msg': return { messages: (state.forwards || {})[params.id] || [] }
       case 'send_poke': return null
       case 'get_group_msg_history': case 'get_friend_msg_history': return { messages: state.history || [] }
@@ -142,7 +131,6 @@ export async function startMockOneBot({ selfId = '20000002', token = 'mock-token
     calls,
     state,
     faces,
-    qzone,
     connected: () => sockets.size,
     push(event) {
       const e = { time: Math.floor(Date.now() / 1000), self_id: Number(selfId), post_type: 'message', ...event }

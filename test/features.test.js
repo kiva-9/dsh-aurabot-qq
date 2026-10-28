@@ -1,24 +1,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { planDiaryTimes } from '../src/features/qzone.js'
 import { moodLabel, scoreText, decayed } from '../src/features/companion.js'
 import { matchSticker, pickForReply } from '../src/features/stickers.js'
 import { pickBotProcess, readOneBotEndpoint } from '../src/snowluma/manager.js'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-
-test('日记排期：窗口内、间隔够、按时间排序', () => {
-  let seed = 1
-  const rand = () => ((seed = (seed * 16807) % 2147483647) / 2147483647)
-  for (let i = 0; i < 50; i++) {
-    const t = planDiaryTimes({ timesPerDay: 2, windowStart: '10:00', windowEnd: '23:30', minGapMinutes: 180 }, rand)
-    assert.equal(t.length, 2)
-    assert.ok(t[0] >= 600 && t[1] < 1410)
-    assert.ok(t[1] - t[0] >= 180)
-  }
-  assert.deepEqual(planDiaryTimes({ timesPerDay: 0, windowStart: '10:00', windowEnd: '23:30', minGapMinutes: 180 }), [])
-})
 
 test('心情：关键词推动、半衰期回落', () => {
   assert.ok(scoreText('你好可爱 爱你') > 0)

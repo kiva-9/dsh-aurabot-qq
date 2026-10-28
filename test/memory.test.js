@@ -68,7 +68,7 @@ test('整理：提炼记忆、相处经验和说话方式；同一天再整理�
   assert.equal(r.added, 1)
   assert.equal(mem.insights()[0].list[0].text, '他喜欢被吐槽')
   assert.deepEqual(mem.styles()['qq:10000001'], ['消息很短，常一句话分几条发', '爱用 hhh'])
-  assert.ok(logs.has(today), '今天的流水留着（写日记要用）')
+  assert.ok(logs.has(today), '今天的流水留着')
 
   // 下午再整理：前面那 4 行不会再交给模型
   const n = asked.filter((a) => a.system.includes('整理长期记忆')).length
@@ -121,14 +121,17 @@ test('经历：她做过的事常驻上下文；群里优先想起正在说话�
   hubState.speakers = []
 })
 
-test('整理：群聊和空间里的事按 QQ 号记到人头上；空间动态一条也提炼', async () => {
+test('整理：群聊里的事按 QQ 号记到人头上；旧版空间互动留下的流水跳过', async () => {
   const today = day(new Date())
-  logs.set(today, [...(logs.get(today) || []), { chatId: 'qzone', who: '阿花', uid: '30000003', text: '发了说说：周末去看海了' }])
+  const g = (who, uid, text) => ({ chatId: 'group:555', who, uid, text })
+  logs.set(today, [...(logs.get(today) || []),
+    { chatId: 'qzone', who: '阿强', uid: '30000004', text: '发了说说：周末去爬山了' },
+    g('阿花', '30000003', '周末去看海了'), g('阿草', '30000005', '哇真好'), g('阿花', '30000003', '下次一起')])
   const n = asked.length
   await mem.consolidate({ includeToday: true })
-  const qz = asked.slice(n).find((a) => a.system.includes('QQ 空间里的动态'))
-  assert.ok(qz && qz.text.includes('阿花(30000003)'), '空间流水带着 QQ 号交给模型')
-  assert.ok(!asked.slice(n).some((a) => a.system.includes('{"insights"') && a.text.includes('看海')), '空间不回顾相处经验')
+  const facts = asked.slice(n).filter((a) => a.system.includes('整理长期记忆'))
+  assert.ok(facts.some((a) => a.text.includes('阿花(30000003)：周末去看海了')), '群聊流水带着 QQ 号交给模型')
+  assert.ok(!asked.slice(n).some((a) => a.text.includes('爬山')), '旧版空间流水不再提炼')
   const hit = mem.list('看海')[0]
   assert.equal(hit.about, '30000003')
 })

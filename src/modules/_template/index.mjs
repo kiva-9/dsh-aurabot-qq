@@ -7,7 +7,7 @@
 
 /** @type {import('../aurabot').AurabotModule} */ // 编辑器的自动补全靠这一行
 export default {
-  id: '__ID__', // 要和文件夹名一样；和内置模块同名（比如 diary）就是替换掉内置的
+  id: '__ID__', // 要和文件夹名一样；和内置模块同名（比如 stickers）就是替换掉内置的
   name: '__NAME__',
   version: '0.1.0',
   api: 1, // 按哪一版扩展接口写的，别改

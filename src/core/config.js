@@ -4,7 +4,6 @@ import { dataDir, readJson, writeJson } from './store.js'
 import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
-import { DIARY_AUDIENCES } from '../features/qzone-audience.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
@@ -14,7 +13,7 @@ export const DEFAULTS = {
   ownerQQ: '', // 主人 QQ 号（向导里填）
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
-  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinReplyComment: 'owner', douyinFollow: 'owner', douyinDm: 'owner', douyinShareOwner: 'owner', douyinReplyOwnerDm: 'owner', douyinSign: 'owner', douyinNickname: 'owner', douyinAvatar: 'owner' }, // 改资料类操作（含抖音浏览/互动/改资料）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
+  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' }, // 改资料类操作的权限：off 关 / owner 仅主人私聊 / all 所有人
   longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   allow: { private: [], groups: [] }, // 主人永远能私聊，不用写进白名单
   snowluma: {
@@ -69,17 +68,6 @@ export const DEFAULTS = {
     maxLibrary: 300, // 表情库最多存多少张（QQ 收藏表情有上限），超了就清掉最少用的
     caption: true, // 用视觉模型起备注
   },
-  diary: {
-    enabled: true,
-    timesPerDay: 2,
-    windowStart: '10:00',
-    windowEnd: '23:30',
-    minGapMinutes: 180,
-    minChars: 60,
-    maxChars: 140,
-    visibility: 'all', // all | friends | selected | self | excluded，和 QQ 空间自身的可见范围一致
-    audienceQQs: '', // selected / excluded 时可见（或不可见）的好友 QQ 号，换行或逗号分隔
-  },
   // 本地接口：数据目录 local/ 里的脚本接管这几项（文件要在、开关要开）
   local: { tts: false, image: false, song: false, asr: false },
   bili: {
@@ -100,40 +88,6 @@ export const DEFAULTS = {
     maxRepliesPerDay: 6,
     shareToOwner: true, // 看到好玩的私聊分享给主人
     like: false, // 顺手点赞
-  },
-  // 刷抖音：用专用的 Edge 窗口（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览/互动/改资料各项权限在 profilePerms.douyin*。
-  douyin: {
-    enabled: false, // 总开关：默认关，先在面板里登录抖音再打开
-    autoBrowse: true, // 定时自己去刷
-    intervalHours: 4,
-    maxRunsPerDay: 3,
-    perRun: 5, // 一轮看几个视频
-    maxWatchPerDay: 30, // 每天最多看几个（手动让她刷也算）
-    dwellMin: 8, // 每个视频停留的秒数（随机取一个）
-    dwellMax: 40,
-    browserPath: '', // 留空 = 自动找 Edge（找不到再找 Chrome）；也可填 msedge.exe 的完整路径
-    minimize: true, // 登录完把窗口最小化
-    dmPollMinutes: 7, // 看私信的频率（分钟，实际在 0.7~1.4 倍之间随机）
-    replyPollMinutes: 25, // 看别人回她评论的频率（分钟）
-    owner: { input: '', secUid: '', uid: '', nickname: '', avatar: '', confirmedInput: '' }, // 主人抖音；secUid/uid 由「核对」写入，面板不能直接改
-    socialInterruptBrowse: true, // 社交（私信/分享）进行中时打断刷流，原因写入 lastSkipReason
-    shareBias: 'proactive', // stingy|normal|proactive：刷流 think 里 share 的倾向（默认积极推给主人）
-    caps: { like: 30, comment: 3, replyComment: 6, follow: 5, dm: 5, shareOwner: 5, dmReply: 20, sign: 2, nickname: 2, avatar: 1 }, // 每天上限（登录后前 3 天减半；改资料三项仅工具）
-    gate: {
-      maxWritesPerDay: 60, // 所有写操作合计上限
-      minWriteGapSec: 20, // 任意两次写操作之间至少隔这么多秒
-      newAccountDays: 3, // 首次登录起这么多天内，单项上限和总写次数都减半
-    },
-  },
-  qzoneSocial: {
-    enabled: true,
-    replyOwn: true, // 回复自己说说下别人的新评论
-    commentFriends: true, // 逛好友动态，偶尔评论
-    friendChance: 0.3, // 看到一条好友说说时互动（点赞 + 可能评论）的概率
-    ownerChance: 0.7, // 主人的说说互动概率
-    like: true, // 互动时顺手点赞
-    maxPerDay: 8, // 每天最多评论几条（点赞不算）
-    intervalMin: 30, // 多久逛一次空间
   },
   speakUp: {
     enabled: true, // 只在和主人的私聊里主动找你，群里不会
@@ -227,28 +181,11 @@ export function normalize(raw) {
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
   c.stickers.maxLibrary = num(c.stickers.maxLibrary, 300, 20, 2000)
-  c.diary.timesPerDay = num(c.diary.timesPerDay, 2, 0, 6)
-  c.diary.windowStart = hhmm(c.diary.windowStart, '10:00')
-  c.diary.windowEnd = hhmm(c.diary.windowEnd, '23:30')
-  c.diary.minGapMinutes = num(c.diary.minGapMinutes, 180, 0, 1440)
-  c.diary.minChars = num(c.diary.minChars, 60, 10, 500)
-  c.diary.maxChars = num(c.diary.maxChars, 140, 20, 1000)
-  c.diary.visibility = DIARY_AUDIENCES.includes(c.diary.visibility) ? c.diary.visibility : 'all'
-  c.diary.audienceQQs = qqList(c.diary.audienceQQs).slice(0, 200).join('\n')
   c.speakUp.idleMinutes = num(c.speakUp.idleMinutes, 40, 5, 1440)
   c.speakUp.nudge = bool(c.speakUp.nudge, true)
   c.speakUp.minIntervalMinutes = num(c.speakUp.minIntervalMinutes, 90, 5, 1440)
   c.speakUp.maxIntervalMinutes = Math.max(c.speakUp.minIntervalMinutes, num(c.speakUp.maxIntervalMinutes, 240, 5, 2880))
   c.speakUp.maxPerDay = num(c.speakUp.maxPerDay, 3, 0, 20)
-  const q = c.qzoneSocial
-  q.enabled = bool(q.enabled, true)
-  q.replyOwn = bool(q.replyOwn, true)
-  q.commentFriends = bool(q.commentFriends, true)
-  q.like = bool(q.like, true)
-  q.friendChance = num(q.friendChance, 0.3, 0, 1)
-  q.ownerChance = num(q.ownerChance, 0.7, 0, 1)
-  q.maxPerDay = num(q.maxPerDay, 8, 0, 50)
-  q.intervalMin = num(q.intervalMin, 30, 5, 1440)
   c.mood.halfLifeHours = num(c.mood.halfLifeHours, 3, 0.25, 72)
   c.mood.judge = bool(c.mood.judge, false)
   for (const k of ['tts', 'image', 'song', 'asr']) c.local[k] = bool(c.local[k], false)
@@ -263,34 +200,6 @@ export function normalize(raw) {
   b.maxCommentsPerDay = num(b.maxCommentsPerDay, 3, 0, 50)
   b.maxRepliesPerDay = num(b.maxRepliesPerDay, 6, 0, 100)
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
-  const d = c.douyin
-  d.enabled = bool(d.enabled, false)
-  d.autoBrowse = bool(d.autoBrowse, true)
-  d.minimize = bool(d.minimize, true)
-  d.socialInterruptBrowse = bool(d.socialInterruptBrowse, true)
-  d.intervalHours = num(d.intervalHours, 4, 1, 48)
-  d.maxRunsPerDay = num(d.maxRunsPerDay, 3, 0, 24)
-  d.perRun = num(d.perRun, 5, 1, 10)
-  d.maxWatchPerDay = num(d.maxWatchPerDay, 30, 0, 200)
-  d.dwellMin = num(d.dwellMin, 8, 3, 120)
-  d.dwellMax = Math.max(d.dwellMin, num(d.dwellMax, 40, 3, 300))
-  d.dmPollMinutes = num(d.dmPollMinutes, 7, 2, 120)
-  d.replyPollMinutes = num(d.replyPollMinutes, 25, 5, 240)
-  d.browserPath = String(d.browserPath || '').trim()
-  if (!isObj(d.owner)) d.owner = {}
-  for (const k of ['input', 'secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) d.owner[k] = String(d.owner[k] ?? '').trim().slice(0, 400)
-  if (!isObj(d.caps)) d.caps = {}
-  {
-    const rawBias = String(d.shareBias || 'proactive').toLowerCase()
-    d.shareBias = rawBias === 'off' || rawBias === 'stingy' ? 'stingy'
-      : rawBias === 'normal' ? 'normal'
-      : 'proactive'
-  }
-  for (const [k, dv, max] of [['like', 30, 300], ['comment', 3, 30], ['replyComment', 6, 60], ['follow', 5, 50], ['dm', 5, 30], ['shareOwner', 5, 30], ['dmReply', 20, 200], ['sign', 2, 20], ['nickname', 2, 20], ['avatar', 1, 10]]) d.caps[k] = num(d.caps[k], dv, 0, max)
-  if (!isObj(d.gate)) d.gate = {}
-  d.gate.maxWritesPerDay = num(d.gate.maxWritesPerDay, 60, 1, 500)
-  d.gate.minWriteGapSec = num(d.gate.minWriteGapSec, 20, 0, 600)
-  d.gate.newAccountDays = num(d.gate.newAccountDays, 3, 0, 30)
   delete c.mood.maxInjectPerDay // 旧版的「每天最多提醒几次」，现在心情明显时每轮都会带上
   c.snowluma.webuiPort = num(c.snowluma.webuiPort, 5099, 1, 65535)
   // 老配置只有一个 consolidateAt：换成两个时间点（它 + 12 小时后）
@@ -397,7 +306,7 @@ export function splitBiliCookie({ sessdata = '', biliJct = '', cookie = '' } = {
 const FILE = () => dataDir('config.json')
 
 /** 在某次更新里新增、会替她公开发东西的功能。以后再加这类功能，把配置键名加到这里。 */
-export const OPT_IN_ON_UPDATE = ['qzoneSocial', 'bili', 'douyin']
+export const OPT_IN_ON_UPDATE = ['bili']
 
 export function loadConfig() {
   const raw = readJson(FILE(), {})
@@ -441,10 +350,6 @@ export function mergeFromPanel(current, incoming) {
     delete p[`${k}Set`]
     delete p[`${k}Hint`]
   }
-  // 主人的抖音 secUid / 昵称 / 头像只能由「核对」路由写入，面板存配置时保留原值
-  if (!next.douyin) next.douyin = {}
-  if (!next.douyin.owner) next.douyin.owner = {}
-  for (const k of ['secUid', 'uid', 'nickname', 'avatar', 'confirmedInput']) next.douyin.owner[k] = current.douyin?.owner?.[k] ?? ''
   // 联动密钥只由插件生成，面板不能改
   next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开

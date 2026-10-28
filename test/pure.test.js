@@ -234,34 +234,6 @@ test('规则：画画、唱歌只在功能真的能用时告诉她', async () =>
   assert.match(on, /你会唱歌/)
 })
 
-test('空间互动：评论清洗、好友动态筛选', async () => {
-  const { cleanComment, pickFeeds } = await import('../src/features/qzone-social.js')
-  assert.equal(cleanComment('**好看**\n第二句\n第三句'), '好看 第二句')
-  assert.equal(cleanComment('[沉默]'), '')
-  assert.equal(cleanComment('x'.repeat(100)).length, 60)
-  const now = Date.now()
-  const feeds = [
-    { appid: 311, uin: 1, key: 'a', time: now / 1000 - 60 },
-    { appid: 6600, uin: 0, key: 'ad', time: now / 1000 },
-    { appid: 311, uin: 9, key: 'mine', time: now / 1000 },
-    { appid: 311, uin: 2, key: 'old', time: now / 1000 - 2 * 86400 },
-  ]
-  assert.deepEqual(pickFeeds(feeds, '9', now).map((f) => f.key), ['a'])
-})
-
-test('空间互动：一串评论里没回的新消息', async () => {
-  const { pendingInThread } = await import('../src/features/qzone-social.js')
-  const me = '9'
-  assert.deepEqual(pendingInThread({ uin: 1, time: 1, comment_id: 'c1', replies: [] }, me).pending.map((x) => x.id), ['c1'])
-  // 她自己的评论下面别人接着回她
-  const mine = { uin: 9, time: 1, comment_id: 'c2', replies: [{ uin: 1, time: 2, comment_id: 'r1' }, { uin: 1, time: 3, comment_id: 'r2' }] }
-  assert.deepEqual(pendingInThread(mine, me).pending.map((x) => x.id), ['c2/r1', 'c2/r2'])
-  // 她已经在串里说了最后一句
-  assert.equal(pendingInThread({ uin: 1, time: 1, comment_id: 'c3', replies: [{ uin: 9, time: 2, comment_id: 'r1' }] }, me).pending.length, 0)
-  // 处理过的不再算
-  assert.equal(pendingInThread(mine, me, new Set(['c2/r1', 'c2/r2'])).pending.length, 0)
-})
-
 test('更新：版本比较、仓库名、更新命令、更新说明', async () => {
   const u = await import('../src/core/update.js')
   assert.ok(u.compareVersions('0.3.0', '0.2.9') > 0)
@@ -288,25 +260,14 @@ test('更新后：会公开发东西的新功能，老用户先关着，新安�
   process.env.AURABOT_DATA_DIR = dir
   try {
     const { loadConfig } = await import('../src/core/config.js')
-    assert.equal(loadConfig().qzoneSocial.enabled, true, '新安装（还没走完向导）默认开')
+    assert.equal(loadConfig().bili.enabled, false, '新安装：B 站本来就默认关')
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ setupDone: true, botQQ: '1', ownerQQ: '2' }))
-    assert.equal(loadConfig().qzoneSocial.enabled, false, '老用户更新：先关着')
-    writeFileSync(join(dir, 'config.json'), JSON.stringify({ setupDone: true, qzoneSocial: { enabled: true } }))
-    assert.equal(loadConfig().qzoneSocial.enabled, true, '自己打开过的保持打开')
+    assert.equal(loadConfig().bili.enabled, false, '老用户更新：先关着')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ setupDone: true, bili: { enabled: true } }))
+    assert.equal(loadConfig().bili.enabled, true, '自己打开过的保持打开')
   } finally {
     process.env.AURABOT_DATA_DIR = prev
   }
-})
-
-test('空间互动：说说下的评论整理成上下文', async () => {
-  const { summarizeComments } = await import('../src/features/qzone-social.js')
-  const comments = [
-    { uin: 1, name: 'A', content: '好看', comment_id: 'c1', replies: [{ uin: 9, name: '大肥鱼', content: '谢谢' }] },
-    { uin: 2, name: '小明', content: '在哪拍的', comment_id: 'c2', replies: [] },
-  ]
-  assert.deepEqual(summarizeComments(comments, { selfId: '9', ownerQQ: '2', ownerName: '主人' }), ['A：好看', '  └ 你：谢谢', '小明（你的主人）：在哪拍的'])
-  assert.deepEqual(summarizeComments(comments, { selfId: '9', exclude: 'c1' }), ['小明：在哪拍的'])
-  assert.equal(summarizeComments(comments, { selfId: '9', max: 1 }).at(-1), '……还有 2 条')
 })
 
 test('解析：合并转发记下 id，回复里的 <poke> 变成戳一戳', async () => {
@@ -322,7 +283,7 @@ test('解析：合并转发记下 id，回复里的 <poke> 变成戳一戳', asy
 test('#6 改资料权限：默认仅主人私聊；所有人含群；关了都不行；执行时再查', async () => {
   const { normalize } = await import('../src/core/config.js')
   const d = normalize({ ownerQQ: '1' })
-  assert.deepEqual(d.profilePerms, { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinReplyComment: 'owner', douyinFollow: 'owner', douyinDm: 'owner', douyinShareOwner: 'owner', douyinReplyOwnerDm: 'owner', douyinSign: 'owner', douyinNickname: 'owner', douyinAvatar: 'owner' })
+  assert.deepEqual(d.profilePerms, { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' })
   assert.equal(normalize({ profilePerms: { qqAvatar: 'boss', biliSign: 'all' } }).profilePerms.qqAvatar, 'owner', '乱填的回到默认')
   const ownerPm = { kind: 'private', userId: '1' }
   const otherPm = { kind: 'private', userId: '2' }

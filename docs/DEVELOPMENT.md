@@ -11,23 +11,23 @@ npm ci
 npm test
 ```
 
-提交 `package-lock.json`，让后续开发使用相同的依赖版本。只有需要调整依赖时才运行 `npm install`，并一起审查锁文件的变化。`douyin-im` 是可选依赖；涉及抖音功能时可用 `npm ls douyin-im` 检查是否安装成功。
+提交 `package-lock.json`，让后续开发使用相同的依赖版本。只有需要调整依赖时才运行 `npm install`，并一起审查锁文件的变化。目前插件没有第三方运行依赖。
 
 本项目没有独立的 `npm run dev` 或构建步骤。面板依赖 DSH 提供的服务与界面插槽，需要在 DSH 中查看实际效果。
 
 ## 在 Windows 上接续开发
 
-安装 Git、Node.js 24.19.0 和 DSH 桌面版。本次开发初始化与重构方案保存在 fork 的 `codex/refactor-plan` 分支；首次下载时在 PowerShell 中执行：
+安装 Git、Node.js 24.19.0 和 DSH 桌面版。首次下载时在 PowerShell 中执行：
 
 ```powershell
-git clone --branch codex/refactor-plan https://github.com/kiva-9/dsh-aurabot-qq.git
+git clone https://github.com/kiva-9/dsh-aurabot-qq.git
 cd dsh-aurabot-qq
 node --version
 npm.cmd ci
 npm.cmd test
 ```
 
-已有本地仓库但尚无该分支时，进入仓库后执行 `git fetch origin` 和 `git switch --track origin/codex/refactor-plan`。切换前检查本地未提交修改，避免覆盖自己的工作。后续可以从此分支建立功能分支，不必回到还没有方案的旧 `main`。
+重构方案、审计材料和重构进度放在仓库根目录的 `.refactor/`，这个目录被 `.gitignore` 忽略，只在本机保存。换机器接续时需要自己复制过去；最初版本可从 Git 历史 `e584093` 的 `docs/` 里取回。
 
 若使用 nvm-windows，显式执行 `nvm install 24.19.0` 和 `nvm use 24.19.0`；不要依赖它自动读取 `.nvmrc`。上面的 `npm.cmd` 可避免 PowerShell 选择 `npm.ps1` 时受到脚本执行策略影响，无需为此修改系统执行策略。
 
@@ -48,7 +48,7 @@ git diff --check
 
 测试使用 Node.js 自带的测试运行器。端到端测试由 `test/helpers/fake-dsh.js` 和 `test/helpers/mock-onebot.js` 提供模拟 DSH、模型和 OneBot 网关；这些模拟链路不需要真实 QQ 账号或模型 API Key。
 
-初始化时，在 Linux + Node.js 24.19.0 上运行上游提交 `6acbf9d` 的 272 项测试：269 项通过，3 项失败。两项失败来自端到端测试依赖 Windows 语音服务，另一项来自翻唱安装测试依赖 Windows 路径和 C 盘。暂时保留原测试，待功能裁剪范围确定后再处理。这是初始化基线，不代表后续版本的测试结果。
+初始化时，在 Linux + Node.js 24.19.0 上运行上游提交 `6acbf9d` 的 272 项测试：269 项通过，3 项失败。两项失败来自端到端测试依赖 Windows 语音服务，另一项来自翻唱安装测试依赖 Windows 路径和 C 盘。这是初始化基线。删除 QQ 空间与抖音之后剩 187 项；在 Windows 上 185 项通过，失败的 2 项是依赖中文 Windows 语音（Huihui）的端到端用例，本机没装中文语音时会超时。
 
 Linux 云端用于代码开发和自动化测试。真实 QQ 登录、SnowLuma 注入、Windows 语音和桌面交互需要在 Windows + DSH 桌面版中联调；自动化测试通过不代表这些真实服务已经验证。
 

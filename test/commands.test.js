@@ -38,7 +38,6 @@ function deps() {
       hub: { joinTopic: (g) => calls.push(['join', g]), leaveTopic: (g) => calls.push(['leave', g]), resetChat: (c) => calls.push(['reset', c]), stats: () => ({ received: 3, sent: 2 }) },
       mood: { label: () => '开心' },
       memory: { add: (x) => { calls.push(['remember', x.text]); return { ok: true, id: 'm1' } } },
-      qzone: null,
     },
   }
 }

@@ -236,12 +236,12 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     return n
   }
 
-  /** 她自己做过的事（唱了歌、在空间评论了谁……）：记成「经历」，最近一天的会常驻在上下文里。 */
+  /** 她自己做过的事（唱了歌、看了 B 站视频……）：记成「经历」，最近一天的会常驻在上下文里。 */
   function addEvent({ text, about = '', aboutName = '', tags = [], importance = 0.45 }) {
     return add({ text, about, aboutName, tags: ['经历', ...tags], importance, source: 'event' })
   }
 
-  /** 最近 hours 小时里她做过的事（经历 + 空间日记），新的在前。 */
+  /** 最近 hours 小时里她做过的事（经历 + 旧版写过的空间日记），新的在前。 */
   function recentEvents(hours = 24, limit = 4) {
     const since = Date.now() - hours * 3600_000
     return load().items.filter((m) => (m.source === 'event' || m.source === 'diary') && m.at >= since).sort((a, b) => b.at - a.at).slice(0, limit)
@@ -456,10 +456,9 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
   /** 从一段聊天里提炼长期记忆，并回顾相处经验。lines：[{who, text}] */
   async function extractLines(chatId, lines) {
     const talk = lines.filter((l) => l.text && !String(l.text).startsWith('【系统'))
-    const isQzone = chatId === 'qzone'
-    // 空间动态一条就可能有料；聊天至少要几句
-    if (talk.filter((l) => l.who !== 'bot').length < (isQzone ? 1 : 3)) return { ok: false, message: '内容太少', added: 0, insights: 0 }
-    // 带上 QQ 号，模型才能把事记到人头上（群聊、空间里说话的人很多）
+    // 聊天至少要几句
+    if (talk.filter((l) => l.who !== 'bot').length < 3) return { ok: false, message: '内容太少', added: 0, insights: 0 }
+    // 带上 QQ 号，模型才能把事记到人头上（群聊里说话的人很多）
     const line = (l) => (l.who === 'bot' ? '我' : l.uid ? `${l.who}(${l.uid})` : l.who) + '：' + l.text
     try {
       // 太长就分段，每段最多 80 行
@@ -467,8 +466,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
       for (let i = 0; i < talk.length; i += 80) chunks.push(talk.slice(i, i + 80))
       let n = 0
       for (const part of chunks.slice(-3)) n += await extractFacts(chatId, part.map(line).join('\n'))
-      log.info(`从 ${chatId} 的${isQzone ? '空间动态' : '聊天'}里提炼了 ${n} 条新记忆`)
-      if (isQzone) return { ok: true, added: n, insights: 0 }
+      log.info(`从 ${chatId} 的聊天里提炼了 ${n} 条新记忆`)
       // 顺便回顾一次相处经验（用全天的聊天，最多最近 120 行）
       let ins = 0
       try {
@@ -500,12 +498,11 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
 
   async function extractFacts(chatId, transcript) {
     const cfg = getConfig()
-    const source = chatId === 'qzone' ? '下面是 QQ 空间里的动态（好友发的说说、别人给你的评论、你的回复）' : '下面是一段聊天'
     const related = relatedTo(chatId, transcript)
     const known = new Map(related.map((m) => [m.id, m]))
     const out = await askModel(dsh, {
       cfg,
-      system: `你帮一个叫「大肥鱼」的聊天角色整理长期记忆。${source}，说话人后面括号里是 QQ 号。挑出以后值得记住的事实：别人的名字/称呼、喜好、讨厌的东西、身份、近况和重要经历、约定、你们之间的关系变化。不要记寒暄、日常琐事、一次性的问答；不要记大肥鱼自己的人设和喜好（她本来就知道），只记关于别人、以及你们之间的事。每条一句话，主语写清楚是谁。QQ 号是 ${cfg.ownerQQ} 的人是她的${cfg.ownerName || '主人'}。` +
+      system: `你帮一个叫「大肥鱼」的聊天角色整理长期记忆。下面是一段聊天，说话人后面括号里是 QQ 号。挑出以后值得记住的事实：别人的名字/称呼、喜好、讨厌的东西、身份、近况和重要经历、约定、你们之间的关系变化。不要记寒暄、日常琐事、一次性的问答；不要记大肥鱼自己的人设和喜好（她本来就知道），只记关于别人、以及你们之间的事。每条一句话，主语写清楚是谁。QQ 号是 ${cfg.ownerQQ} 的人是她的${cfg.ownerName || '主人'}。` +
         (related.length ? '\n每条新事实先和「已经记得的事」比一比：全新的写 "op":"add"；是对某条旧记忆的补充或更准确的说法，写 "op":"update"、"id" 填那条的编号、"text" 写合并后的完整说法；和某条旧记忆矛盾、说明那条已经过时（比如以前喜欢现在不喜欢了、换了工作、搬家了、分手了），写 "op":"outdated"、"id" 填旧的编号、"text" 写现在的新事实。拿不准是不是矛盾就当 add；已经记得、没有新信息的不要输出。' : '') +
         `只输出 JSON 数组，例如 [{"op":"add","text":"小明喜欢吃辣","about":"小明","about_qq":"12345","importance":0.6}]（about_qq 写这件事是关于谁的 QQ 号，不知道就不写），没有值得记的就输出 []。`,
       text: (related.length ? `已经记得的事：\n${related.map((m) => `#${m.id} [${whenText(m.at)}] ${m.aboutName ? '[' + m.aboutName + '] ' : ''}${m.text}`).join('\n')}\n\n` : '') + transcript,
@@ -518,7 +515,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
     for (const x of arr.slice(0, 12)) {
       if (!x || !x.text) continue
       if (/^(我|大肥鱼)/.test(String(x.about || '')) || String(x.about || '') === '大肥鱼') continue
-      // 关于谁：模型给了 QQ 号就用（群聊、空间里也能记到人头上），私聊默认是对方
+      // 关于谁：模型给了 QQ 号就用（群聊里也能记到人头上），私聊默认是对方
       const qq = String(x.about_qq ?? '').replace(/\D/g, '')
       const about = qq.length >= 5 && qq !== String(cfg.botQQ) ? qq : chatId.startsWith('private:') ? chatId.slice(8) : ''
       const op = String(x.op || 'add')
@@ -550,7 +547,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
 
   /**
    * 整理临时记忆。
-   * @param {{includeToday?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删（写日记还要用）
+   * @param {{includeToday?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删
    */
   async function consolidate(o = {}) {
     if (busy) return { ok: false, message: '正在整理中' }
@@ -569,7 +566,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
         const all = hub.chatLogOf(day)
         const byChat = new Map()
         for (const l of all.slice(done)) {
-          if (String(l.chatId).startsWith('system:')) continue
+          // system:* 是后台任务；qzone 是已删除的空间互动在旧版本留下的流水
+          if (String(l.chatId).startsWith('system:') || l.chatId === 'qzone') continue
           if (!byChat.has(l.chatId)) byChat.set(l.chatId, [])
           byChat.get(l.chatId).push(l)
         }
@@ -581,7 +579,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log }) {
         const s = load()
         s.processed = s.processed || {}
         if (day < today) {
-          hub.deleteChatLog(day) // 整理完清空（今天的留着，写日记还要用）
+          hub.deleteChatLog(day) // 整理完清空（今天的留着）
           delete s.processed[day]
         } else {
           s.processed[day] = all.length

@@ -67,10 +67,10 @@ before(async () => {
     modules: { bili: { enabled: false } },
   }))
   writeMod('echo', echoCode('pong'))
-  // 替换内置的空间日记
-  writeMod('diary', `export default { id: 'diary', name: '我的日记', api: 1, setup(api) {
-    api.route('/diary/history', async () => ({ ok: true, items: [], next: 0, mine: true }))
-    return { nextTime: () => 0, history: () => [], writeDiary: async () => { globalThis.__wrote = (globalThis.__wrote || 0) + 1; return { ok: true } } }
+  // 替换内置的白名单管理
+  writeMod('contacts', `export default { id: 'contacts', name: '我的名单', api: 1, setup(api) {
+    api.route('/contacts/mine', async () => ({ ok: true, mine: true }))
+    return {}
   } }`)
   fake = createFakeDsh({ brain })
   const host = await import('../src/host.js')
@@ -91,14 +91,14 @@ test('自己写的模块加载了；同名的替换了内置的；关掉的内�
   assert.equal(echo.running, 'user')
   assert.deepEqual(echo.tools, ['echo_tool'])
   assert.deepEqual(echo.commands, ['echo'])
-  const diary = await mod('diary')
-  assert.equal(diary.running, 'user')
-  assert.equal(diary.builtin, true)
-  assert.equal(diary.forkedFrom, '1.0.0', '记下了替换时内置模块的版本')
+  const contacts = await mod('contacts')
+  assert.equal(contacts.running, 'user')
+  assert.equal(contacts.builtin, true)
+  assert.equal(contacts.forkedFrom, '1.0.0', '记下了替换时内置模块的版本')
   assert.equal((await mod('bili')).running, null)
   assert.equal((await mod('memory')).running, 'builtin')
   // 被替换的接口走自己写的；关掉模块的接口告诉面板「模块没开」
-  assert.equal((await fake.call('/diary/history')).json().mine, true)
+  assert.equal((await fake.call('/contacts/mine')).json().mine, true)
   const off = (await fake.call('/bili/state')).json()
   assert.equal(off.ok, false)
   assert.equal(off.moduleOff, true)
@@ -120,8 +120,6 @@ test('模块接管消息、改写回复、加命令；她的规则里有模块�
   await until(() => sentTo(OWNER).includes('echo: 你好'))
   mock.push(priv('/help'))
   await until(() => sentTo(OWNER).some((t) => t.includes('扩展模块加的') && t.includes('/echo')))
-  mock.push(priv('/diary'))
-  await until(() => globalThis.__wrote === 1)
 
   const rules = fake.variables.get('aurabot_rules_private')()
   assert.match(rules, /你会说回声/)
@@ -159,10 +157,10 @@ test('替换版写坏了：先用回内置的，面板看得到报错', async ()
 test('安全模式：自己写的一个都不加载，内置的回来', async () => {
   await fake.call('/save', { safeMode: true })
   assert.equal((await mod('echo')).running, null)
-  assert.equal((await mod('diary')).running, 'builtin')
+  assert.equal((await mod('contacts')).running, 'builtin')
   await fake.call('/save', { safeMode: false })
   assert.equal((await mod('echo')).running, 'user')
-  assert.equal((await mod('diary')).running, 'user')
+  assert.equal((await mod('contacts')).running, 'user')
 })
 
 test('复制内置模块来改：复制出来的能直接跑（连翻唱这种带数据文件的）', async () => {

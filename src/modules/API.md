@@ -3,7 +3,7 @@
 > 这个文件由插件维护，每次启动都会更新成当前版本，**别改它**（改了也会被覆盖）。
 > 你自己写的模块放在和它同一个文件夹（`modules/`）里，插件升级不会动。
 
-大肥鱼的每项本事都是一个**模块**：表情包、语音、心情、记忆、空间日记、B 站、翻唱、生图……
+大肥鱼的每项本事都是一个**模块**：表情包、语音、心情、记忆、B 站、翻唱、生图……
 你可以：
 
 - **加新模块**：给她新本事（查天气、接智能家居、关键词回复、对接自己的服务……）
@@ -266,7 +266,7 @@ api.tool(({ chat, level, sessionId }) => {
 ## 面板
 
 **自动表单**：写了 `settings`，面板会多一个这个模块的标签页，自动生成设置表单，用户改完点保存。
-定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `diary` `speakup` `mood` `song` `bili` `douyin` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
+定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `speakup` `mood` `song` `bili` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
 
 ```js
 settings: [
@@ -311,11 +311,8 @@ return function Panel({ settings, save, toast }) {
 | `qq-tools` | 基础 QQ 工具 | （只有工具：`qq_chat_history`、`qq_send_message`） |
 | `group-admin` | 群管 | （只有工具：`qq_group_admin`） |
 | `imagegen` | 生图 | `enabled()` `generate(描述) → Buffer` |
-| `diary` | 空间日记 | `writeDiary()` `post(正文, { images, visibility })` `remove(tid)` `history()` `nextTime()` |
-| `qzone-social` | 空间互动 | `run({ force })` `state()` |
 | `speakup` | 主动搭话 | `fire(原因)` `state()` |
 | `bili` | B 站 | `watch(链接)` `comment(链接, 文字)` `run()` `checkReplies()` `account()` `state()` |
-| `douyin` | 刷抖音 | `watch` `likeVideo` `commentVideo` `followUser` `dmTo` `shareToOwner` `run` `checkOwnerDms` `checkCommentReplies` `confirmOwner` `account` `state`；工具 `douyin_watch` / `douyin_like` / `douyin_comment` / `douyin_follow` / `douyin_dm` / `douyin_share`（关注仅工具，刷流不自动关注） |
 | `song` | 翻唱 | `request({ song, pitch, chatId })` `search(关键词)` `status()` `install()` |
 
 聊天中枢需要的时候会去找 `stickers`（发表情、偷表情）、`voice`（发语音）、`mood`（心情影响表情 / 语音频率）、`memory`（群聊插话判断）。
@@ -324,7 +321,7 @@ return function Panel({ settings, save, toast }) {
 ## 替换内置模块
 
 1. 面板「扩展」页，在要替换的内置模块那一行点「复制一份来改」
-2. `modules/<id>/` 里出现 `index.mjs` 和它用到的实现文件（比如 `qzone.js`），开头注释写着从哪个版本复制的
+2. `modules/<id>/` 里出现 `index.mjs` 和它用到的实现文件（比如 `stickers.js`），开头注释写着从哪个版本复制的
 3. 改，保存。几秒内面板显示「用的是你的版本」
 4. 想临时用回内置的：那一行的「用内置的」开关；想彻底不要了：删掉文件夹
 
@@ -339,7 +336,7 @@ return function Panel({ settings, save, toast }) {
 - **模拟一条消息**：选你是主人还是别人、私聊还是群聊，写一句话，看它会被哪个模块接管、命令回了什么；再写一句「她的回复」，看经过各个模块改写后最后会发出去什么
 - 你的模块加的 `/命令` 在模拟里**会执行**（看 `run` 回了什么）
 - **调用工具**：选一个工具、填参数（JSON），直接调用，看返回值
-- 这期间**发出去的消息只截下来显示，不会真发到 QQ**。但模块直接调 `api.onebot(...)` 的操作（禁言、发空间……）不在此列，是真的会执行的
+- 这期间**发出去的消息只截下来显示，不会真发到 QQ**。但模块直接调 `api.onebot(...)` 的操作（禁言、踢人……）不在此列，是真的会执行的
 - 内置命令（`/off` 这些会改设置的）模拟里不执行
 
 ## 内部源码
