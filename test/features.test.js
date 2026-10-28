@@ -22,6 +22,8 @@ test('表情匹配：按名字和标签', () => {
   assert.equal(matchSticker(items, '开心').md5, 'b')
   assert.equal(matchSticker(items, '完全无关xyz'), null)
   assert.equal(pickForReply(items, '哼 好委屈').md5, 'a')
+  assert.equal(pickForReply(items, '完全无关xyz'), null, '没有合适项就不发，不能随机补图')
+  assert.equal(matchSticker([{ ...items[0], state: 'pending' }], '委屈'), null, '未审核素材不参与召回')
 })
 
 test('只挑机器人号的 QQ 进程，识别不了就不注入', () => {

@@ -4,14 +4,10 @@
 import { createOpenAIImages } from './openai.js'
 import { createGeminiImages } from './gemini.js'
 import { createComfyImages } from './comfyui.js'
-import { mergeCapabilities, ProviderError, imageMime } from './common.js'
+import { createHttpImages } from './http.js'
+import { mergeCapabilities, ProviderError, imageMime, checkRequest } from './common.js'
 
-const FACTORIES = { openai: createOpenAIImages, gemini: createGeminiImages, comfyui: createComfyImages }
-// http 映射适配器单独加载（文件可能还没有时不影响其他协议）
-try {
-  const m = await import('./http.js')
-  if (m.createHttpImages) FACTORIES.http = m.createHttpImages
-} catch (error) {}
+const FACTORIES = { openai: createOpenAIImages, gemini: createGeminiImages, comfyui: createComfyImages, http: createHttpImages }
 
 export const PROTOCOLS = () => Object.keys(FACTORIES)
 
@@ -21,6 +17,8 @@ export function createLocalImages(local, { toImageBuffer }) {
     protocol: 'local',
     capabilities: () => ({ modes: ['text'], maxInputs: 0, async: false, cancel: false, idempotent: false, sizes: [] }),
     async submit(req) {
+      const why = checkRequest(req, { modes: ['text'], maxInputs: 0, sizes: [] })
+      if (why) throw new ProviderError('unsupported', why)
       let buf
       try {
         buf = await toImageBuffer(await local.call('image', { prompt: req.prompt, size: req.size }))

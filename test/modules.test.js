@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startMockOneBot } from './helpers/mock-onebot.js'
 import { createFakeDsh } from './helpers/fake-dsh.js'
+import { png as fakePng } from './helpers/images.js'
 
 const OWNER = '10000001'
 const BOT = '20000002'
@@ -243,6 +244,8 @@ test('联动：别的 DSH 插件能 ctx.get(aurabot)；打开后 DSH 会话有�
 })
 
 test('改她怎么想、怎么说：群聊决定、提示词、拆条、最终发送、模型、人格、规则、戳一戳都能改', async () => {
+  // 本例验证 legacy hook 的接线；新的自动参与控制器有独立回归，默认不允许 hook 绕过容量。
+  await fake.call('/save', { participation: { enabled: false } })
   writeMod('hooks-demo', `export default { id: 'hooks-demo', api: 1, setup(api) {
     api.on('group/decide', (d, { msg }) => (msg.text.includes('强制回') ? { reply: true, mode: 'must', reason: '模块说要回' } : undefined))
     api.on('prompt', (content) => (content[0] && content[0].text.includes('钩子测试') ? [{ type: 'text', text: content[0].text + ' [附加背景]' }, ...content.slice(1)] : undefined))
@@ -271,6 +274,7 @@ test('改她怎么想、怎么说：群聊决定、提示词、拆条、最终�
   rmSync(modDir('hooks-demo'), { recursive: true, force: true })
   await until(async () => !(await mod('hooks-demo')))
   assert.doesNotMatch(fake.variables.get('aurabot_persona')(), /【模块人格】/, '模块删掉后改写也撤掉了')
+  await fake.call('/save', { participation: { enabled: true } })
 })
 
 test('多文件模块：改了哪个文件都重新加载；模块自己装的 npm 包找得到', async () => {
@@ -336,37 +340,58 @@ test('api.reply 在群里以引用回复发出；api.isOwner 认得主人', asyn
   assert.ok(c.params.message.some((s) => s.type === 'reply' && String(s.data.id) === '4242'))
 })
 
-// 一张能过表情尺寸检查的小图（PNG 头 + 宽高）
-function fakePng(w, h, salt = 0) {
-  const b = Buffer.alloc(64 + salt)
-  b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47
-  b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20)
-  b[40] = salt
-  return b
-}
-
-test('#3 表情：从 QQ 收藏导入（已有的跳过、不再往 QQ 里加一遍）；主人让她存刚发的那张', async () => {
-  const fav = [fakePng(200, 200, 1), fakePng(200, 200, 2)].map((b) => 'base64://' + b.toString('base64'))
-  mock.state.favorites = fav
-  const adds = mock.calls.filter((c) => c.action === 'add_custom_face').length
-  const r = (await fake.call('/sticker/import-qq')).json()
+test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏后显式批准才同步', async (t) => {
+  const chatId = `private:${OWNER}`
+  const query = `/stickers?chatId=${chatId}`
+  const fixtures = new Map([1, 2].map((salt) => [`https://93.184.216.34/sticker-test/${salt}.png`, fakePng(200, 200, salt)]))
+  const realFetch = globalThis.fetch
+  // 只拦截此测试的公开 URL，不发外网请求，也不放宽生产代码的 SSRF 检查。
+  t.mock.method(globalThis, 'fetch', async (url, options) => fixtures.has(String(url))
+    ? new Response(fixtures.get(String(url)), { headers: { 'content-type': 'image/png' } }) : realFetch(url, options))
+  mock.state.favorites = [...fixtures.keys()].map((url, i) => ({ url, ...(i === 0 ? { emoji_id: 'existing-1' } : {}) }))
+  const adds = mock.sent('add_custom_face').length
+  assert.equal((await fake.call('/sticker/import-qq', {})).json().ok, false, '导入必须指定聊天范围')
+  const r = (await fake.call('/sticker/import-qq', { chatId })).json()
   assert.equal(r.ok, true, r.message)
-  assert.equal(r.added, 2)
-  assert.equal((await fake.call('/sticker/import-qq')).json().existed, 2, '第二次全是已有的')
-  assert.equal(mock.calls.filter((c) => c.action === 'add_custom_face').length, adds, '没往 QQ 收藏里重复加')
-  const lib = (await fake.call('/stickers')).json().items
-  assert.equal(lib.filter((i) => i.from === 'qq').length, 2)
+  assert.ok(r.taskId)
+  const taskDone = (id) => until(async () => (await fake.call(`/stickers/queue?kind=import&chatId=${chatId}`)).json().items.find((task) => task.id === id && task.state === 'done'))
+  assert.deepEqual((await taskDone(r.taskId)).output, { added: 2, existed: 0, failed: 0, total: 2 })
+  const again = (await fake.call('/sticker/import-qq', { chatId })).json()
+  const repeated = await taskDone(again.taskId)
+  // 同分钟复用任务；跨分钟再次扫描也只能去重，不能产生新素材。
+  assert.equal(repeated.output.added, again.taskId === r.taskId ? 2 : 0)
+  if (again.taskId !== r.taskId) assert.equal(repeated.output.existed, 2)
+  const lib = (await fake.call(query)).json().items.filter((i) => i.from === 'qq')
+  assert.equal(lib.length, 2)
+  assert.ok(lib.every((i) => i.state === 'pending' && i.scope.account === BOT && i.scope.chat === chatId))
+  const confirmed = lib.find((i) => i.qq.emojiId === 'existing-1')
+  assert.equal(confirmed.qq.state, 'synced', 'QQ 收藏已存在不代表本地已经批准')
+  assert.equal(lib.find((i) => !i.qq.emojiId).qq.state, 'idle', '没有 QQ ID 时不能伪造已同步身份')
+  assert.equal(api.stickers.match(confirmed.id, chatId), null)
+  assert.equal((await fake.call('/sticker/approve', { id: confirmed.id })).json().item.state, 'approved')
+  assert.equal(api.stickers.match(confirmed.id, chatId).id, confirmed.id)
+  assert.equal(api.stickers.match(confirmed.id, 'group:777'), null)
+  assert.equal(mock.sent('add_custom_face').length, adds, '导入不向 QQ 重复添加')
 
   // 主人私聊发来一张表情，再让她存（模拟测试里调工具）
   const png = fakePng(180, 180, 7)
+  const seg = { type: 'image', data: { file: 'base64://' + png.toString('base64'), sub_type: 1, summary: '[动画表情]' } }
   mock.push(priv('看这个'))
-  mock.push({ message_type: 'private', sub_type: 'friend', user_id: Number(OWNER), message_id: 777, sender: { user_id: Number(OWNER), nickname: 'xiaoming' }, message: [{ type: 'image', data: { file: 'base64://' + png.toString('base64'), sub_type: 1, summary: '[动画表情]' } }] })
-  await sleep(500)
-  const t = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_save_sticker', args: { name: '测试表情' } })).json()
-  assert.equal(t.ok, true, t.message)
-  assert.match(t.result.message, /存好了|已经有这张/)
+  mock.push({ message_type: 'private', sub_type: 'friend', user_id: Number(OWNER), message_id: 777, sender: { user_id: Number(OWNER), nickname: 'xiaoming' }, message: [seg] })
+  await until(() => api.hub.recentMedia(chatId).some((media) => media.seg.data.file === seg.data.file))
+  const saved = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_save_sticker', args: { name: '测试表情' } })).json()
+  assert.equal(saved.ok, true, saved.message)
+  assert.equal(saved.result.ok, true, saved.result.message)
+  assert.match(saved.result.message, /本地已保存.*待审核/)
+  assert.equal(saved.result.item.state, 'pending')
+  assert.equal(saved.result.item.scope.chat, chatId)
+  assert.equal(api.stickers.segmentFor(saved.result.item, chatId), null)
+  assert.equal(mock.sent('add_custom_face').length, adds)
   const other = (await fake.call('/modules/tool', { as: 'other', kind: 'private', name: 'qq_save_sticker', args: {} })).json()
   assert.ok(!other.ok || other.result.ok === false, '别人让她存不行')
+  assert.equal((await fake.call('/sticker/approve', { id: saved.result.item.id })).json().item.state, 'approved')
+  await until(() => api.stickers.status(saved.result.item.id, { admin: true }).qq.state === 'synced')
+  assert.equal(mock.sent('add_custom_face').length, adds + 1)
 })
 
 test('#3 控制台密码：不合格的不会只改配置；主人设的密码要真的去 SnowLuma 改', async () => {

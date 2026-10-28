@@ -4,6 +4,11 @@ import stickers from './stickers/index.js'
 import voice from './voice/index.js'
 import mood from './mood/index.js'
 import memory from './memory/index.js'
+import learning from './learning/index.js'
+import retrieval from './retrieval/index.js'
+import mediaMemory from './media-memory/index.js'
+import tasks from './tasks/index.js'
+import search from './search/index.js'
 import qqTools from './qq-tools/index.js'
 import groupAdmin from './group-admin/index.js'
 import imagegen from './imagegen/index.js'
@@ -13,4 +18,4 @@ import song from './song/index.js'
 import profile from './profile/index.js'
 import contacts from './contacts/index.js'
 
-export const BUILTINS = [stickers, voice, mood, memory, qqTools, groupAdmin, imagegen, speakup, bili, song, profile, contacts]
+export const BUILTINS = [stickers, voice, mood, memory, learning, retrieval, mediaMemory, search, qqTools, groupAdmin, imagegen, speakup, bili, song, tasks, profile, contacts]

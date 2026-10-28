@@ -5,7 +5,11 @@ const fn = (o, k) => Boolean(o) && typeof o[k] === 'function'
 
 /** 宿主级能力（不需要具体会话）。 */
 export function probeHost(ctx) {
-  const get = (name) => { try { return ctx[name] || ctx.get?.(name) || null } catch (error) { return null } }
+  const get = (name) => {
+    // Cordis can reject an undeclared property access while explicit get() is supported.
+    try { const value=ctx[name];if(value)return value } catch {}
+    try { return ctx.get?.(name)||null } catch { return null }
+  }
   const controller = get('sessionController')
   const llm = get('llm')
   const stt = get('speechToText')

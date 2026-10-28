@@ -1,0 +1,262 @@
+{
+  "measuredAt": "2026-10-28T14:50:41.150Z",
+  "environment": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "AMD Ryzen 7 9700X 8-Core Processor             ",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 50628530176,
+    "loweredPriority": true
+  },
+  "scope": "Synthetic local exact-vector backend only. Each size is PER SPACE (384D text + 512D image). Worker-reopen cold, OS disk cache not purged. No real model, Qdrant or semantic-quality acceptance.",
+  "settings": {
+    "counts": [
+      10000,
+      100000
+    ],
+    "queries": 30,
+    "delayMs": 2,
+    "storageWorkerCount": 1,
+    "batchSize": 128,
+    "cacheBudgetBytes": 8388608,
+    "pageSize": 256
+  },
+  "elapsedMs": 426095.5803,
+  "peakProcessRssBytes": 331157504,
+  "controllerEventLoop": {
+    "p50Ms": 13.295615,
+    "p95Ms": 21.544959,
+    "maxMs": 32.210943
+  },
+  "datasets": [
+    {
+      "recordsPerSpace": 10000,
+      "totalInitialVectors": 20000,
+      "emptyOpenMs": 35.2259,
+      "workerReopenMs": 23.102699999999913,
+      "diskBytes": 71499776,
+      "ingestion": [
+        {
+          "spaceId": "synthetic-text-384",
+          "dims": 384,
+          "records": 10000,
+          "elapsedMs": 861.5268,
+          "vectorsPerSecond": 11607.299970238882
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "dims": 512,
+          "records": 10000,
+          "elapsedMs": 979.6991,
+          "vectorsPerSecond": 10207.215664483105
+        }
+      ],
+      "query": [
+        {
+          "spaceId": "synthetic-text-384",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 139.05050000000006,
+            "p95Ms": 139.05050000000006,
+            "p99Ms": 139.05050000000006,
+            "maxMs": 139.05050000000006,
+            "authorizedCandidates": 10000,
+            "pages": 43
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 1.0465999999996711,
+            "p95Ms": 1.6067000000002736,
+            "p99Ms": 2.0306000000000495,
+            "maxMs": 2.0306000000000495,
+            "authorizedCandidates": 100,
+            "pages": 1
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 139.79380000000037,
+            "p95Ms": 156.38670000000002,
+            "p99Ms": 156.73859999999968,
+            "maxMs": 156.73859999999968,
+            "authorizedCandidates": 10000,
+            "pages": 43
+          }
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 180.14500000000044,
+            "p95Ms": 180.14500000000044,
+            "p99Ms": 180.14500000000044,
+            "maxMs": 180.14500000000044,
+            "authorizedCandidates": 10000,
+            "pages": 45
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 0.9666000000006534,
+            "p95Ms": 1.7379999999993743,
+            "p99Ms": 2.1090000000003783,
+            "maxMs": 2.1090000000003783,
+            "authorizedCandidates": 100,
+            "pages": 1
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 175.02469999999994,
+            "p95Ms": 181.26709999999912,
+            "p99Ms": 182.90950000000157,
+            "maxMs": 182.90950000000157,
+            "authorizedCandidates": 10000,
+            "pages": 45
+          }
+        }
+      ],
+      "backgroundIndexing": {
+        "additionalVectors": 1024,
+        "elapsedMs": 95.2502999999997,
+        "vectorsPerSecond": 10750.622307751295,
+        "query": {
+          "samples": 30,
+          "p50Ms": 1.1035000000010768,
+          "p95Ms": 15.977699999999459,
+          "p99Ms": 20.333599999999933,
+          "maxMs": 20.333599999999933,
+          "authorizedCandidates": 111,
+          "pages": 1
+        }
+      },
+      "cache": {
+        "bytes": 196470,
+        "budgetBytes": 8388608,
+        "entries": 111,
+        "hits": 8442,
+        "misses": 620850
+      },
+      "sqliteVersion": "3.53.1",
+      "storageWorkerMemory": {
+        "rss": 209207296,
+        "heapTotal": 144388096,
+        "heapUsed": 31454792,
+        "external": 36092207,
+        "arrayBuffers": 32500891
+      }
+    },
+    {
+      "recordsPerSpace": 100000,
+      "totalInitialVectors": 200000,
+      "emptyOpenMs": 33.068299999999,
+      "workerReopenMs": 23.024599999997008,
+      "diskBytes": 692817920,
+      "ingestion": [
+        {
+          "spaceId": "synthetic-text-384",
+          "dims": 384,
+          "records": 100000,
+          "elapsedMs": 9754.8397,
+          "vectorsPerSecond": 10251.321710596638
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "dims": 512,
+          "records": 100000,
+          "elapsedMs": 11058.096200000004,
+          "vectorsPerSecond": 9043.147951633842
+        }
+      ],
+      "query": [
+        {
+          "spaceId": "synthetic-text-384",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 6036.966500000002,
+            "p95Ms": 6036.966500000002,
+            "p99Ms": 6036.966500000002,
+            "maxMs": 6036.966500000002,
+            "authorizedCandidates": 100000,
+            "pages": 428
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 22.85020000000077,
+            "p95Ms": 24.354200000001583,
+            "p99Ms": 28.586600000002363,
+            "maxMs": 28.586600000002363,
+            "authorizedCandidates": 1000,
+            "pages": 5
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 6024.716099999991,
+            "p95Ms": 6173.824800000002,
+            "p99Ms": 6819.555300000007,
+            "maxMs": 6819.555300000007,
+            "authorizedCandidates": 100000,
+            "pages": 428
+          }
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 6349.6514000000025,
+            "p95Ms": 6349.6514000000025,
+            "p99Ms": 6349.6514000000025,
+            "maxMs": 6349.6514000000025,
+            "authorizedCandidates": 100000,
+            "pages": 441
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 25.284600000013597,
+            "p95Ms": 27.590200000006007,
+            "p99Ms": 28.942199999990407,
+            "maxMs": 28.942199999990407,
+            "authorizedCandidates": 1000,
+            "pages": 5
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 6481.802600000054,
+            "p95Ms": 6683.063900000008,
+            "p99Ms": 6729.412699999986,
+            "maxMs": 6729.412699999986,
+            "authorizedCandidates": 100000,
+            "pages": 441
+          }
+        }
+      ],
+      "backgroundIndexing": {
+        "additionalVectors": 1024,
+        "elapsedMs": 262.12430000002496,
+        "vectorsPerSecond": 3906.5435749371673,
+        "query": {
+          "samples": 30,
+          "p50Ms": 24.057600000000093,
+          "p95Ms": 36.92160000000149,
+          "p99Ms": 37.57469999999739,
+          "maxMs": 37.57469999999739,
+          "authorizedCandidates": 1011,
+          "pages": 5
+        }
+      },
+      "cache": {
+        "bytes": 1789470,
+        "budgetBytes": 8388608,
+        "entries": 1011,
+        "hits": 82242,
+        "misses": 6208050
+      },
+      "sqliteVersion": "3.53.1",
+      "storageWorkerMemory": {
+        "rss": 285765632,
+        "heapTotal": 145203200,
+        "heapUsed": 44670928,
+        "external": 44767535,
+        "arrayBuffers": 41176219
+      }
+    }
+  ]
+}

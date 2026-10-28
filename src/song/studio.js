@@ -2,14 +2,16 @@
 // 推理引擎用 Applio（MIT，固定版本），人声分离用 audio-separator，都装在一个独立的 Python 环境里，不碰系统环境。
 
 import { spawn } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync, mkdirSync, readdirSync, statSync, statfsSync, writeFileSync, readFileSync, rmSync, copyFileSync, renameSync, openSync, readSync, closeSync } from 'node:fs'
-import { join, basename, dirname, isAbsolute } from 'node:path'
+import { join, basename, dirname, isAbsolute, resolve, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { searchSongs, songUrl, account } from './netease.js'
 import { readZip } from './zip.js'
+import { createJobRunner, ACTIVE } from '../jobs/runner.js'
 
 export const APPLIO_REPO = 'https://github.com/IAHispano/Applio.git'
 export const APPLIO_COMMIT = 'c817f1f83f689ef72e0dfeb1c17ae990b9248506'
@@ -349,9 +351,9 @@ export function clipWindow(durationSec, maxSec, start = 'auto') {
   return { start: s, length: maxSec }
 }
 
-function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000 } = {}) {
+function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, windowsHide: true })
+    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, signal })
     let tail = ''
     const feed = (buf) => {
       const s = String(buf)
@@ -360,7 +362,7 @@ function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000 } = {})
     }
     child.stdout.on('data', feed)
     child.stderr.on('data', feed)
-    const timer = setTimeout(() => { try { child.kill() } catch (error) {} }, timeoutMs)
+    const timer = setTimeout(() => { try { child.kill() } catch (error) {}; reject(new Error(`${basename(cmd)} 运行超时`)) }, timeoutMs)
     child.on('error', (e) => { clearTimeout(timer); reject(e) })
     child.on('exit', (code) => {
       clearTimeout(timer)
@@ -377,8 +379,7 @@ function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000 } = {})
  * @param {object} deps
  * @param {() => object} deps.getConfig
  * @param {object} deps.log
- * @param {(chatId: string, file: string, note: string) => Promise<any>} deps.sendVoiceFile  把做好的语音发到聊天
- * @param {(chatId: string, text: string) => Promise<any>} [deps.sendText]
+ * @param {(chatId: string, file: string, note: string, options: object) => Promise<object>} deps.sendVoiceFile 回执驱动发送
  */
 /** 翻唱出错翻译成人话（给点歌的人看）。 */
 export function explainSongError(message) {
@@ -393,17 +394,21 @@ export function explainSongError(message) {
   return m
 }
 
-export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSung, local }) {
-  const cfg = () => getConfig().song
+export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, local, storage, hub, processSong, now = Date.now }) {
+  const processing = new AsyncLocalStorage()
+  const cfg = () => processing.getStore()?.settings || getConfig().song
+  const execution = () => processing.getStore()?.execution
+  const check = () => execution()?.assertActive()
+  const taskRun = async (cmd, args, options) => { check(); const result = await run(cmd, args, { ...options, signal: execution()?.signal }); check(); return result }
   const P = () => pathsOf(cfg().root || defaultRoot())
-  const work = () => dataDir('songs')
+  const workRoot = dataDir('songs')
+  const work = () => workRoot
   // 确认过没有人声的歌（网易云 id），下次直接跳过，不用再花几分钟分离一遍
   const noVocalFile = () => join(work(), 'no-vocals.json')
   const noVocals = () => readJson(noVocalFile(), () => [])
   const markNoVocals = (id) => { if (id && !noVocals().includes(String(id))) writeJson(noVocalFile(), [...noVocals(), String(id)].slice(-500)) }
-  const queue = []
+  let stopped = false
   let current = null // 正在做的翻唱
-  let history = [] // 最近做过的 [{at, title, voice, ok, message, file}]
   let install = { running: false, step: '', log: [], ok: null, message: '' }
 
   function status() {
@@ -433,8 +438,11 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
       voice: cfg().voice,
       install: { ...install, log: install.log.slice(-30) },
       current: current ? { ...current } : null,
-      queue: queue.map((q) => ({ query: q.query, chatId: q.chatId })),
-      history: history.slice(0, 10),
+      queue: songJobs({ states: ACTIVE }).map((j) => ({ id: j.id, query: j.input.query, chatId: j.chatId, state: j.state })),
+      history: songJobs({ limit: 20 }).map((j) => ({ id: j.id, at: j.createdAt, chatId: j.chatId, actorId: j.actorId, scope: j.input.scope,
+        title: j.output.title || j.input.query, state: j.state, assetId: j.output.assetId, batchId: j.output.deliveryBatchId,
+        ok: j.state === 'delivered', message: j.output.delivery?.unknown ? '发送结果不确定；音频已保留，先核对 QQ 回执，不自动重发'
+          : j.error || (j.state === 'delivered' ? '已收到真实发送回执' : j.state), delivery: j.output.delivery })),
       message: !voices.length ? '还没有音色：在下面「音色模型」里导入你有权使用的 RVC 模型（.pth 或 zip）' : ready ? (cfg().enabled ? '可以点歌了' : '准备好了，打开开关就能用') : '还差一些组件，点「一键安装」',
     }
   }
@@ -628,27 +636,32 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
   }
 
   async function ffprobeDuration(file) {
+    check()
     // ffmpeg -i 会把时长打在 stderr 里，退出码是 1，这里自己接
-    return new Promise((resolve) => {
-      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file], { windowsHide: true })
+    return new Promise((resolve, reject) => {
+      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file], { windowsHide: true, signal: execution()?.signal })
+      const timer = setTimeout(() => { c.kill(); reject(new Error('音频时长检查超时')) }, 30000)
       let s = ''
-      c.stderr.on('data', (b) => { s += b })
+      c.stderr.on('data', (b) => { s = (s + b).slice(-8000) })
       c.on('exit', () => {
+        clearTimeout(timer)
         const m = s.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/)
         resolve(m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : 0)
       })
-      c.on('error', () => resolve(0))
+      c.on('error', (e) => { clearTimeout(timer); reject(e) })
     })
   }
 
   /** 人声轨的平均音量（dB）；纯音乐分出来的人声几乎是静音。 */
   async function meanVolume(file) {
-    return new Promise((resolve) => {
-      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { windowsHide: true })
+    check()
+    return new Promise((resolve, reject) => {
+      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { windowsHide: true, signal: execution()?.signal })
+      const timer = setTimeout(() => { c.kill(); reject(new Error('音频音量检查超时')) }, 60000)
       let s = ''
-      c.stderr.on('data', (b) => { s += b })
-      c.on('exit', () => { const m = s.match(/mean_volume:\s*(-?[\d.]+|-inf)/); resolve(m ? (m[1] === '-inf' ? -200 : Number(m[1])) : 0) })
-      c.on('error', () => resolve(0))
+      c.stderr.on('data', (b) => { s = (s + b).slice(-8000) })
+      c.on('exit', () => { clearTimeout(timer); const m = s.match(/mean_volume:\s*(-?[\d.]+|-inf)/); resolve(m ? (m[1] === '-inf' ? -200 : Number(m[1])) : 0) })
+      c.on('error', (e) => { clearTimeout(timer); reject(e) })
     })
   }
 
@@ -658,6 +671,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     let pick = job.songId ? { id: job.songId, name: job.query, artists: '' } : null
     if (!pick) {
       const found = await searchSongs(job.query, { cookie: c.neteaseCookie, limit: 10 })
+      check()
       if (!found.length) throw new Error(`网易云上没搜到「${job.query}」`)
       // 试过、确认没人声的跳过；看着像纯音乐的排到最后
       const known = noVocals()
@@ -666,20 +680,26 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
       // 按顺序找第一首拿得到完整音频的
       for (const s of list) {
         const u = await songUrl(s.id, { cookie: c.neteaseCookie })
+        check()
         if (u.url && !u.trial) { pick = { ...s, url: u.url }; break }
       }
       if (!pick) throw new Error(`「${job.query}」要会员或者有版权限制，下载不了${c.neteaseCookie ? '' : '（在面板里填网易云 Cookie 后可以下会员歌）'}`)
     } else {
       const u = await songUrl(pick.id, { cookie: c.neteaseCookie })
+      check()
       if (!u.url || u.trial) throw new Error('这首歌下载不了（要会员或者有版权限制）')
       pick.url = u.url
     }
     job.title = pick.artists ? `${pick.name} - ${pick.artists}` : pick.name
     job.songKey = String(pick.id)
-    const r = await fetch(pick.url, { signal: AbortSignal.timeout(120_000) })
+    check()
+    const r = await fetch(pick.url, { signal: AbortSignal.any([AbortSignal.timeout(120_000), ...[execution()?.signal].filter(Boolean)]) })
     if (!r.ok) throw new Error(`下载失败（HTTP ${r.status}）`)
-    const buf = Buffer.from(await r.arrayBuffer())
-    if (buf.length > 60 * 1024 * 1024) throw new Error('歌太大了')
+    const chunks = []; let size = 0
+    if (Number(r.headers.get('content-length')) > 60 * 1024 * 1024) { await r.body.cancel(); throw new Error('歌太大了') }
+    for await (const part of r.body) { check(); size += part.length; if (size > 60 * 1024 * 1024) throw new Error('歌太大了'); chunks.push(Buffer.from(part)) }
+    check()
+    const buf = Buffer.concat(chunks)
     const file = join(dir, 'song.mp3')
     writeFileSync(file, buf)
     return file
@@ -690,7 +710,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     mkdirSync(p.separatorModels, { recursive: true })
     const model = cfg().separatorModel
     await ensureReadable((SEPARATOR_FILES[model] || [[model]]).map(([n]) => join(p.separatorModels, n)))
-    await run(p.separatorExe, [input, '--model_filename', model, '--model_file_dir', p.separatorModels, '--output_dir', dir, '--output_format', 'WAV'], { log, env: pyEnv(), timeoutMs: 20 * 60_000 })
+    await taskRun(p.separatorExe, [input, '--model_filename', model, '--model_file_dir', p.separatorModels, '--output_dir', dir, '--output_format', 'WAV'], { log, env: pyEnv(), timeoutMs: 20 * 60_000 })
     const files = readdirSync(dir)
     const vocals = files.find((f) => /\(vocals\)/i.test(f))
     const inst = files.find((f) => /\(instrumental\)/i.test(f) || /\(other\)/i.test(f))
@@ -701,14 +721,16 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
   async function convert(vocals, dir, voice, pitch) {
     const p = P()
     const out = join(dir, 'vocals_rvc.wav')
-    if (local?.active('song')) {
+    if (cfg().localSong) {
       const { fileOf } = await import('../local/local.js')
-      const r = await local.call('song', { input: vocals, output: out, pitch, voice: voice?.id || '', voiceFile: voice?.pth || '', indexFile: voice?.index || '' })
+      check()
+      const r = await local.call('song', { input: vocals, output: out, pitch, voice: voice?.id || '', voiceFile: voice?.pth || '', indexFile: voice?.index || '', signal: execution()?.signal }, { signal: execution()?.signal })
+      check()
       const file = fileOf(r) || out
       if (!existsSync(file)) throw new Error('本地换声脚本没写出文件：' + file)
       return file
     }
-    await run(p.python, ['core.py', 'infer', '--input-path', vocals, '--output-path', out, '--pth-path', voice.pth, '--index-path', voice.index || '',
+    await taskRun(p.python, ['core.py', 'infer', '--input-path', vocals, '--output-path', out, '--pth-path', voice.pth, '--index-path', voice.index || '',
       '--pitch', String(pitch), '--index-rate', voice.index ? '0.5' : '0', '--protect', '0.33', '--f0-method', 'rmvpe', '--export-format', 'WAV'],
     { cwd: p.applio, log, env: pyEnv(), timeoutMs: 20 * 60_000 })
     if (!existsSync(out)) throw new Error('变声没产出文件')
@@ -720,7 +742,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     const full = join(dir, 'cover.mp3')
     const vol = Math.max(0.2, Math.min(2, Number(c.vocalVolume) || 1))
     const iv = Math.max(0.1, Math.min(2, Number(c.instVolume) || 0.8))
-    await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', vocals, '-i', inst, '-filter_complex',
+    await taskRun(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', vocals, '-i', inst, '-filter_complex',
       `[0:a]volume=${vol}[v];[1:a]volume=${iv}[i];[v][i]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95`, '-ac', '2', '-ar', '44100', '-b:a', '192k', full], { log })
     return full
   }
@@ -729,47 +751,53 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
   async function cutFirst(song, dir) {
     const c = cfg()
     const dur = await ffprobeDuration(song)
+    check()
     const w = clipWindow(dur, Number(c.maxVoiceSec) || 120, c.clipStart)
     if (!dur || (w.start === 0 && w.length >= dur)) return { file: song, cut: false, length: dur }
     const out = join(dir, 'part.wav')
-    await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-ss', String(w.start), '-t', String(w.length), '-i', song, '-ar', '44100', out], { log })
+    await taskRun(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-ss', String(w.start), '-t', String(w.length), '-i', song, '-ar', '44100', out], { log })
     return { file: out, cut: true, length: w.length }
   }
 
   /** 截过的段落首尾加淡入淡出，听起来不突兀。 */
   async function fade(mixed, dir, length) {
     const out = join(dir, 'voice.mp3')
-    await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', mixed,
+    await taskRun(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', mixed,
       '-af', `afade=t=in:d=1.5,afade=t=out:st=${Math.max(0, length - 3)}:d=3`, '-b:a', '128k', out], { log })
     return out
   }
 
   async function process1(job) {
+    check()
     const c = cfg()
-    const voice = listVoices(P().models).find((v) => v.id === (job.voice || c.voice)) || listVoices(P().models)[0]
-    if (!voice && !local?.active('song')) throw new Error('还没有可用的音色模型')
+    const voice = c.frozenVoice
+    if (!voice && !c.localSong) throw new Error('还没有可用的音色模型')
     const pitch = Number.isFinite(Number(job.pitch)) ? Math.max(-24, Math.min(24, Math.round(Number(job.pitch)))) : Number(c.pitch) || 0
-    const dir = join(work(), Date.now().toString(36))
+    const dir = join(work(), 'work', job.id + '-' + (job.skip?.length || 0))
     mkdirSync(dir, { recursive: true })
     current.stage = '下载歌曲'
     const song = job.file || (await download(job, dir))
+    check()
     // 同一首歌、同一个音色、音高和截取方式做过的，直接复用
     // v2：0.6.2 起才检查有没有人声，之前缓存的可能是只有伴奏的成品，一律不用
-    const key = createHash('md5').update(['v2', job.songKey || song, local?.active('song') ? 'local:' + (voice?.id || '') : voice.id, pitch, c.maxVoiceSec, c.clipStart].join('|')).digest('hex').slice(0, 16)
+    const key = createHash('sha256').update(JSON.stringify(['v3', job.scope, job.songKey || song, voice || 'local', pitch, c.maxVoiceSec, c.clipStart, c.separatorModel, c.vocalVolume, c.instVolume])).digest('hex').slice(0, 32)
     const cached = join(work(), 'cache', key + '.mp3')
     if (existsSync(cached)) {
       log.info(`翻唱：「${job.title}」做过了，直接用缓存`)
-      return { file: cached, voice: voice.id, pitch, dir }
+      return { file: cached, voice: voice?.id || 'local', pitch, dir }
     }
     current.stage = '截取要唱的那一段'
     const part = await cutFirst(song, dir)
+    check()
     current.stage = '分离人声和伴奏'
     const { vocals, inst } = await separate(part.file, dir)
+    check()
     // 纯音乐 / 伴奏版分不出人声：换下一首候选重做，不然发出去只有伴奏
     const vol = await meanVolume(vocals)
+    check()
     if (vol < VOCAL_MIN_DB) {
       log.info(`翻唱：「${job.title}」几乎没有人声（${vol.toFixed(0)} dB），像是纯音乐`)
-      try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
+      removeWork(dir)
       if (!job.file) markNoVocals(job.songKey)
       if (job.file || job.songId) throw new Error('这首没有人声（像是纯音乐或伴奏版），换一首吧')
       job.skip = [...(job.skip || []), job.songKey]
@@ -779,56 +807,237 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     }
     current.stage = '换成她的声音'
     const converted = await convert(vocals, dir, voice, pitch)
+    check()
     current.stage = '混音'
     const mixed = await mix(converted, inst, dir)
+    check()
     const out = part.cut ? await fade(mixed, dir, part.length) : mixed
+    check()
     mkdirSync(join(work(), 'cache'), { recursive: true })
     copyFileSync(out, cached)
     pruneCache(join(work(), 'cache'), 40)
-    return { file: cached, voice: voice.id, pitch, dir }
+    return { file: cached, voice: voice?.id || 'local', pitch, dir, title: job.title || job.query }
   }
 
-  async function pump() {
-    if (current || !queue.length) return
-    const job = queue.shift()
-    current = { query: job.query, title: job.query, chatId: job.chatId, stage: '排队', startedAt: Date.now() }
-    log.info(`翻唱开始：「${job.query}」→ ${job.chatId}`)
-    try {
-      const r = await process1(job)
-      current.stage = '发送'
-      await sendVoiceFile(job.chatId, r.file, `[翻唱] ${job.title || job.query}`)
-      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ok: true, message: `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
-      log.info(`翻唱完成：「${job.title || job.query}」`)
-      onSung?.(job.title || job.query, job.chatId)
-      if (!cfg().keepWork) try { rmSync(r.dir, { recursive: true, force: true }) } catch (error) {}
-    } catch (error) {
-      const why = explainSongError(error.message)
-      history.unshift({ at: Date.now(), title: job.title || job.query, ok: false, message: why })
-      log.warn(`翻唱失败：「${job.query}」：`, error.message)
-      sendText?.(job.chatId, `唱不了「${job.title || job.query}」：${why}`).catch(() => {})
-    } finally {
-      history = history.slice(0, 20)
-      current = null
-      pump()
+  const inactive = () => Object.assign(new Error('翻唱已取消、停用或请求范围已改变'), { code: 'JOB_INACTIVE', kind: 'invalid', billing: 'none' })
+  const hash = (v) => createHash('sha256').update(v).digest('hex')
+  function removeWork(dir) {
+    if (!dir) return
+    const root = resolve(work(), 'work'), target = resolve(dir), rel = relative(root, target)
+    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return
+    try { rmSync(target, { recursive: true, force: true }) } catch {}
+  }
+  function valid(job) {
+    const g = getConfig(), scope = job.input.scope
+    const request = job.requestId && storage?.requests?.get(job.requestId)
+    const persona = hub?.personaFor?.(job.chatId)
+    return !stopped && g.enabled !== false && g.song.enabled && g.modules?.song?.enabled !== false &&
+      scope?.account === String(g.botQQ) && job.input.dryRun === Boolean(g.dryRun) &&
+      (!g.song.ownerOnly || job.actorId === String(g.ownerQQ)) &&
+      job.epoch === storage.epochs.current(job.chatId) &&
+      Boolean(persona && !persona.error && persona.personaId === scope.persona) &&
+      (request ? request.chatId === job.chatId && request.actorId === job.actorId && request.epoch === job.epoch &&
+        !['canceled', 'cancel_requested'].includes(request.state) && request.sourceMessageIds.every((id) => storage.messages.get(id)?.account === scope.account)
+        : String(job.requestId).startsWith('panel:') && job.actorId === String(g.ownerQQ))
+  }
+  function guarded(job, execution) {
+    const guard = () => execution.guard() && valid(job)
+    return { ...execution, guard, shouldContinue: guard, assertActive() { if (!guard()) throw inactive() },
+      commit(fn) { return execution.commit(() => { if (!valid(job)) throw inactive(); return fn() }) } }
+  }
+  function updateOutput(job, extra, execution) {
+    execution.commit(() => {
+      const row = storage.db.get('SELECT output_json FROM jobs WHERE id=?', job.id)
+      storage.db.run('UPDATE jobs SET output_json=? WHERE id=?', JSON.stringify({ ...JSON.parse(row.output_json || '{}'), ...extra }), job.id)
+    })
+  }
+  function checkpointValid(output) {
+    if (!output?.file || !output.sha256) return false
+    const rel = relative(resolve(work(), 'results'), resolve(output.file))
+    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) return false
+    try { return statSync(output.file).size > 0 && hash(readFileSync(output.file)) === output.sha256 } catch { return false }
+  }
+  const realReceipt = (r) => Number(r?.delivered) > 0 && r.message_id !== undefined && r.message_id !== null && !['', '0'].includes(String(r.message_id)) &&
+    !r.skipped && !r.unknown && !r.pending && !r.canceled && !r.failed
+  async function recordExperience(job, execution) {
+    if (!onSung || !valid(job) || !execution.guard() || job.output.experienceRecorded || !realReceipt(job.output.receipt) || job.input.dryRun) return
+    const receipt = job.output.receipt
+    const recorded = await onSung(job.output.title, job.chatId, { ...job.input.scope, actorId: job.actorId,
+      requestId: job.requestId, epoch: job.epoch, personaSnapshot: job.input.personaSnapshot, jobId: job.id,
+      confirmed: true, sourceId: `qq:${job.input.scope.account}:${job.chatId}:${receipt.message_id}`, receipt, eventTime: job.finishedAt || now() })
+    if (recorded?.ok === false) throw new Error(recorded.message || '翻唱经历未记入')
+    updateOutput(job, { experienceRecorded: true }, execution)
+  }
+  const handler = {
+    perChat: 1,
+    prepare(job, execution) { guarded(job, execution).assertActive(); return { ready: true } },
+    async submit(job, _attempt, rawExecution) {
+      const execution = guarded(job, rawExecution)
+      execution.assertActive()
+      if (checkpointValid(job.output)) return { status: 'done', billing: 'none', outputs: job.output }
+      if (job.input.cookieHash !== hash(getConfig().song.neteaseCookie || '')) throw Object.assign(new Error('网易云账号配置已改变，请重新点歌'), { kind: 'invalid', billing: 'none' })
+      const settings = { ...job.input.settings, neteaseCookie: getConfig().song.neteaseCookie }
+      const task = { ...job.input, id: job.id, chatId: job.chatId }
+      current = { id: job.id, query: task.query, title: task.query, chatId: job.chatId, stage: '准备', startedAt: now() }
+      try {
+        const r = await processing.run({ settings, execution }, () => processSong ? processSong(task, execution) : process1(task))
+        execution.assertActive()
+        if (!r?.file || !existsSync(r.file)) throw Object.assign(new Error('翻唱没有产出音频文件'), { kind: 'invalid', billing: 'none' })
+        const file = join(work(), 'results', job.id + '.mp3')
+        execution.commit(() => { mkdirSync(dirname(file), { recursive: true }); if (resolve(r.file) !== resolve(file)) copyFileSync(r.file, file) })
+        const output = { file, sha256: hash(readFileSync(file)), title: r.title || task.title || task.query, voice: r.voice || '', pitch: r.pitch ?? 0, deliveryBatchId: `song:${job.id}` }
+        updateOutput(job, output, execution)
+        if (!settings.keepWork) removeWork(r.dir)
+        return { status: 'done', billing: 'none', outputs: output }
+      } catch (e) {
+        if (e.name === 'AbortError' || e.code === 'JOB_INACTIVE') { runner?.cancel(job.id, { by: job.actorId }); throw e }
+        // Local-script dispatch may have external effects; without a receipt do not retry it.
+        if (!settings.localSong) { e.kind ||= 'invalid'; e.billing = 'none' }
+        throw e
+      } finally { if (current?.id === job.id) current = null }
+    },
+    store(job, outputs, execution) { guarded(job, execution).assertActive(); return outputs },
+    async deliver(job, rawExecution) {
+      const execution = guarded(job, rawExecution)
+      if (!execution.guard()) return { delivered: false, canceled: true }
+      if (!checkpointValid(job.output)) return { delivered: false, failed: true, error: '已生成音频丢失或校验失败；不会重新生成' }
+      const batchId = job.output.deliveryBatchId || `song:${job.id}`
+      updateOutput(job, { deliveryBatchId: batchId }, execution)
+      let receipt
+      try {
+        receipt = await sendVoiceFile(job.chatId, job.output.file, `[翻唱] ${job.output.title}`, {
+          epoch: job.epoch, requestId: job.requestId, batchId, retry: Boolean(job.output.retryDelivery), signal: execution.signal,
+          shouldSend: execution.guard, guard: execution.guard,
+        })
+      } catch (e) {
+        if (!execution.guard()) return { delivered: false, canceled: true, batchId }
+        updateOutput(job, { receipt: e.delivery || null, assetId: e.assetId || null, retryDelivery: false }, execution)
+        return { delivered: false, batchId, canceled: e.code === 'DELIVERY_CANCELED', failed: e.code === 'DELIVERY_REJECTED',
+          unknown: !['DELIVERY_CANCELED', 'DELIVERY_REJECTED'].includes(e.code), error: e.message }
+      }
+      if (!execution.guard()) return { delivered: false, canceled: true, batchId }
+      updateOutput(job, { receipt, assetId: receipt?.assetId || null, retryDelivery: false }, execution)
+      const delivered = realReceipt(receipt) && !job.input.dryRun
+      return { delivered, batchId, skipped: Boolean(receipt?.skipped), canceled: Boolean(receipt?.canceled),
+        unknown: !delivered && !receipt?.skipped && !receipt?.canceled, error: receipt?.skipped ? '试运行/策略跳过，未实际发送' : !delivered ? '未得到真实发送回执' : undefined }
+    },
+    notify(job, event, _info, execution) { if (event === 'delivered') return recordExperience(job, guarded(job, execution)) },
+  }
+  const runner = storage?.db ? createJobRunner({ storage, handlers: { song: handler }, log, concurrency: 1, now }) : null
+  function songJobs({ states, limit = 1000 } = {}) {
+    if (!runner) return []
+    const where = states?.length ? ' AND state IN (' + states.map(() => '?').join(',') + ')' : ''
+    return storage.db.all("SELECT id FROM jobs WHERE kind='song' AND json_extract(input_json,'$.scope.account')=?" + where + ' ORDER BY created_at DESC,id DESC LIMIT ?',
+      String(getConfig().botQQ), ...(states || []), limit).map((r) => runner.get(r.id))
+  }
+  function recover() {
+    if (!runner) return null
+    // A completed, checksummed output survives a crash before runner's generated transition.
+    storage.db.tx(() => {
+      const rows = storage.db.all("SELECT * FROM jobs WHERE kind='song' AND state IN ('submitting','running') AND (lease_owner IS NULL OR lease_until<=?)", now())
+      for (const r of rows) {
+        if (!valid(runner.get(r.id))) continue
+        if (!checkpointValid(JSON.parse(r.output_json || '{}'))) continue
+        storage.db.run("UPDATE jobs SET state='generated',not_before=0,lease_owner=NULL,lease_until=NULL WHERE id=?", r.id)
+        storage.db.run("UPDATE job_attempts SET state='done',billing='none',finished_at=? WHERE job_id=? AND state='running'", now(), r.id)
+      }
+      // An outbox receipt may have committed just before the job worker crashed.
+      // Reconcile confirmed deliveries only; unknown/pending rows remain parked.
+      for (const r of storage.db.all("SELECT id FROM jobs WHERE kind='song' AND state='delivery_pending' AND (lease_owner IS NULL OR lease_until<=?)", now())) {
+        const j = runner.get(r.id)
+        if (!valid(j)) continue
+        const batchId = j.output.deliveryBatchId || `song:${j.id}`
+        const rows = storage.db.all('SELECT * FROM outbox WHERE batch_id=? ORDER BY seq', batchId)
+        let receipt = j.output.receipt
+        if (rows.length) {
+          if (!rows.every((x) => x.chat_id === j.chatId && x.request_id === j.requestId && Number(x.epoch) === j.epoch && x.state === 'delivered' && x.platform_msg_id)) continue
+          const voice = rows.find((x) => x.kind === 'voice')
+          if (!voice) continue
+          const asset = JSON.parse(voice.payload_json || '{}').message?.find((x) => x.type === 'record')?.data?.file
+          receipt = { batchId, total: rows.length, delivered: rows.length, messageIds: rows.map((x) => x.platform_msg_id), message_id: voice.platform_msg_id,
+            assetId: typeof asset === 'string' && asset.startsWith('asset:') ? asset.slice(6) : j.output.assetId }
+        }
+        if (!realReceipt(receipt)) continue
+        storage.db.run("UPDATE jobs SET state='delivered',output_json=?,finished_at=?,updated_at=?,error=NULL,error_kind=NULL,lease_owner=NULL,lease_until=NULL WHERE id=?",
+          JSON.stringify({ ...j.output, receipt, assetId: receipt.assetId || j.output.assetId, delivery: { delivered: true, batchId } }), now(), now(), j.id)
+      }
+    })
+    return runner.recover()
+  }
+  async function repairExperiences() {
+    for (const j of songJobs({ states: ['delivered'], limit: 1000 })) {
+      if (!valid(j) || j.output.experienceRecorded || !realReceipt(j.output.receipt) || j.output.experienceRetryAt > now()) continue
+      const token = randomUUID()
+      const claimed = storage.db.tx(() => {
+        const r = storage.db.get('SELECT * FROM jobs WHERE id=?', j.id), out = JSON.parse(r.output_json)
+        if ((r.lease_owner && r.lease_until > now()) || out.experienceRecorded || out.experienceLease?.until > now()) return false
+        storage.db.run('UPDATE jobs SET output_json=? WHERE id=?', JSON.stringify({ ...out, experienceLease: { token, until: now() + 60000 } }), j.id)
+        return true
+      })
+      if (!claimed) continue
+      const guard = () => valid(j) && runner.get(j.id)?.state === 'delivered' && runner.get(j.id)?.output.experienceLease?.token === token
+      const execution = { guard, commit: (fn) => storage.db.tx(() => { if (!guard()) throw inactive(); return fn() }) }
+      try { await recordExperience(runner.get(j.id), execution) }
+      catch (e) { if (guard()) updateOutput(j, { experienceRetryAt: now() + 60000 }, execution); log?.warn?.('翻唱经历等待补记：', e.message) }
+      finally { if (guard()) updateOutput(j, { experienceLease: null }, execution) }
     }
   }
+  async function tick() {
+    if (!runner || stopped) return 0
+    for (const j of songJobs({ states: ACTIVE })) if (!valid(j)) runner.cancel(j.id, { by: j.actorId })
+    const count = await runner.tick()
+    if (!stopped) await repairExperiences()
+    return count
+  }
+  function cancel(id, context = {}) {
+    const job = runner?.get(String(id))
+    if (!job || job.kind !== 'song' || job.chatId !== context.chatId || job.input.scope.account !== String(context.account) || job.actorId !== String(context.actorId)) return { ok: false, message: '当前范围没有自己的这个翻唱任务' }
+    return runner.cancel(job.id, { by: context.actorId })
+  }
+  function resend(id, context = {}) {
+    const job = runner?.get(String(id))
+    if (!job || job.kind !== 'song' || job.chatId !== context.chatId || job.input.scope.account !== String(context.account) || job.actorId !== String(context.actorId)) return { ok: false, message: '当前范围没有自己的这个翻唱任务' }
+    if (!valid(job)) return { ok: false, message: '任务范围已失效，不能重发旧结果' }
+    if (job.output.delivery?.unknown || job.output.receipt?.unknown || job.output.receipt?.pending) return { ok: false, code: 'DELIVERY_UNKNOWN', message: '发送结果未知，不能盲目重发；先核对 QQ 回执' }
+    if (!job.output.delivery?.failed) return { ok: false, message: '仅明确被网关拒绝的发送可以重试' }
+    storage.db.run('UPDATE jobs SET output_json=? WHERE id=?', JSON.stringify({ ...job.output, retryDelivery: true }), job.id)
+    return runner.resend(job.id)
+  }
 
-  /** 点一首：马上返回，做好了自己发到聊天里。 */
-  function request({ song, songId, file, pitch, voice, chatId }) {
-    const c = cfg()
+  /** Immediate admission; all processing/output/delivery state is persisted by the shared runner. */
+  function request({ song, songId, file, pitch, voice, chatId, account: botAccount, actorId, requestId, persona, personaSnapshot, epoch }) {
+    const g = getConfig(), c = g.song
     if (!c.enabled) return { ok: false, message: '翻唱还没打开（面板「翻唱」标签里开）' }
     const st = status()
-    if (!st.ready) return { ok: false, message: '翻唱环境还没装好：' + st.message }
+    if (!st.ready && !processSong) return { ok: false, message: '翻唱环境还没装好：' + st.message }
     if (!song && !songId && !file) return { ok: false, message: '要说唱哪首歌' }
-    if (queue.length >= 5) return { ok: false, message: '排队的歌太多了，等会儿再点' }
-    queue.push({ query: song || basename(file || ''), songId, file, pitch, voice, chatId })
-    const ahead = queue.length - 1 + (current ? 1 : 0)
-    pump()
-    return { ok: true, message: `开始准备「${song || basename(file || '')}」，大概要两三分钟${ahead ? `（前面还有 ${ahead} 首）` : ''}，做好了会直接发语音` }
+    if (!runner || stopped || g.enabled === false || g.modules?.song?.enabled === false) return { ok: false, message: '翻唱任务存储未就绪或模块已停用' }
+    const p = personaSnapshot || hub?.personaFor?.(chatId)
+    const personaId = persona || p?.personaId
+    if (!botAccount || String(botAccount) !== String(g.botQQ) || !actorId || !requestId || !personaId || !p || p.error || p.personaId !== personaId || !/^(private|group):[\w-]+$/.test(chatId || '') || epoch !== storage.epochs.current(chatId)) return { ok: false, message: '翻唱缺少有效的 account/chat/actor/request/persona/epoch' }
+    const sourceRequest = storage.requests.get(requestId)
+    if (sourceRequest ? sourceRequest.chatId !== chatId || sourceRequest.actorId !== String(actorId) || sourceRequest.epoch !== epoch ||
+      ['canceled', 'cancel_requested'].includes(sourceRequest.state) || sourceRequest.sourceMessageIds.some((id) => storage.messages.get(id)?.account !== String(botAccount))
+      : !String(requestId).startsWith('panel:') || String(actorId) !== String(g.ownerQQ)) return { ok: false, message: '翻唱请求来源、账号或提出者不匹配' }
+    if (c.ownerOnly && String(actorId) !== String(g.ownerQQ)) return { ok: false, message: '只有当前提出请求的主人能点歌' }
+    if (g.dryRun) return { ok: true, skipped: true, message: '试运行：不生成、不发送翻唱，也不记录真实经历' }
+    const duplicate = songJobs().find((j) => j.requestId === requestId && j.actorId === String(actorId) && j.chatId === chatId)
+    if (duplicate) return { ok: true, job_id: duplicate.id, state: duplicate.state, message: '该请求已经登记，未重复生成或发送' }
+    if (songJobs({ states: ACTIVE }).length >= 6) return { ok: false, message: '排队的歌太多了，等会儿再点' }
+    const { neteaseCookie, ...settings } = c
+    const frozenVoice = listVoices(P().models).find((v) => v.id === (voice || c.voice)) || listVoices(P().models)[0] || null
+    const job = runner.enqueue({ kind: 'song', chatId, actorId, requestId, epoch, maxAttempts: 1,
+      input: { query: String(song || basename(file || '')).slice(0, 300), songId, file, pitch, voice,
+        scope: { account: String(botAccount), chat: chatId, persona: personaId }, personaSnapshot: p || { personaId }, dryRun: false,
+        settings: { ...settings, root: c.root || defaultRoot(), frozenVoice, localSong: Boolean(local?.active('song')) }, cookieHash: hash(neteaseCookie || '') } })
+    runner.kick()
+    return { ok: true, job_id: job.id, message: `已登记「${job.input.query}」，做好后通过回执确认发送` }
   }
 
   return {
     status,
+    tick, recover, cancel, resend, runner, handler,
+    stop: () => { stopped = true; runner?.stop() },
     install: () => { runInstall(); return { ok: true, message: '开始安装，要下载好几个 GB，可能要十几分钟' } },
     request,
     search: (q) => searchSongs(q, { cookie: cfg().neteaseCookie, limit: 8 }),

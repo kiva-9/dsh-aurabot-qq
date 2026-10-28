@@ -92,10 +92,11 @@ test('群聊：话题无关不插话，越相关越容易插，加入话题后�
   assert.notEqual(decideGroupReply(base({ relevance: 0.1, engagedUntil: 10_100_000 })).mode, 'engaged')
 })
 
-test('群聊安全刹车：短时间说太多就歇着，主人 @ 能叫动', () => {
+test('群聊安全刹车：限制自动插话，有效显式请求单独处理', () => {
   const now = 10_000_000
   const eight = [1, 2, 3, 4, 5, 6, 7, 8].map((i) => now - 10_000 * i)
-  assert.match(decideGroupReply(base({ mentioned: true, botReplyTimes: eight })).reason, /歇一会儿/)
+  assert.match(decideGroupReply(base({ mentioned: false, botReplyTimes: eight })).reason, /歇一会儿/)
+  assert.equal(decideGroupReply(base({ mentioned: true, botReplyTimes: eight })).mode, 'must')
   assert.equal(decideGroupReply(base({ mentioned: true, fromOwner: true, botReplyTimes: eight })).mode, 'must')
   // 没到刹车线照常回
   assert.equal(decideGroupReply(base({ mentioned: true, botReplyTimes: eight.slice(0, 7) })).mode, 'must')
@@ -212,15 +213,19 @@ test('wantsVoice：明确要语音才算', async () => {
   for (const t of ['晚安', '你的语音好好听', '不要语音', '刚才那条语音是啥']) assert.equal(wantsVoice(t), false, t)
 })
 
-test('引用回复：<reply:编号> 挂到下一条气泡上，一轮最多一条，写坏的标签去掉', async () => {
+test('引用回复：每个明确编号挂到对应气泡，坏标签原样保留而不执行', async () => {
   const { parseReply } = await import('../src/chat/reply.js')
   assert.deepEqual(parseReply('<reply:3>粮收到 省着花\n刷视频那摊我少刷两条').items, [
     { kind: 'text', value: '粮收到 省着花', replyTo: '3' },
     { kind: 'text', value: '刷视频那摊我少刷两条' },
   ])
-  assert.equal(parseReply('哈哈\n<reply:2>你说的那个|||<reply:5>还有这个').items.filter((i) => i.replyTo).length, 1)
+  assert.deepEqual(parseReply('哈哈\n<reply:2>你说的那个|||<reply:5>还有这个').items, [
+    { kind: 'text', value: '哈哈' },
+    { kind: 'text', value: '你说的那个', replyTo: '2' },
+    { kind: 'text', value: '还有这个', replyTo: '5' },
+  ])
   assert.equal(parseReply('<reply:1><sticker:开心>').items[0].replyTo, '1')
-  assert.deepEqual(parseReply('<reply:x>坏标签').items, [{ kind: 'text', value: '坏标签' }])
+  assert.deepEqual(parseReply('<reply:x>坏标签').items, [{ kind: 'text', value: '<reply:x>坏标签' }])
   assert.equal(parseReply('正常说话').items[0].replyTo, undefined)
 })
 
@@ -311,13 +316,19 @@ test('#6 头像来源：只收网址或「刚才那张」，本地路径不收',
   assert.equal(avatarSource('base64://AAAA').ok, false)
 })
 
-test('条数超限：多出来的文字合进最后一条不丢尾巴，图片保留，表情丢掉', async () => {
+test('条数超限：只合相邻无引用文本；保留引用、语音、图片的类型与顺序', async () => {
   const { capItems } = await import('../src/chat/reply.js')
   const items = [{ kind: 'text', value: '一' }, { kind: 'text', value: '二' }, { kind: 'text', value: '三', replyTo: 2 }, { kind: 'voice', value: '四' }, { kind: 'sticker', value: 'x' }, { kind: 'image', value: 'http://a/b.png' }]
   const out = capItems(items, 3)
-  assert.deepEqual(out.map((i) => i.kind), ['text', 'text', 'text', 'image'])
-  assert.equal(out[2].value, '三\n四')
-  assert.equal(out[2].replyTo, 2)
+  assert.deepEqual(out, [
+    { kind: 'text', value: '一\n二' },
+    { kind: 'text', value: '三', replyTo: 2 },
+    { kind: 'voice', value: '四' },
+    { kind: 'image', value: 'http://a/b.png' },
+  ])
+  assert.equal(out.length, 4, '不能无损合并时允许超过软上限')
+  const mixed = [{ kind: 'text', value: '前' }, { kind: 'image', value: 'http://a/x.png' }, { kind: 'text', value: '后' }]
+  assert.deepEqual(capItems(mixed, 1), mixed, '图片后的文字不能提前')
   assert.equal(capItems(items.slice(0, 2), 3).length, 2, '没超就原样')
 })
 

@@ -5,10 +5,10 @@
 //   GET  /history/{id} → { [id]: { status: { status_str, completed, messages }, outputs: { nodeId: { images: [...] } } } }
 //   GET  /view?filename=&subfolder=&type= → 图片字节
 //   GET  /queue → { queue_running: [[num, id, ...]], queue_pending: [...] }
-//   POST /queue { delete: [id] } 删排队中的；POST /interrupt 打断正在跑的
+//   POST /queue { delete: [id] } 只删对应排队任务；不调用可能全局打断的 /interrupt。
 
 import { randomUUID, randomInt } from 'node:crypto'
-import { ProviderError, ROLES, request, classifyHttp, imageMime } from './common.js'
+import { ProviderError, ROLES, request, classifyHttp, imageMime, imageInfo, checkRequest, mergeCapabilities, validateHttpUrl, MAX_IMAGE_BYTES } from './common.js'
 
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
 const VALUE_KEYS = ['prompt', 'negativePrompt', 'width', 'height', 'seed']
@@ -33,15 +33,14 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
     if (has('base')) modes.push('edit')
     if (has('base') && has('mask')) modes.push('mask')
     // 管理员可以在 extra.modes 里再收窄（比如工作流其实不适合做编辑）
-    const declared = Array.isArray(x.modes) && x.modes.length ? x.modes : null
-    return {
-      modes: declared ? modes.filter((m) => declared.includes(m)) : modes,
+    return mergeCapabilities({
+      modes,
       maxInputs: ROLES.filter(has).length,
       async: true,
-      cancel: true,
+      cancel: true, // 仅排队任务可取消；运行中返回 ok: false。
       idempotent: false, // ComfyUI 没有幂等键，同一个工作流提交两次就画两次
       sizes: [],
-    }
+    }, { modes: x.modes })
   }
 
   function loadWorkflow() {
@@ -58,9 +57,10 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
   function resolve(graph, name) {
     const path = bindings[name]
     const parts = path.split('.')
+    if (parts.some((p) => !p || ['__proto__', 'prototype', 'constructor'].includes(p))) throw new ProviderError('invalid', `工作流绑定路径不合法：${path}`)
     let parent = graph
     for (let i = 0; i < parts.length - 1; i++) {
-      parent = parent?.[parts[i]]
+      parent = parent && Object.hasOwn(parent, parts[i]) ? parent[parts[i]] : null
       if (!parent || typeof parent !== 'object') parent = null
       if (!parent) break
     }
@@ -93,11 +93,21 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
 
   async function submit(req, { signal } = {}) {
     if (!base) throw new ProviderError('invalid', '这个 ComfyUI 服务还没填地址')
+    const url = validateHttpUrl(base)
+    if (url.search || url.hash) throw new ProviderError('invalid', 'ComfyUI baseUrl 不能包含查询参数或片段')
     if (!has('prompt')) throw new ProviderError('invalid', '工作流还没绑定提示词（bindings.prompt）')
+    const caps = mergeCapabilities(capabilities(), profile.capabilities)
+    if (!caps.modes.includes(req?.mode)) throw new ProviderError('unsupported', `这个 ComfyUI 工作流不支持「${req?.mode === 'mask' ? '蒙版' : req?.mode}」模式`)
+    const why = checkRequest(req, caps)
+    if (why) throw new ProviderError(/不支持|最多收/.test(why) ? 'unsupported' : 'invalid', why)
+    if (req.n !== undefined && req.n !== 1) throw new ProviderError('unsupported', 'ComfyUI 出图数量由登记的工作流决定，只接受 n = 1')
     const graph = loadWorkflow()
     // 先把所有绑定都校验一遍，登记错了的话在上传图片之前就报出来
     const slots = {}
-    for (const k of ALL_KEYS) if (has(k)) slots[k] = resolve(graph, k)
+    for (const k of ALL_KEYS) if (has(k)) {
+      slots[k] = resolve(graph, k)
+      if (Object.entries(slots).some(([other, slot]) => other !== k && slot.parent === slots[k].parent && slot.key === slots[k].key)) throw new ProviderError('invalid', `工作流绑定「${k}」与其他字段重叠，会覆盖输入`)
+    }
 
     // 输入图：每个角色一个绑定位置。没有绑定的角色、或同一角色多于一张，都直接拒绝——不能悄悄丢掉参考图
     const inputs = req.inputs || []
@@ -106,11 +116,13 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
       if (!slots[im.role]) throw new ProviderError('unsupported', `这个 ComfyUI 工作流不接收「${im.role}」角色的图`)
       if (seen.has(im.role)) throw new ProviderError('unsupported', `这个 ComfyUI 工作流只能放一张「${im.role}」角色的图`)
       seen.add(im.role)
+      imageInfo(im.buf)
     }
     if (req.mask && !slots.mask) throw new ProviderError('unsupported', '这个 ComfyUI 工作流不支持蒙版')
+    if (req.mask) imageInfo(req.mask.buf)
 
     for (const im of inputs) {
-      const name = await upload(im.buf, im.mime || imageMime(im.buf) || 'image/png', { signal })
+      const name = await upload(im.buf, imageInfo(im.buf).mime, { signal })
       slots[im.role].parent[slots[im.role].key] = name
     }
     if (req.mask) {
@@ -198,7 +210,7 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
     for (const im of images) {
       if (!im?.filename) continue
       const qs = new URLSearchParams({ filename: im.filename, subfolder: im.subfolder || '', type: im.type || 'output' })
-      const r = await request(fetchImpl, `${base}/view?${qs}`, { method: 'GET', headers: { ...auth } }, { timeoutMs: 120000, signal })
+      const r = await request(fetchImpl, `${base}/view?${qs}`, { method: 'GET', headers: { ...auth } }, { timeoutMs: 120000, signal, maxBytes: MAX_IMAGE_BYTES })
       if (!r.ok) throw new ProviderError('unknown', `下载 ComfyUI 结果失败（${r.status}）`, { status: r.status, maybeCharged: false })
       // 输出节点也可能存视频 / 潜空间文件，只收真正的图片
       const mime = imageMime(r.buf)
@@ -209,16 +221,22 @@ export function createComfyImages(profile, { fetchImpl = fetch } = {}) {
   }
 
   async function cancel(promptId, { signal } = {}) {
+    if (typeof promptId !== 'string' || !promptId.trim()) throw new ProviderError('invalid', '缺少 ComfyUI 任务号')
+    if (!mergeCapabilities(capabilities(), profile.capabilities).cancel) return { ok: false, message: '这个服务未启用取消能力' }
     const id = String(promptId)
-    const state = await queueState(id, { signal })
+    let state = await queueState(id, { signal })
     if (state === 'pending') {
       await postJson('/queue', { delete: [id] }, { signal })
+      // GET 和 DELETE 之间可能已开始执行；/queue 的 200 并不保证实际删掉了任务。
+      state = await queueState(id, { signal })
+      if (state === 'running') return { ok: false, message: '任务已开始执行，无法安全取消；未发送全局中断' }
+      if (state === 'pending') return { ok: false, message: '任务仍在排队，未能确认取消' }
+      const h = await getJson(`/history/${encodeURIComponent(id)}`, { signal })
+      if (h[id]) return { ok: false, message: '已经画完了' }
       return { ok: true, message: '已经从排队里撤掉了' }
     }
     if (state === 'running') {
-      // 老版本的 /interrupt 不看参数、直接打断当前任务；新版本认 prompt_id，只打断这一个。刚确认过它正在跑，所以两种都对
-      await postJson('/interrupt', { prompt_id: id }, { signal })
-      return { ok: true, message: '已经让 ComfyUI 停下了' }
+      return { ok: false, message: '任务正在执行，无法安全取消；未发送全局中断' }
     }
     const h = await getJson(`/history/${encodeURIComponent(id)}`, { signal })
     if (h[id]) return { ok: false, message: '已经画完了' }

@@ -5,8 +5,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHttpImages, validateHttpProfile, fillTemplate } from '../src/providers/image/http.js'
 
-const PNG = Buffer.concat([Buffer.from([0x89]), Buffer.from('PNG\r\n\x1a\n'), Buffer.alloc(32, 7)])
-const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(32, 3)])
+import { PNG, JPG } from './helpers/images.js'
 
 let server
 let base
@@ -31,6 +30,16 @@ before(async () => {
     }
     if (u.pathname === '/limited') return json(429, { error: { message: 'too many requests' } })
     if (u.pathname === '/files/out.jpg') { res.writeHead(200, { 'content-type': 'image/jpeg' }); return res.end(JPG) }
+    if (u.pathname === '/status-json' && req.method === 'POST') {
+      let body
+      try { body = JSON.parse(buf.toString('utf8')) } catch { return json(400, { message: 'bad json' }) }
+      const t = tasks.get(body.id)
+      if (!t) return json(404, { message: 'no task' })
+      t.polls++
+      if (t.fail) return json(200, { state: 'FAILED', err: { msg: '提示词被拒' } })
+      if (t.polls < 2) return json(200, { state: 'RUNNING' })
+      return json(200, { state: 'SUCCEEDED', output: { urls: [`${base}/files/out.jpg`] } })
+    }
     if (u.pathname === '/tasks' && req.method === 'POST') {
       let body
       try { body = JSON.parse(buf.toString('utf8')) } catch (error) { return json(400, { message: 'bad json' }) }
@@ -230,4 +239,148 @@ test('配置检查：缺地址、方法不对、异步没配状态、缺图片�
   const e = await createHttpImages({ extra: {} }).submit({ mode: 'text', prompt: 'x', inputs: [] }).catch((err) => err)
   assert.equal(e.kind, 'invalid')
   assert.match(e.message, /没填提交地址/)
+})
+
+const postStatusExtra = () => {
+  const extra = asyncExtra()
+  extra.status = { ...extra.status, method: 'POST', url: `${base}/status-json`, bodyType: 'json', body: '{"id":"{taskId}"}' }
+  return extra
+}
+
+test('POST JSON 轮询：恢复已有任务无需提交，URL 无任务号，body 转义且不二次展开，结果下载不带密钥', async () => {
+  const id = '任务"\\\n{apiKey}/?a=1&b={taskId}'
+  tasks.set(id, { polls: 0 })
+  const config = profile(postStatusExtra(), 'must-not-appear-in-body')
+  assert.deepEqual(validateHttpProfile(config), [])
+  const adapter = createHttpImages(config), start = seen.length
+  assert.equal((await adapter.poll(id)).status, 'running')
+  const rec = last('/status-json')
+  assert.equal(rec.url, '/status-json')
+  assert.equal(rec.method, 'POST')
+  assert.equal(rec.headers.authorization, 'Bearer must-not-appear-in-body')
+  assert.equal(rec.headers['content-type'], 'application/json')
+  assert.deepEqual(JSON.parse(rec.buf.toString()), { id })
+  assert.equal(rec.buf.includes('must-not-appear-in-body'), false)
+  const result = await adapter.poll(id)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.outputs[0].buf, JPG)
+  assert.equal(last('/files/out.jpg').headers.authorization, undefined)
+  assert.deepEqual(seen.slice(start).map(rec => rec.method + ' ' + rec.url), ['POST /status-json', 'POST /status-json', 'GET /files/out.jpg'])
+})
+
+test('POST JSON 轮询保留失败状态/HTTP 错误分类及自定义 Content-Type', async () => {
+  tasks.set('native-failed', { polls: 0, fail: true })
+  const extra = postStatusExtra()
+  extra.headers['Content-Type'] = 'application/json; charset=utf-8'
+  const adapter = createHttpImages(profile(extra))
+  const failed = await adapter.poll('native-failed')
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.error.kind, 'invalid')
+  assert.match(failed.error.message, /提示词被拒/)
+  assert.equal(last('/status-json').headers['content-type'], 'application/json; charset=utf-8')
+  await assert.rejects(adapter.poll('never-created'), e => e.kind === 'invalid' && e.status === 404)
+})
+
+test('旧的 POST URL 轮询配置默认 none：不凭空添加 body 或 Content-Type', async () => {
+  const extra = asyncExtra()
+  extra.status.method = 'POST'
+  let calls = 0
+  const adapter = createHttpImages(profile(extra), { fetchImpl: async (url, init) => {
+    calls++
+    assert.equal(url, `${base}/tasks/old-id`)
+    assert.equal(init.method, 'POST')
+    assert.equal(init.body, undefined)
+    assert.equal(new Headers(init.headers).has('content-type'), false)
+    return Response.json({ state: 'RUNNING' })
+  } })
+  assert.equal((await adapter.poll('old-id')).status, 'running')
+  assert.equal(calls, 1)
+})
+
+test('{imagesDataUrls} 是完整 data URL 数组，底图优先且其余稳定；可与旧 imagesJson 同时使用', async () => {
+  const config = profile({
+    modes: ['text', 'reference'], maxInputs: 3,
+    submit: { url: `${base}/echo`, bodyType: 'json', body: '{"prompt":"{prompt}","urls":{imagesDataUrls},"legacy":{imagesJson}}' },
+    response: { imagesPath: 'images' },
+  })
+  assert.deepEqual(validateHttpProfile(config), [])
+  const adapter = createHttpImages(config), prompt = '蓝鲸 "{apiKey}"\n{imagesDataUrls}'
+  await adapter.submit({ mode: 'reference', prompt, inputs: [
+    { buf: JPG, mime: 'image/jpeg', role: 'style' },
+    { buf: PNG, mime: 'image/png', role: 'base' },
+    { buf: PNG, role: 'identity' },
+  ] })
+  const sent = JSON.parse(last('/echo').buf.toString())
+  assert.equal(sent.prompt, prompt)
+  assert.deepEqual(sent.urls, [PNG, JPG, PNG].map((buf, i) => `data:${i === 1 ? 'image/jpeg' : 'image/png'};base64,${buf.toString('base64')}`))
+  assert.deepEqual(sent.legacy.map(im => im.role), ['base', 'style', 'identity'])
+  assert.deepEqual(sent.legacy.map(im => Buffer.from(im.base64, 'base64')), [PNG, JPG, PNG])
+  await adapter.submit({ mode: 'text', prompt: '蓝鲸', inputs: [] })
+  assert.deepEqual(JSON.parse(last('/echo').buf.toString()).urls, [])
+})
+
+test('只声明 imagesDataUrls 就能收图；损坏字节与伪造 MIME 在发送前拒绝', async () => {
+  const config = profile({
+    modes: ['reference'], maxInputs: 1,
+    submit: { url: `${base}/echo`, bodyType: 'json', body: '{"urls":{imagesDataUrls}}' },
+    response: { imagesPath: 'images' },
+  })
+  assert.deepEqual(validateHttpProfile(config), [])
+  let calls = 0
+  const adapter = createHttpImages(config, { fetchImpl: async () => { calls++; return Response.json({ images: [] }) } })
+  for (const input of [{ buf: PNG, mime: 'text/html' }, { buf: PNG.subarray(0, 20), mime: 'image/png' }]) {
+    await assert.rejects(adapter.submit({ mode: 'reference', inputs: [{ ...input, role: 'base' }] }), e => e.kind === 'invalid')
+  }
+  assert.equal(calls, 0)
+})
+
+test('JSON 数组占位符不注入 URL/头部，不二次展开提示词', () => {
+  for (const enc of ['url', 'raw']) assert.equal(fillTemplate('x={imagesDataUrls}', { imagesDataUrls: '["data:image/png;base64,AA=="]' }, enc), 'x=')
+  assert.equal(fillTemplate('{imagesDataUrls}', {}, 'json'), '[]')
+  assert.deepEqual(JSON.parse(fillTemplate('{"p":"{prompt}","urls":{imagesDataUrls}}', {
+    prompt: '{imagesDataUrls} {apiKey}', apiKey: 'secret', imagesDataUrls: '["data:image/png;base64,AA=="]',
+  }, 'json')), { p: '{imagesDataUrls} {apiKey}', urls: ['data:image/png;base64,AA=='] })
+})
+
+test('轮询 body 校验：不能 GET 带体、静默丢体、缺任务号或发坏 JSON；恢复 poll 也在联网前校验', async () => {
+  const cases = [
+    [{ method: 'GET' }, /GET.*请求体/],
+    [{ bodyType: 'form' }, /请求体类型不对/],
+    [{ bodyType: 'none' }, /bodyType/],
+    [{ body: '{}' }, /\{taskId\}/],
+    [{ body: '{"id":{taskId}}' }, /有效 JSON/],
+    [{ body: { id: '{taskId}' } }, /有效 JSON/],
+    [{ body: '' }, /有效 JSON/],
+  ]
+  for (const [patch, message] of cases) {
+    const extra = postStatusExtra()
+    Object.assign(extra.status, patch)
+    assert.ok(validateHttpProfile(profile(extra)).some(problem => message.test(problem)))
+    let calls = 0
+    const adapter = createHttpImages(profile(extra), { fetchImpl: async () => { calls++; return Response.json({}) } })
+    await assert.rejects(adapter.poll('existing-task'), e => e.kind === 'invalid')
+    assert.equal(calls, 0)
+  }
+})
+
+test('POST JSON 轮询传递取消信号，取消后不再轮询或重新提交', async () => {
+  const controller = new AbortController(), calls = []
+  let notifyStarted
+  const started = new Promise(resolve => { notifyStarted = resolve })
+  const adapter = createHttpImages(profile(postStatusExtra()), { fetchImpl: async (url, init) => {
+    calls.push({ url, init })
+    notifyStarted()
+    return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }))
+  } })
+  const pending = adapter.poll('existing-task', { signal: controller.signal })
+  const rejected = assert.rejects(pending, e => e.kind === 'unknown')
+  await started
+  controller.abort(new DOMException('stop', 'AbortError'))
+  await rejected
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].init.signal.aborted, true)
+  assert.equal(calls[0].url, `${base}/status-json`)
+  assert.deepEqual(JSON.parse(calls[0].init.body), { id: 'existing-task' })
+  await assert.rejects(adapter.poll('existing-task', { signal: controller.signal }))
+  assert.equal(calls.length, 1, '预先取消不会再次发请求')
 })

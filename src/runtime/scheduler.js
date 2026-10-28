@@ -28,6 +28,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
   const open = new Map() // chatId → 正在攒的一批
   const ready = new Map() // chatId → [已到期、等着交的批次]
   const busySince = new Map() // chatId → 这一轮开始的时间
+  let disposed = false
 
   const isBusy = (chatId) => busySince.has(chatId) && timers.now() - busySince.get(chatId) < BUSY_MAX_MS
 
@@ -36,6 +37,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
    * mode：must 一定回 / interject 插话 / engaged 在话题里 / context 只当上下文（不触发，只在已经有一批开着时并进去）。
    */
   function add(chat, entry) {
+    if (disposed) return false
     const now = timers.now()
     let b = open.get(chat.chatId)
     if (!b) {
@@ -103,6 +105,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
 
   /** 到期的批次交出去：空闲就开新一轮；私聊正在跑就插话；否则等这一轮结束。 */
   function pump(chatId) {
+    if (disposed) return
     const list = ready.get(chatId)
     if (!list || !list.length) return
     if (isBusy(chatId)) {
@@ -119,7 +122,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
 
   function run(batch, steer) {
     Promise.resolve()
-      .then(() => dispatch(batch.chat, batch, { steer }))
+      .then(() => { if (!disposed) return dispatch(batch.chat, batch, { steer }) })
       .catch((error) => {
         log?.warn?.(`交给她失败（${batch.chat.chatId}）：`, error.message)
         if (!steer) turnEnded(batch.chat.chatId)
@@ -156,5 +159,15 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     }
   }
 
-  return { add, mediaSettled, turnEnded, drop, state, isBusy, hasOpen: (chatId) => open.has(chatId) }
+  function dispose() {
+    disposed = true
+    for (const b of open.values()) timers.clearTimeout(b.timer)
+    open.clear(); ready.clear(); busySince.clear()
+  }
+  function reserve(chatId) {
+    if (disposed || isBusy(chatId) || open.has(chatId) || ready.get(chatId)?.length) return false
+    busySince.set(chatId, timers.now())
+    return true
+  }
+  return { add, mediaSettled, turnEnded, drop, dispose, state, isBusy, reserve, hasOpen: (chatId) => open.has(chatId) }
 }

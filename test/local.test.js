@@ -4,6 +4,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { PNG } from './helpers/images.js'
+import { createJobRunner } from '../src/jobs/runner.js'
 
 let L
 let cfg
@@ -65,8 +67,9 @@ test('生图：脚本返回 Buffer / base64 / 文件都认；接管后不需要�
   await assert.rejects(L.toImageBuffer({}), /没返回图片/)
   const local = L.createLocal({ getConfig: () => cfg, log })
   local.template('image')
-  // 返回一张「PNG」：文件头 + 画了什么（方便断言提示词）
-  writeFileSync(local.pathOf('image'), `export default async ({ prompt, size }) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]), Buffer.from(prompt + '|' + size)])`)
+  // Valid image output; request arguments are recorded separately.
+  const argsFile = join(process.env.AURABOT_DATA_DIR, 'local-image-args.json')
+  writeFileSync(local.pathOf('image'), `import { writeFileSync } from 'node:fs'; export default async (args) => { writeFileSync(${JSON.stringify(argsFile)},JSON.stringify(args)); return Buffer.from('${PNG.toString('base64')}', 'base64') }`)
   const { createImageService } = await import('../src/jobs/image.js')
   const { createStorage } = await import('../src/storage/index.js')
   const storage = createStorage({ file: ':memory:', filesDir: join(tmpdir(), 'aurabot-local-assets') })
@@ -77,9 +80,14 @@ test('生图：脚本返回 Buffer / base64 / 文件都认；接管后不需要�
   assert.equal(svc.pickProfile({ mode: 'text', inputs: [] }).profile.id, 'local')
   assert.match(svc.pickProfile({ mode: 'edit', inputs: [{ role: 'base' }] }).error, /原图编辑/, '本地脚本只会文生图，改图要说清楚做不了')
   cfg.imageGen.stylePrompt = '水彩'
-  const res = await svc.handler.submit({ id: 'job_x', input: { prompt: '小鱼', mode: 'text', refs: [] } }, { n: 1 })
-  assert.equal(res.status, 'done')
-  assert.ok(res.outputs[0].buf.toString('utf8').endsWith('水彩，小鱼|' + cfg.imageGen.size))
+  const runner = createJobRunner({ storage, handlers: { image: svc.handler }, log })
+  const job = svc.enqueue(runner,{kind:'image',chatId:'private:10000001',actorId:'10000001',input:{prompt:'小鱼',mode:'text',refs:[]}})
+  const res = await svc.handler.submit(job,{n:1})
+  assert.equal(res.status,'done')
+  assert.deepEqual(res.outputs[0].buf,PNG)
+  assert.equal(JSON.parse(readFileSync(argsFile,'utf8')).prompt,'水彩，小鱼')
+  await runner.stop()
+  storage.close()
   cfg.local.image = false
 })
 

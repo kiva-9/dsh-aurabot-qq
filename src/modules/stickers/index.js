@@ -1,138 +1,104 @@
-// 内置模块：表情包。偷表情、回复时按情绪配一张、她自己整理表情库。
-// 导出的就是表情库（createStickerStore 的返回值），聊天中枢发表情、偷表情都找它。
-
-import { readFileSync, existsSync } from 'node:fs'
-import { createStickerStore, stickerPath } from '../../features/stickers.js'
+// 面板路由沿用宿主认证通道；聊天工具只允许主人做管理操作。
+import { createStickerStore } from '../../features/stickers.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { fetchImage, segmentBytes } from '../../core/net.js'
+import { dataDir } from '../../core/store.js'
 
 export default {
-  id: 'stickers',
-  name: '表情包',
-  version: '1.0.0',
-  description: '偷表情、回复时按情绪配表情、她自己改名删图；关掉后不发也不收表情',
-  tab: 'stickers',
-  files: ['features/stickers.js'],
+  id: 'stickers', name: '表情包', version: '2.0.0', tab: 'stickers',
+  description: '按聊天收藏、审核和选择表情；QQ 收藏同步独立跟踪',
+  files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/analysis.js', 'stickers/legacy.js'],
   setup(api) {
-    const { hub, onebot, http } = api.core
-    const store = createStickerStore({ dsh: api.dsh, getConfig: api.config, onebot, log: api.log })
+    const { hub, onebot, http, storage } = api.core
+    const legacyDir = api.core.stickerLegacyDir ?? dataDir('stickers')
+    const store = createStickerStore({ storage, dsh: api.dsh, getConfig: api.config, onebot, log: api.log, legacyDir })
+    const adminOptions = (body = {}) => ({ ...body, admin: true, accountId: String(api.config().botQQ || ''), chatId: body.chatId || undefined })
+    const idOf = (body) => body.id || body.md5
+    const errorResult = (e) => ({ ok: false, code: e.code || 'STICKER_ERROR', message: e.message, reason: e.message })
+    const route = (path, fn) => api.route(path, async (...args) => { try { return await fn(...args) } catch (e) { return errorResult(e) } })
+    const post = (path, fn) => route(path, async (req) => { const body = await http.body(req); return fn(body, adminOptions(body)) })
 
     api.tool(({ chat, level, sessionId }) => {
       if (chat.kind === 'system') return []
-      const current = chat.chatId
+      const chatId = chat.chatId
+      const owner = () => hub.turnHasOwner(sessionId)
+      const management = () => ({ admin: true, chatId, actorId: String(api.config().ownerQQ || '') })
+      const denied = () => ({ ok: false, message: '只有主人能管理表情库' })
       const tools = [
-        defineTool({
-          name: 'qq_send_sticker',
-          description: '在当前 QQ 聊天里发一张表情包。name 写表情的名字或情绪（如「委屈」「开心」「早晚安」），会在表情库里模糊匹配。一般直接在回复里写 <sticker:名字> 就行，这个工具用于回复之外单独补发。',
-          properties: { name: str('表情名字或情绪关键词') },
-          required: ['name'],
-          execute: async ({ name }) => {
-            const ok = await hub.sendSticker(current, String(name || ''))
-            return ok ? { ok: true, message: '发了' } : { ok: false, message: '表情库里没找到合适的' }
-          },
-        }),
-        defineTool({
-          name: 'qq_list_stickers',
-          description: '看看表情库里有哪些表情（名字和标签），挑表情前可以先看。',
-          properties: { query: str('可选，按名字/标签筛选') },
+        defineTool({ name: 'qq_send_sticker', description: '在当前聊天发送已批准且用途合适的表情；没有合适项就不发。',
+          properties: { name: str('名字或情绪关键词') }, required: ['name'], execute: async ({ name }) => {
+            const ok = await hub.sendSticker(chatId, String(name || ''))
+            return { ok: Boolean(ok), message: ok ? '发了' : '没有找到当前聊天可用的表情' }
+          } }),
+        defineTool({ name: 'qq_list_stickers', description: '查看当前聊天可使用的已审核表情。', properties: { query: str('可选名字或标签') },
           execute: async ({ query }) => {
-            const items = store.library().items
-            const q = String(query || '').trim()
-            const hit = (q ? items.filter((i) => (i.name || '').includes(q) || (i.tags || []).some((t) => t.includes(q))) : items).slice(-60)
-            return { ok: true, count: items.length, message: hit.length ? hit.map((i) => `${i.name || '未命名'}${i.tags?.length ? '（' + i.tags.join('/') + '）' : ''}`).join('、') : '没有符合的表情', items: hit.map((i) => ({ name: i.name, tags: i.tags })) }
-          },
-        }),
-        defineTool({
-          name: 'qq_edit_sticker',
-          description: '整理表情库：给一张表情改名字、改标签，或者删掉。名字不贴切、别人建议改名、标签不对的时候用；不喜欢、重复、发不出去的表情可以删。sticker 写现在的名字或标签（模糊匹配）。',
-          properties: {
-            sticker: str('要改的那张表情现在的名字或标签'),
-            new_name: str('新名字（12 字以内，不改就不填）'),
-            tags: { type: 'array', items: { type: 'string' }, description: '新标签（情绪 / 用途，比如 开心、委屈、嘲讽；不改就不填）' },
-            delete: { type: 'boolean', description: 'true = 删掉这张表情' },
-          },
-          required: ['sticker'],
+            const r = store.list({ chatId, query, limit: 60 })
+            return { ok: true, count: r.total, items: r.items.map((it) => ({ id: it.id, name: it.name, tags: it.tags })),
+              message: r.items.length ? r.items.map((it) => it.name || '未命名').join('、') : '没有可用表情' }
+          } }),
+        defineTool({ name: 'qq_edit_sticker', description: '主人要求时修改当前聊天表情名字、标签或删除。删除会保留阻止重新收藏的记录。',
+          properties: { sticker: str('现在的名字或标签'), new_name: str('新名字'), tags: { type: 'array', items: { type: 'string' } }, delete: { type: 'boolean' } }, required: ['sticker'],
           execute: async ({ sticker, new_name, tags, delete: del }) => {
-            const item = store.match(String(sticker || ''))
-            if (!item) return { ok: false, message: '表情库里没找到这张' }
-            const label = item.name || item.md5.slice(0, 8)
-            if (del) {
-              // 主人亲手加的表情，主人开口才删
-              if ((item.from === 'manual' || item.from === 'panel') && !hub.turnHasOwner(sessionId)) return { ok: false, message: '这张是主人加的，主人说删才删' }
-              const r = await store.remove(item.md5)
-              return r.ok ? { ok: true, message: `删掉了「${label}」` } : { ok: false, message: r.reason || '没删成' }
-            }
-            if (!new_name && !(Array.isArray(tags) && tags.length)) return { ok: false, message: '要说改成什么' }
-            const r = store.rename(item.md5, new_name ? String(new_name).trim().slice(0, 12) : undefined, Array.isArray(tags) && tags.length ? tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5) : undefined)
-            return r.ok ? { ok: true, message: `改好了：「${label}」→「${r.item.name}」${r.item.tags?.length ? '（' + r.item.tags.join('/') + '）' : ''}` } : { ok: false, message: '没改成' }
-          },
-        }),
+            if (!owner()) return denied()
+            const item = store.match(String(sticker || ''), chatId)
+            if (!item) return { ok: false, message: '当前聊天没有这张表情' }
+            return del ? store.remove(item.id, management()) : store.rename(item.id, new_name, tags, management())
+          } }),
+        defineTool({ name: 'qq_save_sticker', description: '主人要求时保存当前聊天最近图片为待审核素材；本地保存不代表 QQ 收藏同步成功。',
+          properties: { name: str('备注'), tags: { type: 'array', items: { type: 'string' } } }, execute: async ({ name, tags }) => {
+            if (!owner()) return denied()
+            const media = hub.recentMedia(chatId)
+            const pick = media.filter((x) => x.userId === String(api.config().ownerQQ)).at(-1) || media.at(-1)
+            if (!pick) return { ok: false, message: '当前聊天没有可保存的近期图片' }
+            const buf = await segmentBytes(pick.seg, onebot, { maxBytes: 5 * 1024 * 1024 })
+            return store.addFromBuffer(buf, { chatId, name: name || '', tags: tags || [], from: 'tool', toQQ: true })
+          } }),
+        defineTool({ name: 'qq_import_qq_stickers', description: '把 QQ 收藏导入当前聊天的待审区；不会自动跨群共享。', execute: async () => {
+          if (!owner()) return denied()
+          return store.importFromQQ(management())
+        } }),
       ]
-      // 主人让她存表情：存这个聊天里刚发来的那张（她看得见图，但拿不到图片地址，所以由插件去找）
-      tools.push(defineTool({
-        name: 'qq_save_sticker',
-        description: '把这个聊天里刚发来的那张表情包 / 图片收进你的表情库（同时收藏到 QQ）。主人说「存一下这个表情」「导入这个表情」「收藏这张」时用。name 是不超过 12 个字的备注，可以不填（会自动看图起名）。',
-        properties: { name: str('备注（≤12 字，可不填）'), tags: { type: 'array', items: { type: 'string' }, description: '标签，如 开心/委屈（可不填）' } },
-        execute: async ({ name, tags }) => {
-          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能让我存表情' }
-          const media = hub.recentMedia(current)
-          // 优先主人自己发的，其次这个聊天里最近的
-          const pick = media.filter((x) => x.userId === String(api.config().ownerQQ)).at(-1) || media.at(-1)
-          if (!pick) return { ok: false, message: '最近半小时这个聊天里没有人发表情或图片，先把那张发过来' }
-          const buf = await segmentBytes(pick.seg, api.core.onebot, { maxBytes: 5 * 1024 * 1024 })
-          const r = await store.addFromBuffer(buf, { name: String(name || '').slice(0, 12), tags: Array.isArray(tags) ? tags.slice(0, 3) : [], from: 'tool' })
-          if (!r.ok) return { ok: false, message: r.reason || '没存成' }
-          if (r.existed) return { ok: true, message: `库里已经有这张了（叫「${r.item.name || '未命名'}」）` }
-          return { ok: true, message: `存好了${r.item.name ? '「' + r.item.name + '」' : ''}` }
-        },
-      }))
-      tools.push(defineTool({
-        name: 'qq_import_qq_stickers',
-        description: '把你 QQ「我喜欢的」收藏里已有的表情全部导进表情库（已经有的跳过），之后就能用 <sticker:名字> 发它们。主人让你「导入收藏的表情」「同步一下 QQ 表情」时用。',
-        execute: async () => {
-          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能让我导入收藏的表情' }
-          return store.importFromQQ()
-        },
-      }))
-      // 主人私聊（完整权限）才能往库里加图
-      if (level === 'full') tools.push(defineTool({
-        name: 'qq_add_sticker',
-        description: '把一张图片收进表情库并收藏到 QQ。source 是本地图片路径或图片网址；name 是不超过 12 个字的备注。',
-        properties: { source: str('本地路径或 http(s) 地址'), name: str('备注（≤12 字）'), tags: { type: 'array', items: { type: 'string' }, description: '标签，如 开心/委屈' } },
-        required: ['source'],
+      if (level === 'full') tools.push(defineTool({ name: 'qq_add_sticker', description: '主人指定图片路径或网址时保存为当前聊天待审核素材。',
+        properties: { source: str('图片路径或 http(s) 地址'), name: str('备注'), tags: { type: 'array', items: { type: 'string' } } }, required: ['source'],
         execute: async ({ source, name, tags }) => {
-          const buf = await fetchImage(String(source), { maxBytes: 5 * 1024 * 1024 })
-          const r = await store.addFromBuffer(buf, { name: name || '', tags: Array.isArray(tags) ? tags.slice(0, 3) : [], from: 'tool' })
-          return r.ok ? { ok: true, message: r.existed ? '库里已经有这张了' : `收好了「${r.item.name || '未命名'}」` } : { ok: false, message: r.reason }
-        },
-      }))
+          if (!owner()) return denied()
+          return store.addFromBuffer(await fetchImage(String(source), { maxBytes: 5 * 1024 * 1024 }), { chatId, name: name || '', tags: tags || [], from: 'tool' })
+        } }))
       return tools
     })
 
-    api.route('/stickers', async () => ({ ok: true, items: store.library().items.slice().reverse() }))
-    api.route('/sticker/image', async (req, res) => {
-      const it = store.library().items.find((i) => i.md5 === http.query(req).md5)
-      if (!it || !existsSync(stickerPath(it))) return http.send(res, 404, '')
-      const ext = it.file.split('.').pop()
-      http.send(res, 200, readFileSync(stickerPath(it)), ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : ext === 'webp' ? 'image/webp' : 'image/jpeg')
+    route('/stickers', async (req) => ({ ok: true, ...store.list(adminOptions(http.query(req))) }))
+    route('/stickers/stats', async (req) => ({ ok: true, ...store.stats(adminOptions(http.query(req))) }))
+    route('/sticker/detail', async (req) => { const q = http.query(req); const item = store.get(idOf(q), adminOptions(q)); return { ok: Boolean(item), item } })
+    route('/stickers/queue', async (req) => ({ ok: true, ...store.queueStatus(adminOptions(http.query(req))) }))
+    route('/sticker/image', async (req, res) => {
+      const q = http.query(req)
+      const image = store.preview(idOf(q), adminOptions(q))
+      return image ? http.send(res, 200, image.bytes, image.mime) : http.send(res, 404, '')
     })
-    api.route('/sticker/rename', async (req) => {
-      const b = await http.body(req)
-      return store.rename(b.md5, b.name, Array.isArray(b.tags) ? b.tags : undefined)
+    post('/sticker/rename', (b, o) => store.rename(idOf(b), b.name, b.tags, o))
+    post('/sticker/edit', (b, o) => store.edit(idOf(b), b.patch || {}, o))
+    post('/sticker/approve', (b, o) => store.approve(idOf(b), o))
+    post('/sticker/reject', (b, o) => store.reject(idOf(b), o))
+    post('/sticker/disable', (b, o) => store.disable(idOf(b), o))
+    post('/sticker/delete', (b, o) => store.remove(idOf(b), o))
+    post('/sticker/frames', (b, o) => store.selectFrames(idOf(b), b.frames, o))
+    post('/sticker/analysis/retry', (b, o) => store.retryAnalysis(idOf(b), o))
+    post('/sticker/sync', (b, o) => store.queueSync(idOf(b), o))
+    post('/sticker/task/retry', (b, o) => store.retryTask(b.taskId, o))
+    post('/sticker/sync/reconcile', (b, o) => store.reconcileSync(b.taskId, o))
+    post('/sticker/import-qq', (_b, o) => store.importFromQQ(o))
+    post('/sticker/legacy/import', (_b, o) => store.importLegacy(legacyDir, o))
+    post('/sticker/legacy/assign', (b, o) => store.assignLegacy(b.id, o))
+    post('/sticker/legacy/delete', (b, o) => store.deleteLegacy(b.id, o))
+    post('/sticker/upload', (b, o) => {
+      const bytes = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
+      return store.addFromBuffer(bytes, { ...o, name: b.name || '', tags: b.tags || [], from: 'panel', toQQ: b.toQQ !== false })
     })
-    api.route('/sticker/delete', async (req) => {
-      const b = await http.body(req)
-      return store.remove(b.md5, { fromQQ: b.fromQQ !== false })
-    })
-    api.route('/sticker/import-qq', async () => store.importFromQQ())
-    api.rule(() => '- 主人让你存某个表情（「存一下」「导入这个表情」）时用 qq_save_sticker；让你把 QQ 收藏里的表情导进来时用 qq_import_qq_stickers。别人让你存，不用理。')
-    api.route('/sticker/upload', async (req) => {
-      const b = await http.body(req)
-      const buf = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
-      if (!buf.length || buf.length > 5 * 1024 * 1024) return { ok: false, message: '图片太大或是空的' }
-      return store.addFromBuffer(buf, { name: b.name || '', tags: b.tags || [], from: 'panel' })
-    })
-
+    api.rule(() => '- 保存表情只代表本地待审核；不能说已批准或 QQ 收藏成功。没有合适的已批准表情就不发。')
+    store.recover()
+    store.start()
+    api.onDispose?.(() => store.stop())
     return store
   },
 }

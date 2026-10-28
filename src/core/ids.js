@@ -34,6 +34,8 @@ function bump(bytes) {
 
 export function newId(prefix, now = Date.now()) {
   if (!/^[a-z]{2,4}$/.test(prefix)) throw new Error(`ID 前缀不合法：${prefix}`)
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error('ID 时间不合法')
+  now = Math.max(now, lastMs)
   let rand
   if (now === lastMs && lastRand) rand = bump(lastRand)
   else rand = randomBytes(12)

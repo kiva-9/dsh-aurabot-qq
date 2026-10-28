@@ -1,0 +1,276 @@
+{
+  "measuredAt": "2026-10-28T15:02:28.045Z",
+  "environment": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "AMD Ryzen 7 9700X 8-Core Processor             ",
+    "logicalCpus": 16,
+    "totalMemoryBytes": 50628530176,
+    "loweredPriority": true
+  },
+  "scope": "Synthetic local exact-vector backend only. Each size is PER SPACE (384D text + 512D image). Worker-reopen cold, OS disk cache not purged. No real model, Qdrant or semantic-quality acceptance.",
+  "settings": {
+    "counts": [
+      10000,
+      100000
+    ],
+    "queries": 30,
+    "delayMs": 2,
+    "storageWorkerCount": 1,
+    "batchSize": 128,
+    "cacheBudgetBytes": 8388608,
+    "pageSize": 256
+  },
+  "elapsedMs": 126464.14270000001,
+  "peakProcessRssBytes": 331268096,
+  "controllerEventLoop": {
+    "p50Ms": 12.951551,
+    "p95Ms": 21.463039,
+    "maxMs": 28.295167
+  },
+  "datasets": [
+    {
+      "recordsPerSpace": 10000,
+      "totalInitialVectors": 20000,
+      "emptyOpenMs": 35.834700000000005,
+      "workerReopenMs": 24.74350000000004,
+      "diskBytes": 71524352,
+      "ingestion": [
+        {
+          "spaceId": "synthetic-text-384",
+          "dims": 384,
+          "records": 10000,
+          "elapsedMs": 959.559,
+          "vectorsPerSecond": 10421.454022108073
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "dims": 512,
+          "records": 10000,
+          "elapsedMs": 993.5576000000001,
+          "vectorsPerSecond": 10064.841736402599
+        }
+      ],
+      "query": [
+        {
+          "spaceId": "synthetic-text-384",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 116.41330000000016,
+            "p95Ms": 116.41330000000016,
+            "p99Ms": 116.41330000000016,
+            "maxMs": 116.41330000000016,
+            "authorizedCandidates": 10000,
+            "pages": 43,
+            "accessPath": "business-id"
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 1.0663999999997031,
+            "p95Ms": 1.617800000000443,
+            "p99Ms": 2.721799999999803,
+            "maxMs": 2.721799999999803,
+            "authorizedCandidates": 100,
+            "pages": 1,
+            "accessPath": "scope"
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 130.23619999999983,
+            "p95Ms": 142.16179999999986,
+            "p99Ms": 147.32859999999982,
+            "maxMs": 147.32859999999982,
+            "authorizedCandidates": 10000,
+            "pages": 43,
+            "accessPath": "business-id"
+          }
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 163.59990000000016,
+            "p95Ms": 163.59990000000016,
+            "p99Ms": 163.59990000000016,
+            "maxMs": 163.59990000000016,
+            "authorizedCandidates": 10000,
+            "pages": 45,
+            "accessPath": "business-id"
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 1.2331999999996697,
+            "p95Ms": 2.050899999999274,
+            "p99Ms": 3.952299999999923,
+            "maxMs": 3.952299999999923,
+            "authorizedCandidates": 100,
+            "pages": 1,
+            "accessPath": "scope"
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 161.77170000000024,
+            "p95Ms": 180.60269999999946,
+            "p99Ms": 188.1851999999999,
+            "maxMs": 188.1851999999999,
+            "authorizedCandidates": 10000,
+            "pages": 45,
+            "accessPath": "business-id"
+          }
+        }
+      ],
+      "backgroundIndexing": {
+        "additionalVectors": 1024,
+        "elapsedMs": 112.69939999999951,
+        "vectorsPerSecond": 9086.11758358966,
+        "query": {
+          "samples": 30,
+          "p50Ms": 1.3526999999994587,
+          "p95Ms": 19.219900000000052,
+          "p99Ms": 21.450699999999415,
+          "maxMs": 21.450699999999415,
+          "authorizedCandidates": 111,
+          "pages": 1,
+          "accessPath": "scope"
+        }
+      },
+      "cache": {
+        "bytes": 196470,
+        "budgetBytes": 8388608,
+        "entries": 111,
+        "hits": 8408,
+        "misses": 620884
+      },
+      "sqliteVersion": "3.53.1",
+      "storageWorkerMemory": {
+        "rss": 214286336,
+        "heapTotal": 144388096,
+        "heapUsed": 31194648,
+        "external": 36294959,
+        "arrayBuffers": 32703643
+      }
+    },
+    {
+      "recordsPerSpace": 100000,
+      "totalInitialVectors": 200000,
+      "emptyOpenMs": 39.43069999999898,
+      "workerReopenMs": 28.380400000001828,
+      "diskBytes": 692842496,
+      "ingestion": [
+        {
+          "spaceId": "synthetic-text-384",
+          "dims": 384,
+          "records": 100000,
+          "elapsedMs": 10247.838099999999,
+          "vectorsPerSecond": 9758.15572262017
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "dims": 512,
+          "records": 100000,
+          "elapsedMs": 12112.946800000002,
+          "vectorsPerSecond": 8255.629422891545
+        }
+      ],
+      "query": [
+        {
+          "spaceId": "synthetic-text-384",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 1362.469600000004,
+            "p95Ms": 1362.469600000004,
+            "p99Ms": 1362.469600000004,
+            "maxMs": 1362.469600000004,
+            "authorizedCandidates": 100000,
+            "pages": 428,
+            "accessPath": "business-id"
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 25.159999999996217,
+            "p95Ms": 29.243999999998778,
+            "p99Ms": 32.48109999999724,
+            "maxMs": 32.48109999999724,
+            "authorizedCandidates": 1000,
+            "pages": 5,
+            "accessPath": "scope"
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 1268.815300000002,
+            "p95Ms": 1327.572699999997,
+            "p99Ms": 1351.6533000000054,
+            "maxMs": 1351.6533000000054,
+            "authorizedCandidates": 100000,
+            "pages": 428,
+            "accessPath": "business-id"
+          }
+        },
+        {
+          "spaceId": "synthetic-image-512",
+          "firstAfterReopen": {
+            "samples": 1,
+            "p50Ms": 1562.5350000000035,
+            "p95Ms": 1562.5350000000035,
+            "p99Ms": 1562.5350000000035,
+            "maxMs": 1562.5350000000035,
+            "authorizedCandidates": 100000,
+            "pages": 441,
+            "accessPath": "business-id"
+          },
+          "scopedOnePercent": {
+            "samples": 30,
+            "p50Ms": 27.31840000000375,
+            "p95Ms": 29.369800000000396,
+            "p99Ms": 31.066400000010617,
+            "maxMs": 31.066400000010617,
+            "authorizedCandidates": 1000,
+            "pages": 5,
+            "accessPath": "scope"
+          },
+          "allAuthorized": {
+            "samples": 30,
+            "p50Ms": 1556.0234000000055,
+            "p95Ms": 1625.3473999999987,
+            "p99Ms": 1777.9021999999968,
+            "maxMs": 1777.9021999999968,
+            "authorizedCandidates": 100000,
+            "pages": 441,
+            "accessPath": "business-id"
+          }
+        }
+      ],
+      "backgroundIndexing": {
+        "additionalVectors": 1024,
+        "elapsedMs": 269.0926000000036,
+        "vectorsPerSecond": 3805.3814932108367,
+        "query": {
+          "samples": 30,
+          "p50Ms": 25.406100000007427,
+          "p95Ms": 40.782600000005914,
+          "p99Ms": 42.852899999998044,
+          "maxMs": 42.852899999998044,
+          "authorizedCandidates": 1011,
+          "pages": 5,
+          "accessPath": "scope"
+        }
+      },
+      "cache": {
+        "bytes": 1789470,
+        "budgetBytes": 8388608,
+        "entries": 1011,
+        "hits": 80370,
+        "misses": 6209922
+      },
+      "sqliteVersion": "3.53.1",
+      "storageWorkerMemory": {
+        "rss": 271478784,
+        "heapTotal": 144678912,
+        "heapUsed": 30891928,
+        "external": 30183215,
+        "arrayBuffers": 26591899
+      }
+    }
+  ]
+}

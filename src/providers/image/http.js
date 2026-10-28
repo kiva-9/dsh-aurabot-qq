@@ -2,11 +2,12 @@
 // 安全约定：只做占位符替换和 JSON 路径取值，不支持任何 JS 模板 / eval —— 配置是可以被导入分享的，不能变成执行代码的入口。
 // 占位符的转义沿用语音那边的 fill / pick，免得两套映射行为不一致。
 
-import { ProviderError, MODES, request, classifyHttp, outputFrom, imageMime } from './common.js'
+import { ProviderError, MODES, request, classifyHttp, outputFrom, imageMime, imageInfo } from './common.js'
 import { fill, pick } from '../../voice/tts.js'
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 const BODY_TYPES = ['json', 'form', 'multipart', 'none']
+const STATUS_BODY_TYPES = ['json', 'none']
 const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/gif': 'gif' }
 // 普通占位符：按所在位置转义（url / json / 原样）
 const VAR_KEYS = ['prompt', 'negativePrompt', 'size', 'width', 'height', 'n', 'mode', 'apiKey', 'taskId', 'maskBase64']
@@ -14,12 +15,13 @@ const VAR_KEYS = ['prompt', 'negativePrompt', 'size', 'width', 'height', 'n', 'm
 /**
  * 模板替换：一遍扫完所有占位符。
  * 不分两遍做是因为：先替换的值（比如用户的提示词里写了 "{apiKey}"）不能在第二遍里又被展开，否则提示词就能把密钥套进请求体。
- * {imagesJson} 本身就是 JSON 片段，只在 json 体里原样插入；其余值的转义直接借 fill 的实现，保证和语音映射一致。
+ * {imagesJson} / {imagesDataUrls} 本身就是 JSON 数组片段，只在 json 体里不带引号插入。
+ * 前者保留 role/mime/base64 对象，后者是 data URL 字符串数组；其余值的转义沿用 fill。
  */
 export function fillTemplate(template, vars, enc = 'raw') {
-  const re = new RegExp(`\\{(${[...VAR_KEYS, 'imagesJson'].join('|')})\\}`, 'g')
+  const re = new RegExp(`\\{(${[...VAR_KEYS, 'imagesJson', 'imagesDataUrls'].join('|')})\\}`, 'g')
   return String(template ?? '').replace(re, (_, k) => {
-    if (k === 'imagesJson') return enc === 'json' ? vars.imagesJson || '[]' : ''
+    if (k === 'imagesJson' || k === 'imagesDataUrls') return enc === 'json' ? vars[k] || '[]' : ''
     return fill('{apiKey}', { apiKey: vars[k] }, enc)
   })
 }
@@ -51,7 +53,7 @@ export function validateHttpProfile(profile = {}) {
   const needsImages = modes.some((m) => m !== 'text')
   if (needsImages) {
     // 声明了要收图，就得有地方放图，不然图会被悄悄丢掉
-    if (bodyType === 'json' && !String(s.body || '').includes('{imagesJson}')) problems.push('声明了要收输入图，但 JSON 请求体里没有 {imagesJson}')
+    if (bodyType === 'json' && !/\{(?:imagesJson|imagesDataUrls)\}/.test(String(s.body || ''))) problems.push('声明了要收输入图，但 JSON 请求体里没有 {imagesJson} 或 {imagesDataUrls}')
     if (bodyType === 'form' || bodyType === 'none') problems.push('声明了要收输入图，请求体类型要选 json 或 multipart')
   }
   if (modes.includes('mask') && bodyType === 'json' && !String(s.body || '').includes('{maskBase64}')) problems.push('声明了蒙版编辑，但 JSON 请求体里没有 {maskBase64}')
@@ -66,8 +68,19 @@ export function validateHttpProfile(profile = {}) {
     else {
       if (!st.url) problems.push('没填查状态地址')
       else if (!isUrl(st.url)) problems.push('查状态地址要以 http:// 或 https:// 开头')
-      else if (!String(st.url).includes('{taskId}')) problems.push('查状态地址里没有 {taskId}')
       if (!METHODS.includes(methodOf(st.method, 'GET'))) problems.push(`查状态方法不对：${st.method}`)
+      // 旧配置默认不带 body；POST JSON 可把任务号放在 body，不要求再写到 URL。
+      const statusBodyType = st.bodyType || 'none'
+      if (!STATUS_BODY_TYPES.includes(statusBodyType)) problems.push('查状态请求体类型不对（只能是 json / none）')
+      if (methodOf(st.method, 'GET') === 'GET' && statusBodyType !== 'none') problems.push('查状态 GET 请求不能带请求体，请求体类型要选 none')
+      if (statusBodyType === 'none' && st.body != null && st.body !== '') problems.push('查状态填了请求体，请把 bodyType 设为 json')
+      if (statusBodyType === 'json') {
+        try {
+          if (typeof st.body !== 'string') throw new Error('not a template')
+          JSON.parse(fillTemplate(st.body, { taskId: 'validation', apiKey: 'validation' }, 'json'))
+        } catch (error) { problems.push('查状态的请求体要写成有效 JSON 模板（body）') }
+      }
+      if (!String(st.url || '').includes('{taskId}') && !(statusBodyType === 'json' && String(st.body || '').includes('{taskId}'))) problems.push('查状态地址或 JSON 请求体里没有 {taskId}')
       if (!st.statePath) problems.push('没填状态字段的路径（statePath）')
       if (!Array.isArray(st.doneValues) || !st.doneValues.length) problems.push('没填表示「完成」的状态值（doneValues）')
       if (!st.imagesPath && !res.imagesPath) problems.push('没填完成后图片的路径（imagesPath）')
@@ -101,6 +114,7 @@ function toItems(v) {
 
 /**
  * profile: { apiKey, extra: { headers, modes, maxInputs, submit, response, status?, cancel? } }（字段见 validateHttpProfile）
+ * status.bodyType 默认为 none；POST JSON 用 bodyType: 'json', body: '{"id":"{taskId}"}'。
  */
 export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
   const x = profile?.extra || {}
@@ -108,6 +122,11 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
   const res = x.response || {}
   const st = x.status || null
   const async = Boolean(res.taskIdPath)
+
+  function assertProfile() {
+    const problems = validateHttpProfile(profile)
+    if (problems.length) throw new ProviderError('invalid', `生图服务的 HTTP 映射没配好：${problems.join('；')}`)
+  }
 
   function capabilities() {
     const modes = Array.isArray(x.modes) && x.modes.length ? x.modes.filter((m) => MODES.includes(m)) : ['text']
@@ -146,11 +165,16 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
   }
 
   async function submit(req, { signal } = {}) {
-    const problems = validateHttpProfile(profile)
-    if (problems.length) throw new ProviderError('invalid', `生图服务的 HTTP 映射没配好：${problems.join('；')}`)
+    assertProfile()
     const inputs = orderedInputs(req)
     const vars = varsFor(req, {
       imagesJson: JSON.stringify(inputs.map((im) => ({ role: im.role, mime: im.mime, base64: Buffer.from(im.buf).toString('base64') }))),
+      // 只为使用此占位符的 JSON 模板生成；MIME 来自实际字节，不能伪装成 data:text/html 等。
+      ...(String(s.body || '').includes('{imagesDataUrls}') ? { imagesDataUrls: JSON.stringify(inputs.map((im) => {
+        const buf = Buffer.from(im.buf), { mime } = imageInfo(buf)
+        if (im.mime && im.mime !== mime) throw new ProviderError('invalid', '输入图的 MIME 与图片字节不符')
+        return `data:${mime};base64,${buf.toString('base64')}`
+      })) } : {}),
       maskBase64: req.mask ? Buffer.from(req.mask.buf).toString('base64') : '',
     })
     const url = fillTemplate(s.url, vars, 'url')
@@ -197,8 +221,16 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
   }
 
   async function poll(providerTaskId, { signal } = {}) {
+    // 恢复任务可直接 poll，不能依赖此前 submit 做过校验。
+    assertProfile()
     const vars = varsFor({}, { taskId: providerTaskId })
-    const r = await request(fetchImpl, fillTemplate(st.url, vars, 'url'), { method: methodOf(st.method, 'GET'), headers: headersFor(vars) }, { signal, timeoutMs: 60000 })
+    const headers = headersFor(vars)
+    let body
+    if (st.bodyType === 'json') {
+      body = fillTemplate(st.body, vars, 'json')
+      if (!Object.keys(headers).some(k => k.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json'
+    }
+    const r = await request(fetchImpl, fillTemplate(st.url, vars, 'url'), { method: methodOf(st.method, 'GET'), headers, ...(body !== undefined ? { body } : {}) }, { signal, timeoutMs: 60000 })
     if (!r.ok) throw classifyHttp(r.status, r.json || r.text)
     if (!r.json) throw new ProviderError('unknown', '查状态没返回 JSON：' + r.text.slice(0, 160), { maybeCharged: true })
     // 状态值统一按字符串比较，免得 2 和 "2"、true 和 "true" 对不上

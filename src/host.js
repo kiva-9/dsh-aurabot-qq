@@ -21,7 +21,7 @@ import { createSnowLumaManager, DOWNLOAD_PAGE } from './snowluma/manager.js'
 import { createHub, WORKSPACE_DIR } from './chat/hub.js'
 import { createLocal, fileOf, toImageBuffer } from './local/local.js'
 import { createGroupRoles } from './chat/group-roles.js'
-import { defaultModel, askModel, modelReasoning, modelVision, clearReasoningCache, clearVisionCache } from './core/llm.js'
+import { defaultModel, askModel, observeModelUsage, modelReasoning, modelVision, clearReasoningCache, clearVisionCache } from './core/llm.js'
 import { mimeOf } from './chat/inbound.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { createUpdateChecker, changelogSection } from './core/update.js'
@@ -37,6 +37,8 @@ import { BUILTINS } from './modules/index.js'
 import { createStorage } from './storage/index.js'
 import { preflight, backupLegacy } from './migrate/legacy.js'
 import { probeHost } from './runtime/host-contract.js'
+import { createDiagnostics } from './diagnostics/index.js'
+import { createUsageLedger } from './diagnostics/usage.js'
 
 export const name = 'aurabot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
@@ -55,10 +57,16 @@ export function apply(ctx) {
   let mods = null
   let bridge = null
   const getConfig = () => cfg
-  const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); for (const p of cfg.imageGen.profiles || []) registerSecret(p.apiKey); registerSecret(cfg.voice.openai.apiKey); registerSecret(cfg.voice.httpApi.apiKey); registerSecret(cfg.bridge.token) }
+  const secrets = () => {
+    const visit = (value, headers = false) => { if (!value || typeof value !== 'object') return; for (const [key, v] of Object.entries(value)) { if ((headers || /key|token|password|secret|authorization|cookie|sessdata|biliJct/i.test(key)) && typeof v === 'string') registerSecret(v); else if (v && typeof v === 'object') visit(v, key.toLowerCase() === 'headers') } }
+    visit(cfg)
+  }
   const setConfig = (next) => {
     const before = cfg
+    const policyKeys=['ownerQQ','ownerLevel','allow','profilePerms']
+    next={...next,policyRevision:policyKeys.some(k=>JSON.stringify(before[k])!==JSON.stringify(next[k]))?(before.policyRevision||0)+1:before.policyRevision||0}
     cfg = saveConfig(next)
+    if(hub&&before.botQQ!==cfg.botQQ)hub.accountChanged()
     secrets()
     if (bridge && before.bridge.dshTools !== cfg.bridge.dshTools) bridge.refresh()
     if (mods && (JSON.stringify(before.modules) !== JSON.stringify(cfg.modules) || before.safeMode !== cfg.safeMode)) mods.sync().catch(() => {})
@@ -68,7 +76,7 @@ export function apply(ctx) {
   secrets()
 
   // ---------- 主库 ----------
-  // 打不开（比如库比插件新）时不崩：聊天照旧走老路径，面板「概览」显示原因
+  // 持久化不可用时只保留诊断入口，禁止无账本接收、收费或发送。
   let storage = null
   let storageError = ''
   try {
@@ -82,10 +90,16 @@ export function apply(ctx) {
       if (backup) log.info(`旧数据已备份到 ${backup.dir}（跳过：${backup.skipped.join('、') || '无'}）`)
     }
   } catch (error) {
-    // 退回内存库：这次运行照常收发，只是重启后不留记录；面板「概览」显示原因
     storageError = error.message
-    log.error('主库打不开，这次先用内存库（重启后不保留记录）：', error.message)
-    storage = createStorage({ file: ':memory:', filesDir: dataDir('assets'), log: logger.child('storage') })
+    storage?.close()
+    const message = '主库或升级备份不可用，已暂停聊天和后台任务：' + storageError
+    log.error(message)
+    ctx.effect(() => ctx.webServer.register({ path: PREFIX, kind: 'prefix', handler: async (_req, res) => {
+      res.statusCode = 503
+      res.setHeader?.('content-type', 'application/json; charset=utf-8')
+      res.end?.(JSON.stringify({ ok: false, message, storage: { persistent: false, error: storageError } }))
+    } }))
+    return { getConfig, logger, ready: Promise.resolve({ ok: false, message }) }
   }
 
   // ---------- 人设 ----------
@@ -131,7 +145,25 @@ export function apply(ctx) {
   let wrongAccount = ''
   let hub = null
   let outboxRecovered = false
+  let connectionRevision = 0, hostDisposed = false, modulesReady = false
+  const diagnostics = createDiagnostics({ storage, getConfig, modules: () => mods, hub: () => hub, version: VERSION })
+  const usage = createUsageLedger({storage,getAccount:()=>getConfig().botQQ})
+  const usageOff = observeModelUsage(ctx, event=>usage.record({service:'llm',...event}))
+  const ask = opts=>askModel(ctx,{cfg:getConfig(),...opts})
+  const loginBuffer = []
+  function dispatchEvent(ev) {
+    if (hostDisposed || !loginOk || !hub || !modulesReady) return
+    if (ev.self_id && String(ev.self_id) !== String(cfg.botQQ)) return
+    mods?.emit('onebot', ev)
+    if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+    else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') hub.onPoke(ev).catch((error) => log.error('处理戳一戳出错：', error.message))
+  }
+  function drainLoginBuffer() {
+    if (!loginOk || !hub || !modulesReady || hostDisposed) return
+    for (const ev of loginBuffer.splice(0)) dispatchEvent(ev)
+  }
   async function checkLogin() {
+    const revision = connectionRevision, expectedAccount = String(cfg.botQQ)
     let uin = ''
     try {
       const info = await onebot.call('get_login_info', {}, { timeoutMs: 10000 })
@@ -139,15 +171,18 @@ export function apply(ctx) {
     } catch (error) {
       logger.child('onebot').warn('核对登录的 QQ 号失败：', error.message)
     }
-    if (onebotState !== 'connected') return
+    if (hostDisposed || revision !== connectionRevision || expectedAccount !== String(cfg.botQQ) || onebotState !== 'connected') return
     if (!uin) {
       // 核对不了就别用，断开后由看门狗重试
       onebot.stop()
       return
     }
-    if (await snowluma.confirmLogin(uin)) {
+    const confirmed = await snowluma.confirmLogin(uin)
+    if (hostDisposed || revision !== connectionRevision || expectedAccount !== String(cfg.botQQ) || onebotState !== 'connected') return
+    if (confirmed) {
       loginOk = true
       wrongAccount = ''
+      drainLoginBuffer()
       if (!outboxRecovered && hub) {
         // 第一次核对通过：上次没发完的接着发（太旧的作废，可能已送达的不重发）
         outboxRecovered = true
@@ -162,22 +197,22 @@ export function apply(ctx) {
     endpoint,
     log: logger.child('onebot'),
     onState: (s, d) => {
+      connectionRevision++
       onebotState = s
-      if (s !== 'connected') loginOk = false
+      if (s !== 'connected') { loginOk = false; loginBuffer.length = 0 }
       else checkLogin().catch((error) => log.warn('核对登录号出错：', error.message))
       logger.child('onebot').info(`QQ 网关：${s}${d ? '（' + d + '）' : ''}`)
       mods?.emit('onebot/state', s)
     },
     onEvent: (ev) => {
-      // 还没核对是机器人号：什么都不处理
-      if (!loginOk) return
-      // 模块能看到所有原始事件（加群、撤回、好友申请……），只看不拦
-      mods?.emit('onebot', ev)
-      if (ev.post_type === 'message' || ev.post_type === 'message_sent') {
-        if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
-      } else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') {
-        hub.onPoke(ev).catch((error) => log.error('处理戳一戳出错：', error.message))
+      if (hostDisposed || (ev.self_id && String(ev.self_id) !== String(cfg.botQQ))) return
+      if (!loginOk || !modulesReady || !hub) {
+        if (onebotState !== 'connected') return
+        if (loginBuffer.length >= 200) { log.warn('登录核验期间事件缓冲已满，请检查网关；超出事件未接收'); return }
+        loginBuffer.push(ev)
+        return
       }
+      dispatchEvent(ev)
     },
   })
   const groupRoles = createGroupRoles({ onebot, getConfig, log: logger.child('chat') })
@@ -211,12 +246,12 @@ export function apply(ctx) {
   // 聊天中枢找表情库、语音时，找的是当时在跑的那个模块；模块关着就当没有
   const use = (id) => mods?.use(id) || null
   const stickers = {
-    match: (q) => use('stickers')?.match?.(q) ?? null,
-    segmentFor: (it) => use('stickers')?.segmentFor?.(it) ?? null,
-    markUsed: (md5) => use('stickers')?.markUsed?.(md5),
-    pickForReply: (t) => use('stickers')?.pickForReply?.(t) ?? null,
+    match: (q, scope) => use('stickers')?.match?.(q, scope) ?? null,
+    segmentFor: (it, scope) => use('stickers')?.segmentFor?.(it, scope) ?? null,
+    markUsed: (id, scope) => use('stickers')?.markUsed?.(id, scope),
+    pickForReply: (t, scope) => use('stickers')?.pickForReply?.(t, scope) ?? null,
     collect: async (s, chatId) => (use('stickers')?.collect ? use('stickers').collect(s, chatId) : { ok: false, reason: '表情包模块关着' }),
-    library: () => use('stickers')?.library?.() ?? { items: [] },
+    library: () => use('stickers')?.library?.({ admin: true, accountId: String(cfg.botQQ), status: 'all' }) ?? { items: [] },
   }
   const tts = {
     speak: async (text, profile) => {
@@ -233,18 +268,23 @@ export function apply(ctx) {
     log: logger.child('chat'),
     onebot,
     storage,
+    canSend: () => loginOk && onebotState === 'connected',
     personaOf: (chat) => personas.snapshotFor(chat.chatId),
-    replyer: async (text, { persona }) => {
+    replyer: async (text, { persona, signal, shouldContinue, chatId, requestId }) => {
       if (!cfg.roles.replyer.model) return { text, rewritten: false, reason: '没开' }
-      return rewriteReply(text, { persona, ask: (o) => askModel(ctx, { cfg: getConfig(), ...o }) })
+      return rewriteReply(text, { persona, signal, shouldContinue, ask: (o) => ask({ ...o, chatId, requestId }) })
     },
     stickers,
     tts,
     buildTools: (where) => mods.buildTools(where),
     contextProviders: [(args) => mods.contextFor(args)],
+    prepareContext: (args) => mods.prepareContext(args),
+    getPlanner: () => use('tasks')?.planner || null,
+    onDiagnostic: (event) => diagnostics.record(event),
+    onUsage: (event) => usage.record(event),
     onActivity: (a) => mods.emit('activity', a),
     // 群聊话题和她的记忆有多相关（插话判断用）
-    memoryScore: (text) => use('memory')?.topicScore?.(text) ?? 0,
+    memoryScore: (text, scope) => use('memory')?.topicScore?.(text, { scope }) ?? 0,
     // QQ 里的主人命令（模块加的命令优先）
     onCommand: async (msg) => {
       const cmd = parseCommand(msg.text, mods.commands())
@@ -253,7 +293,7 @@ export function apply(ctx) {
       return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), song: use('song'), listModels, defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
     },
     isMuted: (chatId) => mutes.muted(chatId),
-    moodEffects: () => use('mood')?.effects?.() ?? null,
+    moodEffects: (chatId, options) => chatId ? use('mood')?.effects?.(hub.scopeFor(chatId), options) ?? null : null,
     availableModels: () => modelCache,
     hooks: {
       message: (msg) => mods.claim('message', msg),
@@ -278,9 +318,13 @@ export function apply(ctx) {
     } catch (error) {}
   }
   const readBody = async (req) => {
-    let s = ''
-    try { for await (const c of req) s += c } catch (error) {}
-    try { return JSON.parse(s || '{}') } catch (error) { return {} }
+    let s = ''; let bytes = 0
+    for await (const c of req) {
+      bytes += Buffer.byteLength(c)
+      if (bytes > 43 * 1024 * 1024) throw new Error('请求内容超过 43 MB')
+      s += c
+    }
+    try { return JSON.parse(s || '{}') } catch (error) { throw new Error('请求不是合法 JSON，未保存任何改动') }
   }
   /** 原样读请求体（上传大文件用），超过 max 字节就报错。 */
   const readRaw = async (req, max) => {
@@ -322,19 +366,22 @@ export function apply(ctx) {
   const core = {
     hub, onebot, snowluma, local, groupRoles, mutes, logger, bridge: null, storage,
     root: ROOT,
-    ask: (opts) => askModel(ctx, { cfg: getConfig(), ...opts }),
+    ask, usage,
     listModels,
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
     personas: { list: () => personas.compat.list(), read: (id) => personas.compat.read(id), current: () => personas.textOf(personas.snapshotFor('private:0')), service: personas },
     getConfig, setConfig,
+    getJobRunner: kind => (kind === 'image' ? use('imagegen') : use(kind))?.runner,
+    wakePlanner: (event,execution) => hub.acceptPlannerWake(event,execution),
+    plannerControl: event => hub.plannerControl(event),
   }
   mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
   bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
   core.bridge = bridge
   core.modules = mods
   const booted = mods.boot()
-  booted.then(() => bridge.refresh())
+  booted.then(() => { if (hostDisposed) return; modulesReady = true; drainLoginBuffer(); hub.recoverPlannerWakes(); bridge.refresh() })
 
   // ---------- 盯会话：一轮结束就发回 QQ ----------
   ctx.effect(() => {
@@ -372,15 +419,34 @@ export function apply(ctx) {
   }
   const safe = (fn, label) => () => { Promise.resolve().then(fn).catch((error) => log.warn(`${label}出错：`, error.message)) }
   ctx.effect(() => ctx.interval(safe(watchdog, '看门狗'), 30_000), 'aurabot: 看门狗')
-  setTimeout(safe(watchdog, '看门狗'), 3000).unref?.()
+  const initialWatchdog = setTimeout(safe(watchdog, '看门狗'), 3000)
+  initialWatchdog.unref?.()
   ctx.effect(() => () => {
-    mods.dispose()
+    hostDisposed = true
+    connectionRevision++
+    loginBuffer.length = 0
+    diagnostics.dispose()
+    clearTimeout(initialWatchdog)
+    const stoppedModules = mods.dispose()
+    const stoppedHub = hub.dispose()
     onebot.stop()
     snowluma.dispose()
-    storage?.close()
+    return Promise.allSettled([stoppedModules, stoppedHub]).finally(() => {usageOff();storage?.close()})
   }, 'aurabot: 收尾')
 
   // ---------- 面板接口 ----------
+  route('/diagnostics/summary', () => ({ ok: true, ...diagnostics.summary() }))
+  route('/diagnostics/requests', (req) => ({ ok: true, list: diagnostics.requests(query(req)) }))
+  route('/diagnostics/timeline', (req) => ({ ok: true, ...diagnostics.timeline(query(req).id) }))
+  route('/diagnostics/decisions', (req) => ({ ok: true, list: diagnostics.decisions(query(req)) }))
+  route('/diagnostics/export', () => ({ ok: true, report: {...diagnostics.export(),usage:usage.report()} }))
+  route('/diagnostics/usage', req => ({ok:true,...usage.report(query(req))}))
+  route('/diagnostics/replay', req => ({ok:true,...diagnostics.replay(query(req))}))
+  route('/diagnostics/latencies', req => {
+    const q=query(req)
+    for(const key of ['from','to'])if(q[key]!==undefined)q[key]=Number(q[key])
+    return {ok:true,...diagnostics.latencies(q)}
+  })
   let consentCache = { at: 0, value: null }
   async function consented(running) {
     if (!running) return null
@@ -443,8 +509,8 @@ export function apply(ctx) {
     // 换了模型：思考强度和「能不能看图」的探测结果都得重来，不然要等 10 分钟缓存过期
     const changedModel = before.model.provider !== cfg.model.provider || before.model.model !== cfg.model.model
     if (changedModel) { clearReasoningCache(); clearVisionCache() }
-    if (changedConn || before.botQQ !== cfg.botQQ) wrongAccount = ''
-    if (changedConn && onebot.state !== 'stopped') onebot.restart()
+    if (changedConn || before.botQQ !== cfg.botQQ) { wrongAccount = ''; loginOk = false }
+    if ((changedConn || before.botQQ !== cfg.botQQ) && onebot.state !== 'stopped') onebot.restart()
     if (!before.enabled && cfg.enabled) setTimeout(safe(watchdog, '看门狗'), 100)
     if (before.enabled && !cfg.enabled) onebot.stop()
     log.info(`设置已保存｜总开关 ${cfg.enabled ? '开' : '关'}｜试运行 ${cfg.dryRun ? '开' : '关'}`)
@@ -571,6 +637,7 @@ export function apply(ctx) {
     if (!personas.compat.read(b.id)) return { ok: false, message: '没有这个人格' }
     personas.compat.use(b.id)
     syncCurrent()
+    hub.refreshPersonas()
     log.info(`切换人格 → ${b.id}`)
     return { ok: true, current: b.id, message: '切换好了，下一轮回复起生效' }
   })
@@ -595,6 +662,7 @@ export function apply(ctx) {
     const b = await readBody(req)
     const out = ps.bind(b.scope, b.personaId)
     syncCurrent()
+    hub.refreshPersonas()
     return { ok: true, bindings: out, message: '绑定好了，下一轮起生效（换了身份的聊天会开新会话）' }
   })
   route('/persona/resolve', async (req) => ({ ok: true, ...personas.snapshotFor(query(req).chatId) }))

@@ -172,15 +172,17 @@ export function createFakeDsh({ brain }) {
     if (!r) throw new Error('no route ' + path)
     let out = ''
     let status = 200
+    const responseHeaders = {}
     const req = {
+      method: body === undefined ? 'GET' : 'POST',
       url: '/aurabot/api' + path,
       headers,
       async *[Symbol.asyncIterator]() { if (body) yield JSON.stringify(body) },
     }
-    const res = { set statusCode(v) { status = v }, setHeader() {}, end(s) { out = s } }
+    const res = { set statusCode(v) { status = v }, setHeader(k, v) { responseHeaders[k.toLowerCase()] = v }, end(s) { out = s } }
     await r.handler(req, res)
-    return { status, raw: () => out, json: () => JSON.parse(out) }
+    return { status, headers: responseHeaders, raw: () => out, json: () => JSON.parse(out) }
   }
 
-  return { ctx, routes, variables, agents, workspaces, turns, logs, call, dispose: () => disposers.reverse().forEach((d) => { try { d() } catch (e) {} }) }
+  return { ctx, routes, variables, agents, workspaces, turns, logs, call, dispose: () => Promise.allSettled(disposers.splice(0).reverse().map((d) => { try { return d() } catch (e) { return Promise.reject(e) } })) }
 }

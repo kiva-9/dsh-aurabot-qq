@@ -17,12 +17,14 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024
  */
 export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, onSettled, log }) {
   const pending = new Map() // messageId → Set(occurrenceId)
+  let disposed = false
 
   /**
    * 登记一条消息里的媒体并开始后台处理。msg 是 parseMessageEvent 的结果，messageId 是主库里的消息 ID。
    * wantTranscript=false 时语音不转写（设置里关了识别）。
    */
   function register({ messageId, msg, account, wantTranscript = true }) {
+    if (disposed) return []
     const ids = []
     const left = new Set()
     for (const m of msg.media || []) {
@@ -38,11 +40,11 @@ export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, o
     pending.set(messageId, left)
     for (const it of ids) {
       process(it, msg, wantTranscript)
-        .catch((error) => storage.occurrences.failed(it.id, error.message))
+        .catch((error) => { if (!disposed) storage.occurrences.failed(it.id, error.message) })
         .finally(() => {
           left.delete(it.id)
           if (!left.size) pending.delete(messageId)
-          try { onSettled?.(msg.chatId) } catch (error) {}
+          try { if (!disposed) onSettled?.(msg.chatId) } catch (error) {}
         })
     }
     return ids.map((x) => x.id)
@@ -52,11 +54,13 @@ export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, o
     if (it.kind === 'record') {
       if (!wantTranscript) return storage.occurrences.failed(it.id, '没开语音识别', 'unavailable')
       const text = String((await transcribe(it.seg, msg)) || '').trim()
+      if (disposed) return
       if (!text) return storage.occurrences.failed(it.id, '没听清')
       storage.occurrences.ready(it.id, null, { transcript: text })
       return
     }
     const buf = await fetchBytes(it.seg, { maxBytes: MAX_IMAGE_BYTES })
+    if (disposed) return
     const mime = mimeOf(buf)
     if (!mime.startsWith('image/')) return storage.occurrences.failed(it.id, `不是图片（${mime}）`)
     const asset = storage.assets.put(buf, { mime, sourceKind: 'inbound' })
@@ -96,5 +100,5 @@ export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, o
     return { images, failedImages, pending: pendingCount, transcripts, unheard }
   }
 
-  return { register, isReady, resultsOf }
+  return { register, isReady, resultsOf, dispose: () => { disposed = true; pending.clear() } }
 }

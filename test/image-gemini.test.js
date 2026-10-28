@@ -5,8 +5,7 @@ import { createServer } from 'node:http'
 import { createGeminiImages, aspectRatioFor } from '../src/providers/image/gemini.js'
 import { checkRequest, mergeCapabilities } from '../src/providers/image/common.js'
 
-const PNG = Buffer.concat([Buffer.from([0x89]), Buffer.from('PNG\r\n\x1a\n'), Buffer.alloc(32, 7)])
-const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(32, 1)])
+import { PNG, JPG } from './helpers/images.js'
 const imagePart = (buf = PNG) => ({ inlineData: { mimeType: 'image/png', data: buf.toString('base64') } })
 
 // 本地假服务：记下收到的请求，按 next 回复

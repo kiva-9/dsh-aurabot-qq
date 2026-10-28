@@ -1,27 +1,32 @@
-// 内置模块：心情。聊天让她开心或低落，心情影响她发表情、发语音的频率和回复快慢，也会写进她的上下文。
-// 导出 createMood 的返回值：nudge(变化, 原因)、label()、state()、effects()、contextLine()、observe()、judge()。
-
-import { createMood } from '../../features/companion.js'
+// WP6 范围心情；不再加载全局 mood.json。
+import { createMood } from '../../features/mood.js'
+import { hookScope, identityFor, registerRoute } from '../../learning/module-api.js'
 
 export default {
   id: 'mood',
   name: '心情',
-  version: '1.0.0',
-  description: '她的心情：会随聊天起伏，影响表情 / 语音频率和回复快慢',
+  version: '2.0.0',
+  description: '按账号、聊天和人设隔离的短期心情；明确请求与承诺不受情绪阻断',
   tab: 'mood',
-  files: ['features/companion.js'],
+  files: ['features/mood.js', 'learning/contracts.js', 'learning/runtime.js', 'learning/evidence.js', 'learning/module-api.js'],
   setup(api) {
-    const mood = createMood({ getConfig: api.config, dsh: api.dsh })
-    api.context(({ chat }) => (chat.kind === 'system' ? '' : mood.contextLine()))
+    const mood = createMood({ storage: api.core.storage, getConfig: api.config, dsh: api.dsh, getIdentity: (scope) => identityFor(api, scope) })
+    api.context((args) => { try { return mood.contextLine(hookScope(api, args)) } catch { return '' } })
     api.on('activity', (a) => {
-      const cfg = api.config()
-      if (a.kind === 'in' && a.text) mood.observe(a.text, a.nickname, { direct: a.direct, owner: a.owner })
-      // 模型判心情（开了才判）：系统提醒开头的是她自己主动找人
-      if (a.kind === 'out' && a.reply && !String(a.chatId).startsWith('system:')) {
-        const speakUp = String(a.userText).startsWith('【系统提醒')
-        mood.judge({ userText: a.userText, reply: a.reply, who: String(a.chatId).startsWith('group:') ? '群里的人' : String(a.chatId) === `private:${cfg.ownerQQ}` ? cfg.ownerName || '主人' : '对方', origin: speakUp ? 'speak-up' : 'user' }).catch(() => {})
+      let scope
+      try { scope = hookScope(api, a) } catch { return }
+      const sourceIds = a.sourceMessageIds || (a.messageId ? [a.messageId] : a.msg?.sourceMessageId ? [a.msg.sourceMessageId] : [])
+      const ids = Array.isArray(sourceIds) ? sourceIds.filter((id) => typeof id === 'string').slice(0, 8) : []
+      if (a.kind === 'in') for (const messageId of ids.slice(0, 8)) mood.observe(scope, { messageId, direct: a.direct !== false, owner: a.owner === true })
+      if (a.kind === 'out' && a.confirmed === true && a.reply && ids.length) {
+        void mood.judge(scope, { sourceMessageIds: ids, reply: a.reply, epoch: a.epoch, personaRevision: a.personaRevision }).catch(() => {})
       }
     })
+    registerRoute(api, '/mood/state', 'GET', (_q, scope) => ({ ok: true, ...mood.state(scope) }))
+    registerRoute(api, '/mood/history', 'GET', (_q, scope) => ({ ok: true, scope, items: mood.state(scope).history }))
+    registerRoute(api, '/mood/nudge', 'POST', (b, scope) => mood.nudge(scope, b.delta, b.reason || '', { expectedRevision: b.expectedRevision, origin: 'manual' }))
+    registerRoute(api, '/mood/reset', 'POST', (b, scope) => mood.reset(scope, { expectedRevision: b.expectedRevision }))
+    api.onDispose?.(() => mood.stop())
     return mood
   },
 }

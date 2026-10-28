@@ -2,7 +2,7 @@
 
 export const DEFAULT_GROUP_POLICY = {
   wakeWords: ['大肥鱼', '肥鱼'],
-  interjectChance: 0.15, // 普通消息的基础插话概率（话题越相关越高，最高 80%）
+  interjectChance: 0.15, // 聚合批次的基础插话概率（话题越相关越高，最高 80%）
   cooldownSec: 90, // 两次插话至少间隔
   maxPerHour: 6, // 每群每小时插话上限
   quietHours: [1, 8], // [开始, 结束) 小时，静默时段不插话（必回不受影响）
@@ -11,7 +11,7 @@ export const DEFAULT_GROUP_POLICY = {
   // 话题相关度：群里正在聊的东西和她有关（碰到她感兴趣的话题、或者她记得相关的事），才可能插话
   interests: ['白米饭', '米饭', '吃饭', '好吃', '饿了', '游戏', '追剧', '番剧', '动漫', '猫', '狗', '鲸鱼', '鱼', '睡觉', '熬夜', '困', '天气', '下雨', '表情包', '女仆', '可爱', '奶茶', '甜品'],
   minRelevance: 0.25, // 相关度低于这个就不插话（0 = 不看话题，纯随机）
-  burstMax: 8, // 安全刹车：burstWindowSec 秒内她最多说这么多次，超了就歇着（主人 @ 除外），只防失控
+  burstMax: 8, // 自动参与的安全刹车；有效的 @ / 引用 / 唤醒词请求单独处理
   burstWindowSec: 120,
 }
 
@@ -63,21 +63,21 @@ export function decideGroupReply(p) {
   const text = String(p.text || '')
   const rand = p.rand || Math.random
   const said = p.botReplyTimes || []
-  // 刹车：短时间里说太多了就歇一会儿，只有主人 @ 能叫动
-  const burst = said.filter((t) => p.now - t < (pol.burstWindowSec ?? 120) * 1000).length
-  if (burst >= (pol.burstMax ?? 8) && !(p.fromOwner && (p.mentioned || p.repliedToBot))) {
-    return { reply: false, mode: 'none', reason: `刚说了太多（${burst} 次），歇一会儿` }
-  }
   if (p.mentioned) return { reply: true, mode: 'must', reason: '被 @' }
   if (p.repliedToBot) return { reply: true, mode: 'must', reason: '引用了她的消息' }
   const hit = (pol.wakeWords || []).find((w) => w && text.includes(w))
   if (hit) return { reply: true, mode: 'must', reason: `叫到了「${hit}」` }
+  // 自动参与的刹车；上面已经处理有效显式请求。
+  const burst = said.filter((t) => p.now - t < (pol.burstWindowSec ?? 120) * 1000).length
+  if (burst >= (pol.burstMax ?? 8)) {
+    return { reply: false, mode: 'none', reason: `刚说了太多（${burst} 次），歇一会儿` }
+  }
   const rel = typeof p.relevance === 'number' ? p.relevance : 1
 
   if (!(pol.interjectChance > 0)) return { reply: false, mode: 'none', reason: '插话关着' }
   if (inQuietHours(p.hour, pol.quietHours)) return { reply: false, mode: 'none', reason: '静默时段' }
   const minRel = Number(pol.minRelevance) || 0
-  // 已经加入了这个话题：接着聊（每段看完再回，不受冷却和每小时上限限制）
+  // 已加入话题时倾向接话；宿主仍用参与控制器统一检查自动回复容量。
   if (p.engagedUntil && p.now < p.engagedUntil && rel >= minRel) {
     return { reply: true, mode: 'engaged', reason: `正聊得起劲，接着说（相关度 ${rel.toFixed(2)}）` }
   }

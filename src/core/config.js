@@ -5,8 +5,16 @@ import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
 import { legacyTtsMapping, TTS_PROVIDERS } from '../voice/tts.js'
+import { SEARCH_DEFAULTS, searchConfig } from '../search/config.js'
+import { DEFAULT_LEARNING, settings as learningSettings } from '../learning/contracts.js'
+import { normalizeShareGroups } from '../domain/scope.js'
+import { DEFAULT_PARTICIPATION_CONFIG, normalizeParticipationConfig } from '../runtime/participation.js'
+import { DEFAULT_MEDIA_MEMORY, mediaMemorySettings } from '../runtime/media-analysis.js'
+import { RETRIEVAL_DEFAULTS, RETRIEVAL_SECRET_FIELDS, normalizeRetrievalConfig, runtimeRetrievalConfig } from '../memory/vector/integration/module-config.js'
 
 export const DEFAULTS = {
+  schemaVersion: 2,
+  policyRevision: 0,
   enabled: false, // 总开关：关着一句都不发
   dryRun: true, // 试运行：只记日志不真发
   setupDone: false, // 首次使用向导走完了没有
@@ -51,17 +59,19 @@ export const DEFAULTS = {
     size: '1024x1024',
     stylePrompt: '', // 每次生图自动加在前面的风格描述
     ownerOnly: true, // 只有主人能让她画
-    quota: { perUserPerDay: 20, ownerUnlimited: true }, // 每人每天最多画几张；主人不限
+    quota: { perUserPerDay: 20, perChatPerDay: 100, perProviderPerDay: 500, ownerUnlimited: true },
     waitInputSec: 30, // 参考图还没下载好时最多等多久
   },
   persona: { current: 'dafeiyu' },
   group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
+  participation: { ...DEFAULT_PARTICIPATION_CONFIG },
+  mediaMemory: { ...DEFAULT_MEDIA_MEMORY },
   voice: {
     enabled: true,
     // 语音合成走外部接口：none 没配 / openai 兼容 OpenAI 的 /audio/speech / http 自己配的固定映射（CosyVoice、GPT-SoVITS 用它的预设）
     provider: 'none',
     openai: { baseUrl: '', apiKey: '', model: 'tts-1', voice: 'alloy', format: 'mp3' },
-    httpApi: { method: 'POST', url: '', headers: {}, bodyType: 'json', body: '', response: 'audio', jsonPath: '', sampleRate: 24000, apiKey: '' },
+    httpApi: { method: 'POST', url: '', headers: {}, bodyType: 'json', body: '', response: 'audio', jsonPath: '', audioFormat: 'auto', sampleRate: 24000, apiKey: '' },
     defaultVoice: '', // 人设没指定音色时用这个
     speed: 1,
     autoChance: 0.15, // 短回复自动变语音的概率
@@ -109,8 +119,11 @@ export const DEFAULTS = {
     awakeFrom: 8,
     awakeTo: 23,
   },
-  mood: { enabled: true, halfLifeHours: 3, judge: false }, // judge：每轮聊完用模型判一次心情（更准，每轮多一次很短的调用）；关着用关键词
-  memory: { enabled: true, recallCount: 6, dailyConsolidate: true, consolidateTimes: ['04:00', '16:00'] }, // 每天这几个时间把临时记忆（聊天流水）整理进长期记忆、相处经验和说话方式；过了一天的流水整理完清空
+  mood: { enabled: true, baseline: 60, halfLifeHours: 3, judge: false, judgeIntervalMs: 60000 },
+  learning: { ...DEFAULT_LEARNING },
+  memory: { enabled: true, recallCount: 6, shareGroups: [], extraction: { minMessages: 20, intervalMs: 1800000, maxBatchMessages: 100, maxChars: 12000 } },
+  search: { ...SEARCH_DEFAULTS },
+  retrieval: { ...RETRIEVAL_DEFAULTS },
   song: {
     enabled: false,
     root: '', // 翻唱环境目录，留空 = 自动（老安装 C:\Aurabot\rvc，新安装在用户目录下）
@@ -163,6 +176,7 @@ const qqList = (v) => [...new Set((Array.isArray(v) ? v : String(v || '').split(
 const hhmm = (v, d) => (/^\d{1,2}:\d{2}$/.test(String(v)) ? String(v) : d)
 
 export function normalize(raw) {
+  if (Number(raw?.schemaVersion) > 2) throw new Error('配置版本高于当前插件，请先升级插件')
   const c = deepMerge(DEFAULTS, raw)
   c.enabled = bool(c.enabled, false)
   c.dryRun = bool(c.dryRun, true)
@@ -179,6 +193,9 @@ export function normalize(raw) {
   c.setupDone = bool(c.setupDone, false)
   c.ownerLevel = LEVELS.includes(c.ownerLevel) ? c.ownerLevel : 'full'
   c.longTasks = bool(c.longTasks, false)
+  c.retrieval = normalizeRetrievalConfig(c.retrieval)
+  c.participation = normalizeParticipationConfig(c.participation)
+  c.mediaMemory = mediaMemorySettings(c)
   c.toolCallsPerTurn = num(c.toolCallsPerTurn, 6, 1, 30)
   c.chatModels = normalizeChatModels(c.chatModels)
   c.profilePerms = Object.fromEntries(PROFILE_PERM_KEYS.map((k) => [k, PROFILE_PERM_LEVELS.includes(c.profilePerms?.[k]) ? c.profilePerms[k] : profilePermDefault(k)]))
@@ -205,6 +222,12 @@ export function normalize(raw) {
   c.speakUp.maxPerDay = num(c.speakUp.maxPerDay, 3, 0, 20)
   c.mood.halfLifeHours = num(c.mood.halfLifeHours, 3, 0.25, 72)
   c.mood.judge = bool(c.mood.judge, false)
+  c.mood.baseline = num(c.mood.baseline, 60, 30, 80)
+  c.mood.judgeIntervalMs = num(c.mood.judgeIntervalMs, 60000, 1000, 86400000)
+  c.learning = learningSettings(c)
+  c.schemaVersion = 2
+  c.policyRevision = Math.max(0, Math.floor(Number(c.policyRevision)||0))
+  c.memory.shareGroups = normalizeShareGroups(c.memory.shareGroups)
   for (const k of ['tts', 'image', 'song', 'asr']) c.local[k] = bool(c.local[k], false)
   const b = c.bili
   Object.assign(b, splitBiliCookie(b))
@@ -219,15 +242,18 @@ export function normalize(raw) {
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
   delete c.mood.maxInjectPerDay // 旧版的「每天最多提醒几次」，现在心情明显时每轮都会带上
   c.snowluma.webuiPort = num(c.snowluma.webuiPort, 5099, 1, 65535)
-  // 老配置只有一个 consolidateAt：换成两个时间点（它 + 12 小时后）
-  if (!Array.isArray(raw?.memory?.consolidateTimes) && raw?.memory?.consolidateAt) {
-    const [hh, mm] = hhmm(raw.memory.consolidateAt, '04:00').split(':').map(Number)
-    c.memory.consolidateTimes = [`${hh}:${String(mm).padStart(2, '0')}`, `${(hh + 12) % 24}:${String(mm).padStart(2, '0')}`]
-  }
+  // 增量提炼替代定时全量扫描；保留原始消息和失败检查点。
   delete c.memory.consolidateAt
-  c.memory.consolidateTimes = [...new Set((Array.isArray(c.memory.consolidateTimes) ? c.memory.consolidateTimes : String(c.memory.consolidateTimes || '').split(/[\s,，]+/)).map((t) => hhmm(t, '')).filter(Boolean).map((t) => t.padStart(5, '0')))].sort().slice(0, 4)
-  if (!c.memory.consolidateTimes.length) c.memory.consolidateTimes = ['04:00', '16:00']
+  delete c.memory.consolidateTimes
+  delete c.memory.dailyConsolidate
+  c.memory.enabled = bool(c.memory.enabled, true)
   c.memory.recallCount = num(c.memory.recallCount, 6, 0, 20)
+  c.memory.extraction.minMessages = num(c.memory.extraction.minMessages, 20, 1, 1000)
+  c.memory.extraction.intervalMs = num(c.memory.extraction.intervalMs, 1800000, 60000, 86400000)
+  c.memory.extraction.maxBatchMessages = num(c.memory.extraction.maxBatchMessages, 100, 1, 1000)
+  c.memory.extraction.maxChars = num(c.memory.extraction.maxChars, 12000, 1000, 50000)
+  if (!Array.isArray(c.memory.shareGroups)) c.memory.shareGroups = []
+  c.search = searchConfig(c.search)
   g.interests = (Array.isArray(g.interests) ? g.interests : String(g.interests || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.minRelevance = num(g.minRelevance, 0.25, 0, 1)
   c.merge.enabled = bool(c.merge.enabled, true)
@@ -249,6 +275,7 @@ export function normalize(raw) {
   ha.method = ha.method === 'GET' ? 'GET' : 'POST'
   if (!['none', 'json', 'form'].includes(ha.bodyType)) ha.bodyType = 'json'
   if (!['audio', 'json-base64', 'json-url'].includes(ha.response)) ha.response = 'audio'
+  if (!['auto', 'pcm_s16le'].includes(ha.audioFormat)) ha.audioFormat = 'auto'
   ha.sampleRate = num(ha.sampleRate, 24000, 8000, 48000)
   if (!isObj(ha.headers)) ha.headers = {}
   c.voice.speed = num(c.voice.speed, 1, 0.5, 2)
@@ -263,6 +290,8 @@ export function normalize(raw) {
   if (!isObj(c.imageGen.quota)) c.imageGen.quota = {}
   c.imageGen.quota.perUserPerDay = num(c.imageGen.quota.perUserPerDay, 20, 0, 1000)
   c.imageGen.quota.ownerUnlimited = bool(c.imageGen.quota.ownerUnlimited, true)
+  c.imageGen.quota.perChatPerDay = num(c.imageGen.quota.perChatPerDay, 100, 0, 10000)
+  c.imageGen.quota.perProviderPerDay = num(c.imageGen.quota.perProviderPerDay, 500, 0, 10000)
   c.imageGen.waitInputSec = num(c.imageGen.waitInputSec, 30, 5, 300)
   c.imageGen.enabled = bool(c.imageGen.enabled, false)
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
@@ -325,11 +354,11 @@ export function normalizeImageProfiles(list) {
   return out
 }
 
-const SECRETS = [['voice', 'openai', 'apiKey'], ['voice', 'httpApi', 'apiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
+const SECRETS = [['voice', 'openai', 'apiKey'], ['voice', 'httpApi', 'apiKey'], ['search', 'apiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['bridge', 'token']]
 // 扩展模块设置里的密码类字段（模块加载时登记）：['ext', 模块id, 字段]
 const extraSecrets = new Map()
 export function registerSecretField(path) { extraSecrets.set(path.join('\u0000'), path) }
-const allSecrets = () => [...SECRETS, ...extraSecrets.values()]
+const allSecrets = () => [...SECRETS, ...RETRIEVAL_SECRET_FIELDS.map(path=>path.split('.')), ...extraSecrets.values()]
 const parentOf = (obj, path, create) => {
   let cur = obj
   for (const k of path.slice(0, -1)) {
@@ -341,6 +370,29 @@ const parentOf = (obj, path, create) => {
 const getAt = (obj, path) => { const p = parentOf(obj, path, false); return p ? p[path.at(-1)] : undefined }
 // 这些密钥在面板里显示结尾几位（「已保存（结尾 …a1b2）」），方便认出存的是哪一份；完整值不回传
 const HINTED = [['bili', 'sessdata'], ['bili', 'biliJct']]
+const HIDDEN_HEADER = '[已保存，原样保留]'
+function hideHeaders(value) {
+  if (!value || typeof value !== 'object') return
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'headers' && isObj(child)) {
+      for (const name of Object.keys(child)) if (child[name] && !/^(content-type|accept|user-agent)$/i.test(name)) child[name] = HIDDEN_HEADER
+    } else hideHeaders(child)
+  }
+}
+function restoreHeaders(value, previous) {
+  if (!value || typeof value !== 'object') return
+  if (Array.isArray(value)) { for (const [i, child] of value.entries()) restoreHeaders(child, child?.id ? previous?.find?.(p => p.id === child.id) : previous?.[i]); return }
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'headers' && isObj(child)) {
+      for (const name of Object.keys(child)) {
+        if (child[name] === HIDDEN_HEADER) {
+          if (previous?.headers?.[name] === undefined) throw new Error('请求头占位符没有对应的已保存值，请重新填写 ' + name)
+          child[name] = previous.headers[name]
+        } else if (child[name] === null) delete child[name]
+      }
+    } else restoreHeaders(child, previous?.[key])
+  }
+}
 
 /** 从一串 Cookie 里取某个值（「SESSDATA=xxx; bili_jct=yyy」）。 */
 export function cookieValue(raw, key) {
@@ -407,12 +459,42 @@ export function publicConfig(cfg) {
   }
   // 生图服务的密钥在数组里：同样只告诉面板有没有填
   for (const p of c.imageGen?.profiles || []) { p.apiKeySet = Boolean(p.apiKey); p.apiKey = '' }
+  hideHeaders(c)
   return c
 }
 
 /** 面板保存时：没改的密码字段（空串）保留原值。 */
 export function mergeFromPanel(current, incoming) {
+  if(incoming?.retrieval?.roles!==undefined) {
+    if(!isObj(incoming.retrieval.roles))throw new Error('检索模型配置必须是对象')
+    for(const [role,value] of Object.entries(incoming.retrieval.roles)) {
+      if(!['text','image','joint'].includes(role)||!isObj(value))throw new Error('检索角色配置不合法')
+      for(const key of ['space','mapping','samples'])if(value[key]!==undefined&&!isObj(value[key]))throw new Error(`检索 ${role}.${key} 必须是合法 JSON 对象`)
+      if(value.alignmentPairs!==undefined&&!Array.isArray(value.alignmentPairs))throw new Error('联合空间校验样本必须是 JSON 数组')
+    }
+  }
+  if (incoming?.memory?.shareGroups !== undefined) {
+    const groups=incoming.memory.shareGroups, normalized=normalizeShareGroups(groups)
+    if(!Array.isArray(groups)||normalized.length!==groups.length||new Set(groups.map(g=>g.id)).size!==groups.length)throw new Error('共享组需要唯一 ID、至少两个有效聊天以及至少一种共享类别')
+    for(let i=0;i<groups.length;i++)if(normalized[i].chats.length!==groups[i].chats.length||normalized[i].categories.length!==groups[i].categories.length)throw new Error('共享组包含重复或无效的聊天/类别')
+  }
+  // 面板错误必须留在草稿里，不能经归一化悄悄删掉一个服务后告诉用户保存成功。
+  if (incoming?.imageGen?.profiles !== undefined) {
+    if (!Array.isArray(incoming.imageGen.profiles)) throw new Error('生图服务必须是列表')
+    const ids = new Set()
+    for (const p of incoming.imageGen.profiles) {
+      if (!p || !/^[A-Za-z0-9_-]{1,40}$/.test(p.id || '')) throw new Error('生图服务 ID 只能用 1–40 位字母、数字、下划线或连字符')
+      if (ids.has(p.id)) throw new Error(`生图服务 ID 重复：${p.id}`)
+      ids.add(p.id)
+      if (!IMAGE_PROTOCOLS.includes(p.protocol)) throw new Error(`不支持的生图协议：${p.protocol}`)
+      if (!isObj(p.extra ?? {})) throw new Error(`「${p.name || p.id}」的协议配置必须是 JSON 对象`)
+      for (const key of ['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers']) {
+        if (p.extra?.[key] != null && !isObj(p.extra[key])) throw new Error(`「${p.name || p.id}」的 ${key} 必须是合法 JSON 对象`)
+      }
+    }
+  }
   const next = deepMerge(current, incoming || {})
+  if(incoming?.retrieval?.roles!==undefined)next.retrieval.roles=structuredClone(incoming.retrieval.roles)
   for (const path of allSecrets()) {
     const v = getAt(incoming || {}, path)
     const p = parentOf(next, path, v !== undefined)
@@ -443,5 +525,8 @@ export function mergeFromPanel(current, incoming) {
   if (incoming?.chatModels?.privates) next.chatModels.privates = incoming.chatModels.privates
   if (incoming?.chatModels?.groups) next.chatModels.groups = incoming.chatModels.groups
   if (incoming?.allow) next.allow = { ...current.allow, ...incoming.allow }
-  return normalize(next)
+  restoreHeaders(next, current)
+  const normalized=normalize(next)
+  if(incoming?.retrieval && normalized.retrieval.enabled)runtimeRetrievalConfig(normalized.retrieval,'panel-validation.sqlite')
+  return normalized
 }

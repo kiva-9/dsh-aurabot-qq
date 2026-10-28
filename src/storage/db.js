@@ -33,6 +33,7 @@ export function openDatabase(file, { readOnly = false } = {}) {
     if (!s) {
       s = raw.prepare(sql)
       cache.set(sql, s)
+      if (cache.size > 256) cache.delete(cache.keys().next().value)
     }
     return s
   }
@@ -44,6 +45,7 @@ export function openDatabase(file, { readOnly = false } = {}) {
    * fn 必须是同步函数：事务中途 await 会让别的代码插进同一个连接。
    */
   function tx(fn) {
+    if (fn?.constructor?.name === 'AsyncFunction') throw new Error('事务里不能用异步函数')
     if (depth > 0) {
       const name = `sp_${++savepoint}`
       raw.exec(`SAVEPOINT ${name}`)

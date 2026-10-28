@@ -26,7 +26,7 @@ test('解析：英文、中文别名、全角斜杠、中文命令不加空格',
 })
 
 function deps() {
-  let cfg = normalize({ enabled: true, ownerQQ: '10000001', allow: { groups: ['555'] } })
+  let cfg = normalize({ enabled: true, botQQ: '20000002', ownerQQ: '10000001', allow: { groups: ['555'] } })
   const calls = []
   return {
     calls,
@@ -35,8 +35,8 @@ function deps() {
       getConfig: () => cfg,
       setConfig: (next) => { cfg = normalize(next) },
       mutes: createMutes(),
-      hub: { joinTopic: (g) => calls.push(['join', g]), leaveTopic: (g) => calls.push(['leave', g]), resetChat: (c) => calls.push(['reset', c]), stats: () => ({ received: 3, sent: 2 }) },
-      mood: { label: () => '开心' },
+      hub: { scopeFor:chat=>({account:cfg.botQQ,chat,persona:cfg.persona.current}), joinTopic: (g) => calls.push(['join', g]), leaveTopic: (g) => calls.push(['leave', g]), resetChat: (c) => calls.push(['reset', c]), stats: () => ({ received: 3, sent: 2 }) },
+      mood: { label:scope=>{assert.equal(scope.account,cfg.botQQ);assert.equal(scope.persona,cfg.persona.current);assert.match(scope.chat,/^(private|group):/);return '开心'} },
       memory: { add: (x) => { calls.push(['remember', x.text]); return { ok: true, id: 'm1' } } },
     },
   }

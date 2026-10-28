@@ -12,6 +12,51 @@ import { defineTool } from '../tools/tools.js'
 
 const RING = 300
 
+// hub.deliver: { confirmed, complete, deliveries: [{ batchId, ...counts, rows }] }；
+// 沉默 / reply、items hook 拦截可返回 undefined。计数是发送段（含失败后的回落段），
+// complete 则是 hub 对整次回复的判断，不能把一次失败后成功回落误报成整次失败。
+function deliveryReport(result, target) {
+  const counts = { delivered: 0, pending: 0, unknown: 0, failed: 0, skipped: 0, canceled: 0 }
+  const messageIds = new Set(), batchIds = new Set()
+  const batches = Array.isArray(result?.deliveries) ? result.deliveries : []
+  let unverified = result != null && !Array.isArray(result.deliveries)
+  for (const batch of batches) {
+    if (batch.batchId) batchIds.add(batch.batchId)
+    if (batch.rows?.length) {
+      for (const row of batch.rows) {
+        const state = row.state === 'sending' ? 'pending' : row.state
+        if (state === 'delivered') {
+          const id = row.platformMsgId == null ? '' : String(row.platformMsgId).trim()
+          if (id) { counts.delivered++; messageIds.add(id) }
+          else counts.unknown++ // 无消息回执不能仅凭 confirmed=true 向联动方宣称送达。
+        } else if (Object.hasOwn(counts, state)) counts[state]++
+        else unverified = true
+      }
+    } else {
+      // 发送摘要正常带 rows；缺少它们时不能确认任何 delivered 段。
+      for (const state of Object.keys(counts)) {
+        const n = Number.isSafeInteger(batch[state]) && batch[state] > 0 ? batch[state] : 0
+        counts[state === 'delivered' ? 'unknown' : state] += n
+      }
+    }
+  }
+  const confirmed = counts.delivered > 0
+  unverified ||= Boolean(result?.confirmed && !confirmed && !counts.unknown)
+  const complete = confirmed && result?.complete === true && result?.confirmed === true && !unverified && !counts.unknown && !counts.pending
+  const status = unverified || counts.unknown ? 'unknown' : counts.pending ? 'pending' : complete ? 'delivered'
+    : counts.failed ? 'failed' : counts.skipped || counts.canceled || !confirmed ? 'skipped' : 'unknown'
+  const prefix = confirmed && !complete ? `已确认送达 ${counts.delivered} 段；` : ''
+  const message = {
+    delivered: `回复已全部确认送达（${counts.delivered} 段）`,
+    pending: `${prefix}仍有发送段等待完成`,
+    unknown: `${prefix}发送结果未知，不能确认全部送达，请勿自动重发`,
+    failed: `${prefix}发送失败，未全部送达`,
+    skipped: `${prefix}未发送的段已跳过或取消`,
+  }[status]
+  return { ok: status === 'delivered', status, target, confirmed, complete, partial: confirmed && !complete,
+    ...counts, messageIds: [...messageIds], batchIds: [...batchIds], message }
+}
+
 export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, version, apiVersion, overview }) {
   const events = [] // 最近发生的事（收到的消息、她发出去的话、模块发的事件），别的程序轮询用
   let seq = 0
@@ -33,6 +78,16 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
     return ok.includes(id) ? '' : '不在白名单里，不能发'
   }
   const ownerTarget = () => `private:${getConfig().ownerQQ}`
+  const failed = (target, message) => ({ ...deliveryReport(undefined, target), status: 'failed', message })
+  async function deliverTo(target, text) {
+    try { return deliveryReport(await hub.deliver(target, text), target) }
+    catch (error) {
+      // hub 可能在部分发送后抛错；只有明确未发送 / 拒绝才可说失败，其余保留 unknown。
+      const known = ['not_sent', 'rejected'].includes(error?.outcome)
+      return { ...deliveryReport(undefined, target), status: known ? 'failed' : 'unknown',
+        message: known ? '发送失败，未确认送达' : '发送结果未知，请勿自动重发', error: String(error?.message ?? error) }
+    }
+  }
 
   // ---------- 大家共用的几个操作 ----------
   const ops = {
@@ -49,20 +104,23 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
     send: async ({ target, text } = {}) => {
       const t = String(target || ownerTarget())
       const why = canSend(t)
-      if (why) return { ok: false, message: why }
-      if (!String(text || '').trim()) return { ok: false, message: '要说点什么' }
-      await hub.deliver(t, String(text))
-      const cfg = getConfig()
-      return { ok: true, message: !cfg.enabled ? '总开关关着，没真发' : cfg.dryRun ? '试运行，只进了日志' : '发出去了' }
+      if (why) return failed(t, why)
+      if (!String(text || '').trim()) return failed(t, '要说点什么')
+      return deliverTo(t, String(text))
     },
-    /** 让她自己想一想再说（走她的人格和记忆）。to 填了就把她的回答发过去。 */
+    /** 后台只生成文字，不授予工具权限。to 填了时 ok 只表示全部送达；不填时 ok 表示生成成功。 */
     think: async ({ prompt, to } = {}) => {
-      if (!String(prompt || '').trim()) return { ok: false, message: 'prompt 不能空' }
-      if (to) { const why = canSend(to); if (why) return { ok: false, message: why } }
-      const reply = await hub.runSystemTurn('bridge', '联动', `【系统提醒·来自联动接口】${prompt}\n（只写你要说的话。不想说就输出 [沉默]）`)
+      const target = to ? String(to) : null
+      if (!String(prompt || '').trim()) return failed(target, 'prompt 不能空')
+      if (target) { const why = canSend(target); if (why) return failed(target, why) }
+      let reply
+      try {
+        reply = await hub.runSystemTurn('bridge', '联动', `【系统提醒·来自联动接口】${prompt}\n（只写你要说的话。不想说就输出 [沉默]）`, { noTools: true })
+      } catch (error) { return { ...failed(target, '后台生成失败，未请求发送'), error: String(error?.message ?? error) } }
       const text = String(reply || '').trim()
-      if (to && text && text !== '[沉默]') await hub.deliver(String(to), text)
-      return { ok: true, reply: text }
+      if (!target) return { ...deliveryReport(undefined, null), ok: true, reply: text, message: '已生成回复，未请求发送' }
+      const delivery = text && text !== '[沉默]' ? await deliverTo(target, text) : deliveryReport(undefined, target)
+      return { ...delivery, reply: text }
     },
     /** 调某个模块导出的函数：call('memory', 'recall', '香菜')。模块导出了什么看面板「扩展」和 API.md。 */
     call: async ({ module, method, args } = {}) => {

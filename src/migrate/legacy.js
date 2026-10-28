@@ -77,6 +77,7 @@ export function backupLegacy(baseDir, report = preflight(baseDir), stamp = Date.
   mkdirSync(dir, { recursive: true })
   const copied = []
   const skipped = []
+  const failed = []
   for (const it of report.items) {
     const src = join(baseDir, it.name)
     if (it.large) { skipped.push(it.name); continue }
@@ -85,10 +86,11 @@ export function backupLegacy(baseDir, report = preflight(baseDir), stamp = Date.
       else cpSync(src, join(dir, it.name), { recursive: true })
       copied.push(it.name)
     } catch (error) {
-      skipped.push(`${it.name}（复制失败：${error.message}）`)
+      failed.push(`${it.name}（复制失败：${error.message}）`)
     }
   }
-  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ at: stamp, copied, skipped, report }, null, 2), 'utf8')
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ at: stamp, copied, skipped, failed, complete: !failed.length, report }, null, 2), 'utf8')
+  if (failed.length) throw new Error(`升级备份不完整，停止迁移：${failed.join('；')}。备份清单：${dir}`)
   return { dir, copied, skipped }
 }
 

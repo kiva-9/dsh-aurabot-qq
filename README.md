@@ -1,94 +1,100 @@
 # Aurabot · 住在 QQ 里的大肥鱼
 
-DeepSeek Harness（DSH）插件。DSH 里的 AI 以独立 QQ 号「大肥鱼」的身份住进 QQ：有人格、心情和记忆，能看图、发语音、听语音、发和收表情包、用自己的声音翻唱、刷 B 站发评论，还会主动找你聊天。
+**2.0.0-rc.1，候选版本。** Aurabot 是 DeepSeek Harness（DSH）插件，经 SnowLuma / OneBot v11 连接独立 QQ 号，提供聊天、人设、范围化记忆，以及可选的语音、表情、搜索、生图和翻唱。
 
+本次本机整合状态（2026-10-29）：**原版全量备份已校验，候选版本已安装到实际 DSH**。指定 Magpie 模型、Cloudflare BGE-M3、GRSAI 生图与参考再生成、StepFun TTS、本地 SenseVoice、Tavily 搜索与正文提取，以及主人私聊的文字/图片/语音投递已有真实验证。范围隔离、故障恢复和面板编辑保存另有自动化与界面测试；完整结果和未覆盖的场景见 [验证记录](docs/VALIDATION-2026-10-29.md)。
+
+这是自用替换候选，保留原包名、插件 ID 和数据目录；不与原版同时运行。已配置的能力仍需看探针、任务和真实回执，不能把单个样例通过理解为所有服务或实群场景已验证。
+
+```text
+QQ ⇄ SnowLuma / OneBot ⇄ Aurabot ⇄ DSH 会话
+                          ├─ SQLite：消息、请求、事实、任务与发送账本
+                          └─ 资产文件、可重建检索索引、配置与扩展
 ```
-QQ ⇄ SnowLuma（OneBot v11，你自己安装）⇄ Aurabot 插件 ⇄ DSH 会话（Aurabot 自带的 preset + 人格）
-```
 
-- **入口**：DSH 左侧栏「自动化任务」下面的「Aurabot」。整页面板用标签分功能：概览、连接、人格、权限、聊天、模型、语音、表情包、生图、主动搭话、心情与记忆、翻唱、B站、本地接口、扩展、日志。
-- **开放**：每项本事都是模块，能关、能替换、能复制一份来改；自己写的模块放在数据目录 `modules/`，升级不覆盖、保存即生效。连群聊插话策略、交给她的提示词、回复怎么拆、最终发出去什么、用哪个模型都能用模块改。说明见 [src/modules/API.md](src/modules/API.md)，不会写就让 DSH 照着写。
-- **会话**：每个 QQ 私聊或群各对应一个 DSH 会话，都放在侧栏的「Aurabot · QQ」工作区里，可以点开看她想了什么、调了什么工具，也可以直接插话。
-- **安全默认**：总开关关、试运行开。不手动打开，一句都不会发到 QQ。
+DSH 侧栏的 **Aurabot** 面板按功能分开：连接、人格、权限、聊天、模型、语音、表情包、生图、搜索、主动搭话、心情、记忆、检索与索引、表达与黑话、任务、扩展、诊断等。操作说明见 [使用手册](docs/USER-MANUAL.md)，扩展接口见 [API 2](src/modules/API.md) 和 [类型声明](src/modules/aurabot.d.ts)。
 
-## 安装
+## 安装与替换使用
 
-需要：Windows、DeepSeek Harness 桌面版、一个用来当机器人的 QQ 小号。
+需要 Windows、支持插件的 DSH 桌面版、符合本项目 Node.js 要求的宿主运行时，以及机器人 QQ 小号。当前最低 Node.js 声明为 22.13.0，开发环境见 [开发说明](docs/DEVELOPMENT.md)。自行安装并配置 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)，由本人阅读、同意其协议后再接入机器人账号。
+
+测试本地候选版本时，将下列路径替换为实际仓库目录，在 DSH 停止使用旧插件并完成备份后安装：
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:accomplish07zrh-eng/dsh-aurabot-qq
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "C:\dev\dsh-aurabot-qq"
 ```
 
-装好后重启 DSH，打开左侧栏「自动化任务」下的 **Aurabot**，跟着设置向导走：
+重启后先核对面板版本、机器人账号、主人账号、白名单和模型设置。默认 `enabled:false`、`dryRun:true`。试运行会限制高层 QQ 发送，但模型推理、显式服务测试和可信扩展的直接外部调用仍可能发生；不是免费或无副作用沙箱。
 
-1. 填机器人 QQ 号（用小号）和你的 QQ 号
-2. 自己下载并解压 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)
-3. 启动，在面板里同意 SnowLuma 的协议（控制台密码自动生成）
-4. 登录机器人号，点「接入机器人号」
-5. 先试运行，或直接上线
+分叉继续使用包名 **dsh-aurabot-qq**、挂载 ID **aurabot** 和原模块 ID，以替换方式使用；不要改名并行启动两套接收/发送实例。单个内置模块的 fork 在「扩展」点“复制一份来改”，保持目录与 id 相同。保留自定义文件不代表自动合并新版协议，升级时需检查范围与取消契约。
 
-## 升级
+## 这次重构改变了什么
 
-在 PowerShell 里运行下面这行（拉取 GitHub 上的最新版），然后重启 DSH。设置、人格、记忆都会保留；有新版本时面板里也会提示。
+| 领域 | 当前行为与边界 |
+| --- | --- |
+| 人设 | 草稿与发布版本分开，支持按聊天绑定；回合使用冻结的人设版本，切换使旧工作失效 |
+| 消息与请求 | 原始接收记录有 recv_seq，来源区分 actor/account/chat；多人的合并聊天不能互相借用授权 |
+| 事实记忆 | SQLite 存 subject/predicate/value、speaker、肯否、模态、条件、时间、状态、稳定性和证据；更正/撤回有审计。普通人物事实 persona 为空，经历和画像按用途隔离 |
+| 提炼与画像 | 达到消息数或时间阈值后增量提炼；事实、证据、摘要、checkpoint 事务提交，失败不推进，原日志不清空。画像缓存随证据内容和范围修订失效，人工覆盖有 revision |
+| 删除与旧档案 | tombstone 阻止迟到重放；恢复只进入待复核，证据和事实分别批准。未知来源 memories.json 一次导入隔离区，不自动公开 |
+| 范围与检索 | account/chat/persona 先过滤；共享 groups 按类别明确授权、不传递，派生内容需满足全部来源的可见交集。词法支持中文；分页、批量证据读取和范围缓存避免每次扫描全账号 |
+| 可选向量 | 本地 SQLite worker 或 Qdrant 适配；文本/图片/联合空间分开，探针验证后启用相应通道。索引可重建，返回前仍核验主库。未知或不可用通道明确降级 |
+| 心情与学习 | 心情按账号/聊天/人设隔离，只影响短期表达；不阻断明确请求和承诺。表达习惯、群内黑话有证据、审核和撤销，学习与使用开关独立 |
+| 任务与投递 | 生成结果与送达结果分开，持久任务/outbox/等待可恢复；unknown 不盲重试。取消等待不等于取消后台任务，取消不能撤回已发生的收费/发送 |
+| 表情包 | 保存、分析、审核、QQ 收藏同步独立记录；按聊天选择已批准素材，不合适可不发，动画需核对原图。达到容量上限停止接收，不自动清空已审核库 |
+| 生图与搜索 | 生图支持按配置声明的协议能力选择流程；参考图有来源和用途，提交前复核。搜索候选、下载成功与批准引用是不同步骤 |
+| API 2 扩展 | 异步 prepareContext 与同步 context 分开；Hook 有顺序、结构检查、执行 signal、epoch 校验和诊断。超时不具备强制终止 JavaScript 或撤销外部请求的能力 |
+
+面板、领域实现仍可独立替换。保留 QQ 管理、联系人、B 站和翻唱模块；QQ 空间、抖音功能已移除，旧文件不因功能移除而自动删除。
+
+## 默认开关与配置能力
+
+模块加载开关和业务开关是两层；未配置外部服务不会因模块已加载而自动可用。
+
+| 功能 | 默认值 / 使用前条件 |
+| --- | --- |
+| 总开关 / 试运行 | 关 / 开；核对账号和白名单后再正式上线 |
+| 记忆 | enabled=true；默认 20 条新消息或 30 分钟触发条件，须有新消息；每事务实际最多 100 条，原记录保留 |
+| 心情 | 开；模型判断 judge=false，默认基线 60、半衰期 3 小时 |
+| 表达与黑话 | 模块功能 enabled=true，但 learnEnabled=false、useEnabled=false；私聊学习 allowPrivate=false |
+| 检索与索引 | retrieval.enabled=false；roles 初始为空；启动/热重载不自动探测付费 embedding |
+| 表情包 | 开且允许收集/描述；进入待审，自动批准不默认开启 |
+| 生图 / 搜索 / 翻唱 / B站 | 业务开关默认关，需要各自服务、权限或音色配置 |
+| 语音 | enabled=true，provider=none；配置外部 OpenAI 兼容或固定 HTTP 接口后才可合成；不再内置 edge-tts/Windows 语音 |
+| 主动搭话 | 功能默认开，仅主人私聊，仍受总开关、试运行、时间和频率约束 |
+| 本地脚本 / 联动接口 / 长任务模式 | 默认关，需显式启用并核对权限 |
+
+向量模型、重排、视觉或生图协议的“可配置”不等于所有提供方已实测；以当前 schema、探针和健康状态为准。不同向量空间的原始分数不能直接混加，图像相似也不证明身份一致。
+
+## 升级、备份与数据位置
+
+默认数据目录为 `%USERPROFILE%\.dsh\plugins-data\aurabot\`，可由 `DSH_HOME` 或 `AURABOT_DATA_DIR` 改变。配置、主库 aurabot.db、assets、modules、modules-data、local、日志等不在插件安装代码目录中；外置翻唱环境和模型还可能在别处。插件不会自动读取 .env 文件。
+
+**升级前停止插件并独立备份完整数据目录和外置资源。** 自动 `_backup-v2-*` 只复制预检清单内的旧 JSON/目录，跳过 local、songs、logs、voice-cache 等标记的大目录；manifest 会记录 copied/skipped/failed。数据库版本升级的 backups/ 是 SQLite 快照，也不含全部资产、脚本或凭据。自动小备份不等于全量备份，不能据此保证重装或回退绝不丢数据。
+
+主库、结构迁移或必要备份失败时，启动会保留诊断错误并暂停聊天和后台任务，避免无账本收费/发送。不要删除数据库或改版本号来绕过错误；修复原因后再重启。旧记忆的范围未知数据只进入待复核区；旧心情不会作为全局状态重新注入。旧版插件不能直接读取更高版本数据库，应使用匹配的升级前备份恢复。
+
+## 开发与验证
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add github:accomplish07zrh-eng/dsh-aurabot-qq
+npm.cmd ci
+npm.cmd test
 ```
 
-## 设计要点
+测试使用 Node.js 测试运行器、临时数据库、fake DSH 和本地模拟 HTTP/OneBot。它们验证受控协议、恢复、权限和失败路径，不能替代真实服务验收；全仓通过情况以当前测试输出为准，不引用旧版本计数作为本版本结论。
 
-| 方面 | 做法 |
-|---|---|
-| 人格注入 | 插件在 `cordis.patch.yml` 里自带两个 agent preset：`aurabot-private`（主人私聊，完整工具）和 `aurabot-social`（群聊和其他人私聊，没有任何本地工具）。人格通过 `@deepseek-ai/dsh-persona` 放在系统提示词最前，文本来自插件注册的提示词变量 `{{aurabot_persona}}`，切换人格无需重建 preset。 |
-| 每轮变化的内容 | 心情、记忆用 `agent.ctx.systemPrompt.context()`，追加在对话末尾，不破坏前缀缓存。 |
-| 群聊上下文 | 群里停顿几秒算一段，她回上一段时新消息先攒着，看完整段再回（不会一条一回）；交给她的是这一段谁说了什么、之前在聊什么，新消息带编号，想专门接某一条时可以引用回复。合并转发会展开成里面的聊天记录再给她；有人戳她（拍一拍）当成对她说的话，她也能戳回去。被叫必回，没人叫时按话题相关度插话，加入话题后接着聊；有防刷屏的刹车。 |
-| 记忆 | 本地索引记忆库（中文二元切词 + BM25，再按「关于当前说话人」「重要程度」和遗忘曲线加权，越常被想起的忘得越慢）。来源：她自己记的、每天两次从聊天里整理出来的、她自己的经历（唱了什么、评论了谁）、你手动加的。整理时新事实先和旧记忆比对：补充旧的就合并，说明旧的过时了就把旧的标成「已过时」（不删，能恢复）。每个人有一张常驻的「人物小档案」，每个人 / 群还有「相处经验」和「说话方式」。想起的记忆带时间；对方只说「嗯嗯」时连上一句一起想；面板能看到最近几轮想起了哪几条；可以导入旧档案。 |
-| 心情 | 默认按关键词，可选每轮用模型判一次（有把握才算，分得清她主动找人时的心意）；被夸、被凶会推动心情，按半衰期回到平常；心情明显时每轮告诉她该怎么说话，并实际影响发表情 / 语音的概率、回复快慢、插话积极程度。 |
-| B 站 | 定时从她的兴趣、记忆里主人喜欢的东西和面板关键词里挑方向搜视频（WBI 签名），读简介、字幕和热评，再按人格决定评论 / 私聊分享给主人 / 记住什么；定时看别人回她的评论并接着回。主人在 QQ 里发 B 站链接或分享卡片，她用 `bili_watch` 看完再聊。看过、评过、回过的都记成她的经历。不碰关注、私信。 |
-| 改资料 | 听人的话改她自己的 QQ 昵称 / 签名 / 头像（`qq_set_nickname` / `qq_set_signature` / `qq_set_avatar`，走 SnowLuma 扩展动作），以及 B 站签名 / 头像（`bili_set_sign` 最多 70 字；`bili_set_avatar` 收图片网址或 `last`=刚才发的那张图，最大 2MB，走 `x/member/web/face/update`）。面板「权限」页每个操作单独设 关 / 仅主人私聊（默认）/ 所有人；执行前按最新设置再查一遍，试运行只回话不真改。 |
-| 按聊天选模型 | 主人可以让不同聊天用不同模型。面板「模型」页的「按聊天选模型」：两个下拉框选「私聊默认模型」「群聊默认模型」，要给某个 QQ / 某个群单独指定，展开下面的小列表添加一行（再点「移除」删掉）。优先级：这个私聊（QQ 号）> 这个群（群号）> 所有私聊 / 所有群默认 > 全局模型（「聊天用的模型」或 DSH 默认）；没选或选的模型在 DSH 里找不到，就自动用下一级。存在 `config.json` 的 `chatModels`（`privateDefault`、`groupDefault`、`privates`、`groups`，每项 `{ provider, model, reasoningEffort? }`），重启不丢，换了从那个聊天的下一条消息起生效。只有主人能改，聊天里的人说什么都换不了；扩展模块的 `model` 挂钩仍在这之后运行。 |
-| 模块 | 除了核心（配置、QQ 网关、聊天中枢、人格、权限、面板），每项本事都是模块（`src/modules/`）。内核（`src/core/modules.js`）负责开关、替换、热重载和出错隔离：模块注册的工具、上下文、规则、命令、事件、定时任务、接口都记在它名下，停下时一起撤掉；聊天中枢用到表情、语音、心情、记忆时，找的都是当时在跑的那个模块。用户模块放在数据目录 `modules/`（升级不碰），和内置模块同名就是替换。扩展接口版本化，说明见 `src/modules/API.md`、类型见 `src/modules/aurabot.d.ts`（每次启动复制到 `modules/`）。聊天主流程留了改写挂钩：群聊决定、提示词、回复拆条、最终发送、模型选择、人格和规则。自己写的模块按快照加载（多文件、npm 依赖都能热重载），面板「扩展」页有模拟测试（截获发送，不真发）。 |
-| 本地接口 | 语音合成、生图、翻唱换声、语音识别都能换成自己电脑上的模型或服务：面板生成带示例的脚本（放在数据目录 local/，升级不覆盖、改完即生效），也可以「复制给 DSH 的话」让 DSH 照接口说明帮你改。 |
-| QQ 命令 | 主人在 QQ 里直接发 `/silent` `/active` `/quiet` `/chatty` `/model` `/sing` `/remember` `/status` 等管她，总开关关着也能用。 |
-| 工具 | 由各模块提供，按会话注册（`agent.ctx.tools.register`），只出现在 Aurabot 的会话里。群管在工具层校验这一轮有主人下令、对象不是主人、她在群里有管理权限；点歌、生图校验「这一轮说话的人全是主人」，不只靠人格约束。 |
-| QQ 网关 | SnowLuma 的 OneBot v11：WS 收事件（实时），HTTP 调接口。插件从 SnowLuma 配置文件自动读取端口和令牌。 |
-| SnowLuma 管理 | SnowLuma 的 EULA 第 5.4 条不允许「通过自动化脚本部署」，所以插件不下载，也不替你同意协议：协议全文显示在面板里，由你本人勾选同意。插件只启停你自己装好的那一份（后台运行，不弹窗口）；第一次启动时用 `SNOWLUMA_WEBUI_BOOTSTRAP_PASSWORD` 设一个自己生成的控制台密码。注入前用 `/api/processes` 核对每个 QQ 进程登录的号，只注入机器人号（SnowLuma 认不出号时，只在唯一一个认不出号的进程上注入，连上后用 `get_login_info` 核对，不是机器人号就断开并撤销）；`hookAutoLoad` 永远关。 |
-| 语音 | TTS 用 edge-tts（装在插件自己的 Python 虚拟环境里），也可以接本地的 CosyVoice、GPT-SoVITS，装不上时用 Windows 自带中文语音兜底。ASR 先用 QQ 自带的语音转文字（`fetch_ptt_text`），再试 DSH 的 `speechToText`。 |
-| 表情包 | 只收真正的表情（`sub_type=1`、mface、带 `emoji_id` 的），再过尺寸、宽高比、体积、MD5 去重、每小时限额几道关。收下后 `add_custom_face`，视觉模型起备注后 `modify_custom_face`。 |
-| 翻唱 | 点歌（`qq_song_cover` 工具或 `/sing`）→ 网易云下载（weapi，可填 Cookie 下会员歌）→ 先截要发的那一段 → audio-separator 分离人声和伴奏 → Applio（RVC，固定版本）换成她的音色 → ffmpeg 混音 → 发语音条。插件不带音色，用户在面板里导入自己有权使用的 .pth / zip。一键安装不依赖电脑上的 Python / git / uv，可以选装到哪个盘，进度可见，下载走系统代理并能断点续传。 |
+记忆域收尾时，61 项独立测试通过。另一次本机合成测试使用 100000 条临时事实，其中目标聊天 5000 条：list 读取 5009 条候选约 165ms；词法冷查询约 179.8ms、7 次热查询中位 4.6ms/最高 7.5ms，热查询未重扫候选。该语料故意重复，测试将相关性阈值设为 0；这是范围读取与缓存测量，不是召回质量、真实用户库或整机延迟保证。主库仍是同步 SQLite，有界查询并不等于完全无阻塞。
 
-## 目录
+复现性能用例（不接触真实数据）：
 
-```
-src/host.js            插件入口（宿主半边）：核心 + 面板接口 /aurabot/api/*
-src/core/modules.js    模块内核：加载、开关、替换、热重载、出错隔离
-src/modules/           12 个内置模块 + 扩展接口说明 API.md + 类型 aurabot.d.ts + 新模块模板
-src/chat/              消息中枢、群聊策略、回复解析、白名单与权限
-src/onebot/client.js   OneBot v11 客户端（HTTP + WS，自动重连）
-src/snowluma/          SnowLuma 管理（检测、启停、只注入机器人号）
-src/features/          表情包、心情、记忆、主动搭话、生图
-src/song/              翻唱：网易云、安装器、分离 / 变声 / 混音流水线、音色导入
-src/voice/             文字转语音、WAV 处理
-src/tools/tools.js     工具的写法（defineTool）
-src/persona/           人格卡与规则
-client/client.js       网页半边：侧栏入口 + 面板
-personas/dafeiyu.md    默认人格「大肥鱼」
-cordis.patch.yml       插件与两个 preset 的挂载声明
-test/                  单元测试 + 端到端测试（假 DSH 宿主 + 模拟 OneBot）
+```powershell
+$env:AURABOT_MEMORY_BENCH='1'
+node --test test/memory-query-benchmark.test.js
+Remove-Item Env:AURABOT_MEMORY_BENCH
 ```
 
-## 测试
-
-开发环境初始化、测试命令和 fork 的 Git 工作流见 [开发说明](docs/DEVELOPMENT.md)。
-
-```
-npm test
-```
-
-## 数据位置
-
-`%USERPROFILE%\.dsh\plugins-data\aurabot\`：配置、人格、表情库、记忆、日志，还有自己写的模块（`modules/`）和本地接口脚本（`local/`）。重装、升级插件都不会丢。
+主要目录：src/storage（主库）、src/memory（事实与派生检索）、src/learning（表达/黑话）、src/stickers（表情审核）、src/jobs 和 src/delivery（任务/发送）、src/runtime（调度/等待）、src/modules（扩展）、client（面板）、test（自动化验证）。
 
 ## 致谢
 
-参考了 [Yuuyuko-uu](https://github.com/Yuuyuko-uu) 的 dsh-qq-bridge、dsh-speak-up、dsh-feiyu-mood、dsh-fish-memory 等插件（MIT）在 DSH 插件机制上踩过的坑，具体是：注销器是函数而不是 `.off()`；`followup` 必须 await；心情别每轮都提。没有复制它们的代码。
+参考了 [Yuuyuko-uu](https://github.com/Yuuyuko-uu) 的相关 DSH 插件在宿主机制上的经验。保留原项目的贡献与许可说明；此分叉的范围化数据和任务重构应以当前候选版本代码与测试为准。

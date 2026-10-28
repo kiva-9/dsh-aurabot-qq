@@ -34,13 +34,7 @@ async function settle(ms = 600, max = 10000) {
   }
 }
 
-function fakePng(w, h, salt = 0) {
-  const b = Buffer.alloc(64 + salt)
-  b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47
-  b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20)
-  b[40] = salt
-  return b
-}
+import { png as fakePng } from './helpers/images.js'
 
 // 「模型」脚本
 async function brain({ preset, text, images, callTool }) {
@@ -58,7 +52,11 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
   if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '在画了' : '画不了' }
   if (text.includes('照着这张')) { const r = await callTool('qq_draw_image', { prompt: '改成雨天', images: [{ n: 1, role: 'base' }] }); return r && r.ok ? '在改了' : r.message }
-  if (text.includes('用别人的图画')) { const r = await callTool('qq_draw_image', { prompt: '画成雨天', images: [{ n: 1, role: 'identity' }] }); return r && r.ok ? '在画了' : r.message }
+  if (text.includes('用别人的图画')) {
+    const ref = Number((text.match(/\[(\d+)\] [^\n]*用别人的图画/) || [])[1])
+    const r = await callTool('qq_draw_image', { for_message: ref, prompt: '画成雨天', images: [{ n: 1, role: 'identity' }] })
+    return r && r.ok ? '在画了' : r.message
+  }
   if (text.includes('禁言')) {
     // 群里混着别人说话时，写明在执行主人的哪一条（模拟模型按提示词里的编号引用）
     const ref = Number((text.match(/\[(\d+)\] [^\n]*\(10000001\)[^\n]*禁言/) || [])[1]) || undefined
@@ -111,7 +109,7 @@ before(async () => {
 })
 
 after(async () => {
-  fake?.dispose()
+  await fake?.dispose()
   await mock?.close()
   await tts?.close()
   setTimeout(() => process.exit(0), 200).unref()
@@ -342,7 +340,7 @@ test('合并转发：她能看到转发里的聊天记录', async () => {
   assert.match(t, /转发乙：转发里的话乙/)
 })
 
-test('群聊刹车：短时间说够次数就歇着，主人 @ 还能叫动', async () => {
+test('群聊刹车：自动参与受限，群友和主人有效 @ 均可唤醒', async () => {
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
   for (let i = 0; i < 2; i++) {
     const n = sentTo('group', '559').length
@@ -351,32 +349,55 @@ test('群聊刹车：短时间说够次数就歇着，主人 @ 还能叫动', as
     await sleep(600)
   }
   const turns = fake.turns.length
-  mock.push(grp('559', '711', at('在吗 再来')))
+  mock.push(grp('559', '711', [{ type: 'text', data: { text: '继续聊这个话题' } }]))
   await sleep(1500)
-  assert.equal(fake.turns.length, turns, '说够 2 次了，群友 @ 也先不回')
-  mock.push(grp('559', OWNER, at('在吗 主人来了'), 'xiaoming'))
+  assert.equal(fake.turns.length, turns, '说够 2 次了，普通背景消息不触发自动回复')
+  mock.push(grp('559', '711', at('在吗 再来')))
   await until(() => fake.turns.length > turns)
+  await settle()
+  const next = fake.turns.length
+  mock.push(grp('559', OWNER, at('在吗 主人来了'), 'xiaoming'))
+  await until(() => fake.turns.length > next)
 })
 
-test('看图：主人发来表情包，她能看到图；表情被收藏并起了备注', async () => {
+test('看图：表情按消息范围后台收藏；旧格式描述失败时保留待审且不自动同步 QQ', async () => {
+  await settle()
+  const chatId = `private:${OWNER}`
+  const turns = fake.turns.length
+  const adds = mock.sent('add_custom_face').length
   const png = fakePng(240, 240, 1)
-  mock.push(priv(OWNER, [{ type: 'mface', data: { emoji_id: 'x1', summary: '[开心]', file: 'base64://' + png.toString('base64') } }]))
-  await until(() => fake.turns.at(-1)?.images === 1)
-  assert.match(fake.turns.at(-1).reply, /可爱/)
-  await until(() => mock.sent('add_custom_face').length === 1)
-  await until(() => mock.sent('modify_custom_face').length === 1)
-  assert.equal(mock.sent('modify_custom_face')[0].params.desc, '可爱的小鲸鱼')
-  const lib = JSON.parse(readFileSync(join(dataDir, 'stickers', 'index.json'), 'utf8'))
-  assert.equal(lib.items.length, 1)
-  assert.deepEqual(lib.items[0].tags, ['开心', '卖萌'])
+  const incoming = priv(OWNER, [{ type: 'mface', data: { emoji_id: 'x1', summary: '[开心]', file: 'base64://' + png.toString('base64') } }])
+  mock.push(incoming)
+  await until(() => fake.turns.length > turns && fake.turns.at(-1).images === 1 && /可爱/.test(fake.turns.at(-1).reply))
+  const item = await until(async () => {
+    const result = (await fake.call(`/stickers?chatId=${chatId}&status=pending`)).json()
+    return result.items.find((it) => it.source?.platformMsgId === String(incoming.message_id) && it.analysis.state === 'failed')
+  })
+  assert.equal(item.scope.account, BOT)
+  assert.equal(item.scope.chat, chatId)
+  assert.equal(item.scope.category, 'image')
+  assert.ok(item.source.messageId, '收藏记录绑定持久化消息身份')
+  assert.match(item.analysis.error, /JSON/)
+  assert.equal(item.qq.state, 'idle')
+  assert.equal(api.stickers.match(item.id, chatId), null, '待审条目不能匹配发送')
+  assert.equal(api.stickers.segmentFor(item, chatId), null)
+  assert.equal(mock.sent('add_custom_face').length, adds, '本地收藏不是 QQ 同步成功')
+  const duplicate = await api.stickers.collect(incoming.message[0], { chatId, messageId: item.source.messageId })
+  assert.equal(duplicate.state, 'done')
+  assert.equal(duplicate.itemId, item.id, '同来源重复投递复用已完成任务')
 })
 
 test('普通照片不收进表情库', async () => {
+  await settle()
+  const chatId = `private:${OWNER}`
+  const before = (await fake.call(`/stickers/stats?chatId=${chatId}`)).json()
+  const turns = fake.turns.length
+  const adds = mock.sent('add_custom_face').length
   const photo = fakePng(1080, 720, 2)
   mock.push(priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + photo.toString('base64') } }]))
-  await until(() => fake.turns.at(-1)?.images === 1 && fake.turns.length > 0)
-  await sleep(300)
-  assert.equal(mock.sent('add_custom_face').length, 1, '数量没变')
+  await until(() => fake.turns.length > turns && fake.turns.at(-1).images === 1)
+  assert.deepEqual((await fake.call(`/stickers/stats?chatId=${chatId}`)).json(), before)
+  assert.equal(mock.sent('add_custom_face').length, adds)
 })
 
 test('语音：回复里的 <voice> 变成 QQ 语音条', async () => {
@@ -435,6 +456,7 @@ test('日志里没有令牌原文', async () => {
 })
 
 test('重新开始：归档会话，下一条消息开新会话', async () => {
+  mock.push(priv(OWNER, text('在吗'))); await until(() => Object.keys(api.hub.sessions()).length > 0)
   const before = Object.keys((await fake.call('/state')).json().sessions).length
   assert.ok(before > 0)
   const r = (await fake.call('/sessions/reset')).json()
@@ -537,7 +559,7 @@ test('语音接口：自己配的 HTTP 映射（CosyVoice 预设），裸 PCM �
   })
   await new Promise((r) => srv.listen(0, '127.0.0.1', r))
   const base = `http://127.0.0.1:${srv.address().port}`
-  await fake.call('/save', { voice: { provider: 'http', httpApi: { method: 'POST', url: `${base}/inference_sft`, bodyType: 'form', body: 'tts_text={text}&spk_id=%E4%B8%AD%E6%96%87%E5%A5%B3', response: 'audio', sampleRate: 22050 } } })
+  await fake.call('/save', { voice: { provider: 'http', httpApi: { method: 'POST', url: `${base}/inference_sft`, bodyType: 'form', body: 'tts_text={text}&spk_id=%E4%B8%AD%E6%96%87%E5%A5%B3', response: 'audio', audioFormat: 'pcm_s16le', sampleRate: 22050 } } })
   const r = (await fake.call('/voice/test', { text: '你好呀' })).json()
   srv.close()
   await fake.call('/save', { voice: { provider: 'openai' } })
@@ -621,37 +643,61 @@ test('参考图归属：群友 A 不能拿群友 B 刚发的图当自己的参�
   assert.match(r.message, /路人乙 发的，不能拿来给别人画/)
 })
 
-test('每日整理：往日的临时流水整理后清空，今天的保留', async () => {
+test('增量记忆：必须指定范围，原始旧聊天保留供审计', async () => {
   const { existsSync } = await import('node:fs')
   const dir = join(dataDir, 'chatlog')
   mkdirSync(dir, { recursive: true })
-  const old = join(dir, '2026-01-01.jsonl')
-  writeFileSync(old, ['你好', '我喜欢吃辣', '周末一起打游戏吧', '好呀'].map((t, i) => JSON.stringify({ t: i, chatId: 'private:' + OWNER, who: i % 2 ? 'bot' : 'xiaoming', text: t })).join('\n') + '\n')
-  const r = (await fake.call('/memory/extract', {})).json()
-  assert.equal(r.ok, true, r.message)
-  assert.equal(existsSync(old), false, '往日的流水被清空')
-  const today = new Date()
-  const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
-  assert.equal(existsSync(join(dir, key + '.jsonl')), true, '今天的流水保留')
+  const old = join(dir, '2000-01-01.jsonl')
+  writeFileSync(old, JSON.stringify({ at: 1, chatId: 'private:' + OWNER, text: '旧记录' }) + '\n')
+  const missing = (await fake.call('/memory/extract', {})).json()
+  assert.equal(missing.ok, false)
+  assert.equal(missing.code, 'SCOPE_REQUIRED')
+  const scope = { account: BOT, chat: 'private:' + OWNER, persona: '' }
+  const result = (await fake.call('/memory/extract', { scope })).json()
+  // The fake model returns unstructured text: a failed interval must remain pending.
+  assert.equal(result.ok, false)
+  assert.equal(existsSync(old), true)
+  const status = (await fake.call('/memory/extraction?' + new URLSearchParams(scope))).json()
+  assert.equal(status.ok, true)
+  assert.notEqual(status.checkpoint.state, 'done')
 })
 
-test('表情包她自己整理：改名、改标签（同步到 QQ 收藏备注）、删掉', async () => {
-  const up = (await fake.call('/sticker/upload', { data: fakePng(200, 200, 9).toString('base64'), name: '测试猫猫' })).json()
-  assert.equal(up.ok, true)
-  const target = (await fake.call('/stickers')).json().items.find((i) => i.name === '测试猫猫')
-  assert.ok(target)
-  const mods = mock.sent('modify_custom_face').length
+test('表情包她自己整理：按聊天批准后发送、修改标签、显式同步 QQ 备注、删除留墓碑', async () => {
+  await settle()
+  const chatId = `private:${OWNER}`
+  const up = (await fake.call('/sticker/upload', { chatId, data: fakePng(200, 200, 9).toString('base64'), name: '测试猫猫' })).json()
+  assert.equal(up.ok, true, up.message)
+  const target = up.item
+  assert.equal(target.state, 'pending')
+  assert.equal(await api.hub.sendSticker(chatId, { id: target.id }), false)
+  await until(() => api.stickers.status(target.id, { admin: true }).analysis.state === 'failed')
+  const approved = (await fake.call('/sticker/approve', { id: target.id, expectedRevision: api.stickers.status(target.id, { admin: true }).revision })).json()
+  assert.equal(approved.item.state, 'approved')
+  assert.equal(approved.sync.state, 'queued')
+  await until(() => api.stickers.status(target.id, { admin: true }).qq.state === 'synced')
+  assert.equal(await api.hub.sendSticker('group:555', { id: target.id }), false, '未共享的私聊表情不能跨群发送')
+  const sent = sentTo('private', OWNER).length
+  assert.equal(await api.hub.sendSticker(chatId, { id: target.id }), true)
+  assert.equal(sentTo('private', OWNER).slice(sent).some((c) => c.params.message.some((s) => s.type === 'image')), true)
   mock.push(priv(OWNER, text(`表情改名测试 把「${target.name}」改个名`)))
   await until(() => fake.turns.at(-1)?.userText.includes('表情改名测试') && fake.turns.at(-1).toolCalls.length)
-  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /改好了/)
-  const after = (await fake.call('/stickers')).json().items.find((i) => i.md5 === target.md5)
+  assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, true)
+  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /本地.*更新/)
+  const after = (await fake.call(`/sticker/detail?id=${target.id}`)).json().item
   assert.equal(after.name, '改过的名字')
   assert.deepEqual(after.tags, ['开心'])
-  if (target.emojiId) await until(() => mock.sent('modify_custom_face').length > mods)
+  const sync = (await fake.call('/sticker/sync', { id: target.id, action: 'rename' })).json()
+  assert.equal(sync.state, 'queued')
+  await until(() => api.stickers.status(target.id, { admin: true }).qq.name === '改过的名字')
+  assert.equal(mock.faces.get(after.emojiId), '改过的名字')
   mock.push(priv(OWNER, text('表情删除测试')))
   await until(() => fake.turns.at(-1)?.userText.includes('表情删除测试') && fake.turns.at(-1).toolCalls.length)
-  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /删掉了/)
-  assert.equal((await fake.call('/stickers')).json().items.some((i) => i.md5 === target.md5), false)
+  assert.equal(fake.turns.at(-1).toolCalls[0].result.tombstone, true)
+  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /本地已删除/)
+  assert.equal((await fake.call('/stickers')).json().items.some((i) => i.id === target.id), false)
+  assert.equal((await fake.call('/stickers?status=deleted')).json().items.some((i) => i.id === target.id), true)
+  assert.equal(api.stickers.segmentFor(target, chatId), null, '删除后旧引用也不能发')
+  await until(() => api.stickers.status(target.id, { admin: true }).qq.state === 'removed')
 })
 
 test('翻聊天记录：读当前聊天更早的消息', async () => {

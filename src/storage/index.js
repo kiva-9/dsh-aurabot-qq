@@ -81,7 +81,7 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
   const messages = {
     ingest: ingestMessage,
     get: (id) => rowMessage(db.get('SELECT * FROM messages WHERE id = ?', id)),
-    byPlatformId: (chatId, pid, eventKind = 'message') => rowMessage(db.get('SELECT * FROM messages WHERE chat_id = ? AND platform_msg_id = ? AND event_kind = ? ORDER BY recv_seq DESC LIMIT 1', chatId, String(pid), eventKind)),
+    byPlatformId: (chatId, pid, eventKind = 'message', account) => rowMessage(account ? db.get('SELECT * FROM messages WHERE account_id = ? AND chat_id = ? AND platform_msg_id = ? AND event_kind = ? ORDER BY recv_seq DESC LIMIT 1', String(account), chatId, String(pid), eventKind) : db.get('SELECT * FROM messages WHERE chat_id = ? AND platform_msg_id = ? AND event_kind = ? ORDER BY recv_seq DESC LIMIT 1', chatId, String(pid), eventKind)),
     recent: (chatId, limit = 20) => db.all('SELECT * FROM messages WHERE chat_id = ? ORDER BY recv_seq DESC LIMIT ?', chatId, limit).map(rowMessage).reverse(),
     markRecalled: (chatId, pid) => db.run('UPDATE messages SET recalled_at = ? WHERE chat_id = ? AND platform_msg_id = ? AND recalled_at IS NULL', now(), chatId, String(pid)).changes,
   }
@@ -153,6 +153,9 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
     /** 请求的提出者由接收层确定，模型和工具不能改。 */
     create({ chatId, actorId, sourceMessageIds, replyTarget = null, policyRevision = 0, traceId: trc }) {
       if (!Array.isArray(sourceMessageIds) || !sourceMessageIds.length) throw new Error('请求必须关联来源消息')
+      const sources = sourceMessageIds.map((id) => messages.get(id))
+      if (sources.some((m) => !m || m.chatId !== chatId || m.authorId !== String(actorId))) throw new Error('请求来源必须属于当前聊天的同一提出者')
+      if (new Set(sources.map((m) => m.account)).size !== 1) throw new Error('请求不能混用不同账号的消息')
       const id = newId('req')
       const t = now()
       db.run(`INSERT INTO requests(id, chat_id, actor_id, source_message_ids_json, reply_target, policy_revision, epoch, trace_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -160,6 +163,19 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
       return requests.get(id)
     },
     get: (id) => rowRequest(db.get('SELECT * FROM requests WHERE id = ?', id)),
+    appendSource(id, messageId) {
+      return db.tx(() => {
+        const request = requests.get(id), message = messages.get(messageId)
+        const first = request && messages.get(request.sourceMessageIds[0])
+        if (!request || !message || !first || request.epoch !== epochs.current(request.chatId) ||
+          message.recalledAt != null || message.account !== first.account || message.chatId !== request.chatId ||
+          message.authorId !== request.actorId || ['canceled','cancel_requested','closed','expired'].includes(request.state)) throw new Error('补充消息不属于当前有效请求')
+        if (request.sourceMessageIds.includes(messageId)) return request
+        if (request.sourceMessageIds.length >= 64) throw new Error('当前请求已达到补充消息上限')
+        db.run('UPDATE requests SET source_message_ids_json=?, updated_at=? WHERE id=?', toJson([...request.sourceMessageIds,messageId]), now(),id)
+        return requests.get(id)
+      })
+    },
     setState: (id, state) => db.run('UPDATE requests SET state = ?, updated_at = ? WHERE id = ?', state, now(), id).changes,
   }
 

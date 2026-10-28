@@ -111,13 +111,13 @@ export async function runCommand(cmd, msg, deps) {
     case 'silent': {
       const min = Math.max(0, Math.min(7 * 24 * 60, Number.parseInt(cmd.arg, 10) || 0))
       mutes.set(msg.chatId, min)
-      mood?.nudge?.(-6, '主人让她闭嘴') // 有点委屈
+      mood?.nudge?.(hub.scopeFor(msg.chatId), -6, '主人让她闭嘴', { evidenceMessageIds: msg.dbId ? [msg.dbId] : [] })
       if (inGroup) hub.leaveTopic?.(msg.groupId)
       return min ? `好，我在${here}安静 ${min} 分钟` : `好，我在${here}先不说话了，想我了发 /active`
     }
     case 'active':
       mutes.clear(msg.chatId)
-      mood?.nudge?.(4, '主人让她回来说话')
+      mood?.nudge?.(hub.scopeFor(msg.chatId), 4, '主人让她回来说话', { evidenceMessageIds: msg.dbId ? [msg.dbId] : [] })
       if (inGroup) hub.joinTopic?.(msg.groupId)
       return inGroup ? '我回来啦' : '在呢'
     case 'quiet':
@@ -137,7 +137,7 @@ export async function runCommand(cmd, msg, deps) {
       const mu = mutes.until(msg.chatId)
       const lines = [
         `总开关：${cfg.enabled ? '开' : '关'}${cfg.dryRun ? '（试运行，不真发）' : ''}`,
-        ...(mood ? [`心情：${mood.label()}`] : []),
+        ...(mood ? [`心情：${mood.label(hub.scopeFor(msg.chatId))}`] : []),
         `今天：收到 ${st.received} 条，发出 ${st.sent} 条`,
         `${here}：${mu === undefined ? '正常说话' : mu === 0 ? '闭嘴中' : '闭嘴到 ' + new Date(mu).toLocaleTimeString().slice(0, 5)}`,
       ]
@@ -178,11 +178,16 @@ export async function runCommand(cmd, msg, deps) {
       return deps.song.request({ song: name, pitch: m ? Number(m[2]) : undefined, chatId: msg.chatId }).message
     }
     case 'mood':
-      return mood ? `现在${mood.label()}` : '心情模块关着'
+      return mood ? `现在${mood.label(hub.scopeFor(msg.chatId))}` : '心情模块关着'
     case 'remember': {
       if (!memory) return '记忆模块关着'
       if (!cmd.arg) return '要我记住什么呀？比如 /remember 我不吃香菜'
-      const r = memory.add({ text: cmd.arg, aboutName: cfg.ownerName || '主人', about: cfg.ownerQQ, importance: 0.8, source: 'panel', chatId: msg.chatId })
+      const speakerId = String(msg.userId || cfg.ownerQQ)
+      const r = memory.add({ text: cmd.arg, subject: speakerId, aboutName: cfg.ownerName || '主人', predicate: 'explicit_note', value: cmd.arg,
+        speakerId, polarity: 'positive', modality: 'asserted', stability: 'uncertain', conditions: null,
+        eventTime: null, validFrom: null, validTo: null, importance: 0.8, source: 'command',
+        scope: { account: String(cfg.botQQ), chat: msg.chatId, persona: '' }, actorId: speakerId,
+        ...(msg.dbId ? { evidenceMessageIds: [msg.dbId] } : { manualEvidence: { kind: 'manual', text: msg.text || cmd.arg, speakerId, actorId: speakerId, confirmed: true, eventTime: Date.now() } }) })
       return r.ok ? '记住了' : '没记上：' + (r.message || '')
     }
     case 'reset':

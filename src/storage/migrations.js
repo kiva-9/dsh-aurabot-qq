@@ -243,6 +243,27 @@ export const MIGRATIONS = [
   },
 ]
 
+MIGRATIONS.push({
+  version: 6,
+  name: '生图任务冻结服务配置，重试和查进度沿用提交时的配置',
+  up: `CREATE TABLE image_job_configs (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(id),
+    profile_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );`,
+})
+
+MIGRATIONS.push({
+  version: 7,
+  name: '请求诊断与可回放决策记录',
+  up: `CREATE TABLE diagnostic_events (
+    id TEXT PRIMARY KEY, account_id TEXT NOT NULL, chat_id TEXT NOT NULL,
+    trace_id TEXT, request_id TEXT, kind TEXT NOT NULL, at INTEGER NOT NULL, payload_json TEXT NOT NULL
+  );
+  CREATE INDEX diagnostic_trace ON diagnostic_events(account_id,trace_id,at);
+  CREATE INDEX diagnostic_chat ON diagnostic_events(account_id,chat_id,at);`,
+})
+
 export const LATEST_VERSION = MIGRATIONS.at(-1).version
 
 export function schemaVersion(db) {
