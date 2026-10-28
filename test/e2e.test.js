@@ -47,6 +47,7 @@ async function brain({ preset, text, images, callTool }) {
   if (/^【(私聊|群聊)/.test(text) && text.includes('戳了戳你')) return '干嘛戳我<poke>'
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
   if (/^【私聊/.test(text) && text.includes('表情删除测试')) { const r = await callTool('qq_edit_sticker', { sticker: '改过的名字', delete: true }); return r.message }
+  if (/^【私聊/.test(text) && text.includes('工具上限测试')) { await callTool('qq_chat_history', { count: 1 }); const r = await callTool('qq_chat_history', { count: 1 }); return r.message }
   if (/^【私聊/.test(text) && text.includes('翻聊天记录')) { const r = await callTool('qq_chat_history', { count: 5 }); return r.message.split('\n')[0] }
   if (text.includes('改昵称测试')) { const r = await callTool('qq_set_nickname', { name: '小鲸鱼' }); return r ? r.message : '没这个工具' }
   if (text.includes('改签名测试')) { const r = await callTool('qq_set_signature', { text: '今天也要开心' }); return r ? r.message : '没这个工具' }
@@ -488,6 +489,17 @@ test('引用：回复之前那张图说改一下，被引用的原话和那张�
   const t = fake.turns.at(-1)
   assert.match(t.userText, /回复 xiaoming 的「\[图片\]这张海边」/)
   assert.equal(t.images, 1, '被引用那条里的图带上了')
+})
+
+test('每轮工具次数有上限：超过就不执行，让她先把结果说出来', async () => {
+  await fake.call('/save', { toolCallsPerTurn: 1 })
+  mock.push(priv(OWNER, text('工具上限测试')))
+  await until(() => fake.turns.at(-1)?.userText.includes('工具上限测试'))
+  const calls = fake.turns.at(-1).toolCalls
+  await fake.call('/save', { toolCallsPerTurn: 6 })
+  assert.equal(calls.length, 2)
+  assert.notEqual(calls[0].result.message, calls[1].result.message)
+  assert.match(calls[1].result.message, /已经调用了 1 次工具/)
 })
 
 test('连发合并：一口气发两句，她只回一次', async () => {

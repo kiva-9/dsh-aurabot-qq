@@ -142,6 +142,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-pre{white-space:pre-wrap;word-break:break-word;background:var(--ab-card-2);border:1px solid var(--ab-line);border-radius:10px;padding:10px 12px;font-size:12px;max-height:420px;overflow:auto;margin:0}
 .ab-persona{display:grid;grid-template-columns:300px 1fr;gap:12px}
 .ab-brow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0}.ab-brow>span{color:var(--ab-sub);white-space:nowrap}
+.ab-span{grid-column:1/-1}
 .ab-psec{border-top:1px solid var(--ab-line);margin-top:14px;padding-top:10px}.ab-psec h4{margin:0 0 6px;font-size:13px;font-weight:600}
 @media (max-width:760px){.ab-persona{grid-template-columns:1fr}}
 .ab-plist{display:flex;flex-direction:column;gap:6px}
@@ -842,13 +843,36 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Btn, { kind: 'ghost', disabled: !dirty || !!card.archivedAt, onClick: saveDraft }, '存草稿'),
             h(Btn, { kind: 'primary', disabled: (!dirty && !card.draft) || !!card.archivedAt, onClick: publish }, '发布'))) : null,
         view === 'preview' ? h(PersonaPreview, { layers: form.layers, published: card.published }) : null,
-        view === 'history' ? h('div', { className: 'ab-list' }, revs.map((r) => h(PersonaRevision, { key: r.revision, id: card.id, rev: r, current: card.published && card.published.revision === r.revision, onRollback: async () => {
+        view === 'history' ? h('div', { className: 'ab-list' }, revs.length ? null : h(Empty, { text: '还没发布过' }), revs.map((r) => h(PersonaRevision, { key: r.revision, id: card.id, rev: r, current: card.published && card.published.revision === r.revision, onRollback: async () => {
           if (dirty && !confirm('编辑框里没保存的改动会丢掉，继续回滚？')) return
           if (!confirm('把第 ' + r.revision + ' 版的内容发布成新的一版？')) return
           handle(await post('/persona/rollback', { id: card.id, revision: r.revision, editRevision: card.editRevision }), '回滚好了（发布成了新的一版）').then(() => loadCard(card.id))
         } }))) : null,
         ),
+        h(EffectivePrompt, { st, bindings }),
       )
+    }
+
+    /** 某个聊天实际会用的提示词：哪张卡哪个版本（从哪层绑定来的）、运行规则、模型。 */
+    function EffectivePrompt({ st, bindings }) {
+      const chats = Array.from(new Set([...Object.keys(st.sessions || {}).filter((k) => !k.startsWith('system:')), ...(st.config.allow.groups || []).map((g) => 'group:' + g), 'private:' + st.config.ownerQQ, ...(st.config.allow.private || []).map((q) => 'private:' + q)])).filter((c) => /^(group|private):\d+$/.test(c))
+      const [chat, setChat] = useState(chats[0] || '')
+      const [p, setP] = useState(null)
+      const [open, setOpen] = useState('')
+      useEffect(() => { if (chat) get('/prompt/preview?chatId=' + encodeURIComponent(chat)).then(setP) }, [chat, JSON.stringify(bindings)])
+      const label = (c) => (c === 'private:' + st.config.ownerQQ ? '主人私聊' : c.replace('group:', '群 ').replace('private:', '私聊 '))
+      return h(Card, { className: 'ab-span', title: '某个聊天实际用的提示词', desc: '按现在的绑定和设置，这个聊天下一轮会拿到的人设和规则。改了卡或绑定后这里跟着变。',
+        right: h(Select, { value: chat, width: 180, options: chats.map((c) => ({ value: c, label: label(c), desc: c })), onChange: setChat }) },
+        !p ? h(Empty, { icon: '⏳', text: '加载中…' }) : !p.ok ? h('div', { className: 'ab-note err' }, p.message) : h('div', null,
+          h('div', { className: 'ab-kv' },
+            h('span', null, '人设'), h('span', null, p.persona.error ? h('b', { style: { color: 'var(--ab-err)' } }, p.persona.error) : p.persona.name + '（' + p.persona.id + '）第 ' + p.persona.revision + ' 版 · 来自「' + scopeLabel(p.persona.scope) + '」'),
+            h('span', null, '规则'), h('span', null, p.rulesKind === 'private' ? '主人私聊（完整权限）' : '群聊 / 其他人（只有 QQ 工具）'),
+            h('span', null, '模型'), h('span', null, p.model ? p.model.provider + ' / ' + p.model.model + (p.model.reasoningEffort ? ' · 思考 ' + p.model.reasoningEffort : '') : '跟随 DSH 默认'),
+            h('span', null, '工具上限'), h('span', null, '每轮 ' + p.toolCallsPerTurn + ' 次')),
+          h('div', { className: 'ab-flex', style: { marginTop: 10 } },
+            h(Btn, { small: true, kind: open === 'persona' ? 'primary' : 'ghost', onClick: () => setOpen(open === 'persona' ? '' : 'persona') }, '人设正文 ' + p.personaText.length + ' 字'),
+            h(Btn, { small: true, kind: open === 'rules' ? 'primary' : 'ghost', onClick: () => setOpen(open === 'rules' ? '' : 'rules') }, '运行规则 ' + p.rules.length + ' 字')),
+          open ? h('pre', { className: 'ab-pre', style: { marginTop: 8 } }, open === 'persona' ? p.personaText : p.rules) : null))
     }
 
     /** 预览：这张卡实际交给模型的正文（草稿 / 线上）。 */
@@ -1126,6 +1150,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             cur ? h(Btn, { small: true, onClick: () => test({ provider: draft.model.provider, model: draft.model.model }) }, '测速') : null,
             cur && ping[cur] ? h('span', { className: 'ab-muted ab-small' }, ping[cur]) : null),
         ),
+        h(Card, { title: '每轮工具次数', desc: '一轮回复里她最多调用几次插件工具（画图、群管、翻聊天记录……），防止反复调用烧额度。DSH 自带的电脑工具不算在内。' },
+          h(Row, { label: '每轮最多' }, h(Range, { min: 1, max: 20, value: draft.toolCallsPerTurn || 6, onChange: (v) => setDraft(setPath(draft, 'toolCallsPerTurn', v)), fmt: (v) => v + ' 次' }))),
         h(ChatModels, { draft, setDraft, list }),
         h(RoleModels, { draft, setDraft, list }),
         h(Card, { title: '可用的模型', desc: '点「测速」会真的问一次模型（花一点点额度），看它回一句话要多久。' },
@@ -2134,7 +2160,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         stickers: Stickers, imagegen: ImageGen, speakup: SpeakUp, mood: Mood, song: Song, bili: Bili, local: LocalApi, modules: Modules, logs: Logs,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
-      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge'], model: ['model', 'chatModels', 'roles'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], local: ['local'] }
+      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge'], model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], speakup: ['speakUp'], mood: ['mood', 'memory'], song: ['song'], bili: ['bili'], local: ['local'] }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }

@@ -300,7 +300,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
   function mount(agent, chat, level) {
     const sid = sessionKey(agent.session?.id ?? agent.id)
     const built = level !== 'chat' && typeof buildTools === 'function' ? buildTools({ chat, level, sessionId: sid }) : []
-    const tools = chat.kind === 'group' ? built.map(withMessageRef) : built
+    const tools = (chat.kind === 'group' ? built.map(withMessageRef) : built).map((t) => withBudget(t, sid))
     const denied = (() => { try { return hooks?.deniedTools?.() || [] } catch (error) { return [] } })()
     const toolsKey = tools.map((t) => t.name).sort().join(',') + '|' + denied.join(',')
     const prev = mounted.get(agent)
@@ -340,6 +340,25 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
       log.debug('挂上下文失败：', error.message)
     }
     mounted.set(agent, { chatId: chat.chatId, offs, toolsKey })
+  }
+
+  /** 一轮里插件工具的调用次数有上限：到了就告诉模型先把结果说给对方，别再调。 */
+  function withBudget(tool, sid) {
+    return {
+      ...tool,
+      execute: (args, exec) => {
+        const st = turnState.get(sessionKey(sid))
+        const limit = getConfig().toolCallsPerTurn
+        if (st) {
+          st.toolCalls = (st.toolCalls || 0) + 1
+          if (st.toolCalls > limit) {
+            log.info(`${chatOfSession(sid)}：这一轮工具调用到上限（${limit} 次），${tool.name} 没执行`)
+            return { ok: false, message: `这一轮已经调用了 ${limit} 次工具，先别再调了，把现在的结果告诉对方` }
+          }
+        }
+        return tool.execute(args, exec)
+      },
+    }
   }
 
   // ---------- 发到 QQ ----------
@@ -1214,6 +1233,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     if (!opts.steer || !st.persona) st.persona = opts.persona || null
     if (senderId) st.senders.add(String(senderId))
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
+    if (!opts.steer) st.toolCalls = 0
     // 这一轮在回哪些请求（插话时追加），以及开始时的会话代次
     st.requests = opts.steer ? [...(st.requests || []), ...(opts.requests || [])] : [...(opts.requests || [])]
     if (!opts.steer || st.epoch === undefined) st.epoch = storage.epochs.current(chat.chatId)
@@ -1434,6 +1454,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, personaOf, rep
     get lastBotToOwner() { return lastBotToOwner },
     get selfId() { return selfId },
     agentCaps: () => agentCaps,
+    /** 这个聊天现在会用哪个模型（主人按聊天选的 > 全局 > DSH 默认）。 */
+    modelFor: (chat) => targetModel(chat),
     /** 正在跑的这一轮用的人设快照（没在跑返回 null）。 */
     turnPersona: (sessionId) => (running.has(chatOfSession(sessionId)) ? turnState.get(sessionKey(sessionId))?.persona || null : null),
     groupNames,

@@ -598,6 +598,25 @@ export function apply(ctx) {
     return { ok: true, bindings: out, message: '绑定好了，下一轮起生效（换了身份的聊天会开新会话）' }
   })
   route('/persona/resolve', async (req) => ({ ok: true, ...personas.snapshotFor(query(req).chatId) }))
+  // 某个聊天实际生效的提示词：人设（哪张卡、哪个版本、从哪层绑定来的）+ 运行规则 + 模型
+  route('/prompt/preview', async (req) => {
+    const chatId = String(query(req).chatId || '')
+    const m = /^(private|group):(\d+)$/.exec(chatId)
+    if (!m) return { ok: false, message: '聊天 ID 要像 group:123 或 private:456' }
+    const snap = personas.snapshotFor(chatId)
+    const kind = m[1] === 'private' && m[2] === String(cfg.ownerQQ) && cfg.ownerLevel === 'full' ? 'private' : 'social'
+    const chat = m[1] === 'group' ? { chatId, kind: 'group', groupId: m[2] } : { chatId, kind: 'private', userId: m[2] }
+    const ro = mods ? { off: mods.builtinOff(), extra: mods.rules(kind) } : {}
+    return {
+      ok: true,
+      persona: snap.error ? { error: snap.error, scope: snap.scope } : { id: snap.personaId, name: snap.name, revision: snap.revision, scope: snap.scope },
+      personaText: rewrite('persona', personas.textOf(snap)),
+      rules: rewrite('rules', rulesText(kind, cfg, ro), kind),
+      rulesKind: kind,
+      model: hub.modelFor(chat),
+      toolCallsPerTurn: cfg.toolCallsPerTurn,
+    }
+  })
   route('/persona/export', async (req) => ({ ok: true, card: ps.exportCard(query(req).id) }))
   route('/persona/import', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.importCard(b.card, { id: b.id }) } })
 
