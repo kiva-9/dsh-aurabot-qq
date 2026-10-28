@@ -28,6 +28,8 @@ import { createUpdateChecker, changelogSection } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
 import { rulesText } from './persona/personas.js'
 import { createPersonaService } from './persona/service.js'
+import { compilePersona } from './persona/compiler.js'
+import { normalizeLayers } from './persona/store.js'
 import { createModules, API_VERSION } from './core/modules.js'
 import { createBridge } from './core/bridge.js'
 import { BUILTINS } from './modules/index.js'
@@ -297,7 +299,7 @@ export function apply(ctx) {
       const r = await fn()
       if (r !== undefined) send(res, 200, r)
     } catch (error) {
-      send(res, 200, { ok: false, message: redact(String(error && error.message ? error.message : error)) })
+      send(res, 200, { ok: false, message: redact(String(error && error.message ? error.message : error)), ...(error?.code ? { code: error.code } : {}), ...(error?.scopes ? { scopes: error.scopes } : {}) })
     }
   }
   const route = (path, handler) => ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PREFIX + path, handler: (req, res) => answer(res, () => handler(req, res)) }), `aurabot: 路由 ${path}`)
@@ -570,6 +572,9 @@ export function apply(ctx) {
 
   // 人设（新接口：分层、草稿 / 发布 / 回滚、按聊天绑定）
   const ps = personas.store
+  route('/persona/list', async () => ({ ok: true, list: ps.list().map((p) => ({ id: p.id, name: p.name, origin: p.origin, revision: p.published?.revision || 0, hasDraft: Boolean(p.draft), archived: Boolean(p.archivedAt), tags: (p.draft?.layers || p.published?.layers)?.tags || [] })), bindings: ps.bindings() }))
+  route('/persona/preview', async (req) => { const b = await readBody(req); return { ok: true, text: compilePersona(normalizeLayers(b.layers || {})) } })
+  route('/persona/remove', async (req) => { const b = await readBody(req); ps.remove(b.id); return { ok: true } })
   route('/persona/full', async (req) => ({ ok: true, persona: ps.get(query(req).id), revisions: ps.revisions(query(req).id) }))
   route('/persona/revision', async (req) => ({ ok: true, revision: ps.revision(query(req).id, query(req).revision) }))
   route('/persona/create', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.create({ id: b.id, name: b.name, layers: b.layers }) } })

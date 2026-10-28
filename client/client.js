@@ -139,7 +139,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-log .a{flex:none;color:var(--ab-sea);min-width:62px}
 .ab-log .m{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
 .ab-log.warn .m{color:var(--ab-warn)}.ab-log.error .m{color:var(--ab-err)}.ab-log.debug .m{color:var(--ab-dim)}
-.ab-persona{display:grid;grid-template-columns:240px 1fr;gap:12px}
+.ab-pre{white-space:pre-wrap;word-break:break-word;background:var(--ab-card-2);border:1px solid var(--ab-line);border-radius:10px;padding:10px 12px;font-size:12px;max-height:420px;overflow:auto;margin:0}
+.ab-persona{display:grid;grid-template-columns:300px 1fr;gap:12px}
+.ab-brow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0}.ab-brow>span{color:var(--ab-sub);white-space:nowrap}
+.ab-psec{border-top:1px solid var(--ab-line);margin-top:14px;padding-top:10px}.ab-psec h4{margin:0 0 6px;font-size:13px;font-weight:600}
 @media (max-width:760px){.ab-persona{grid-template-columns:1fr}}
 .ab-plist{display:flex;flex-direction:column;gap:6px}
 .ab-pitem{text-align:left;border:1px solid var(--ab-line);background:var(--ab-card);border-radius:10px;padding:10px 12px;cursor:pointer;color:var(--ab-text);font:inherit}
@@ -693,43 +696,238 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h('div', { className: 'ab-muted ab-small', style: { marginTop: 6 } }, '这是面板里显示的头像；点「同步成 QQ 头像」才会改机器人号在 QQ 上的头像。'))
     }
 
+// ---------------- 人格：卡片列表 + 分层编辑（草稿 / 发布 / 历史 / 回滚）+ 绑定 ----------------
+    const PROACTIVITY = [{ value: 'low', label: '话少' }, { value: 'normal', label: '正常' }, { value: 'high', label: '话多' }]
+    const ORIGIN = { builtin: '内置', legacy: '旧版导入', user: '自己建的', import: '导入的' }
+    const blankLayers = () => ({ identity: { name: '', callOwner: '', core: '' }, behavior: { proactivity: 'normal', text: '' }, style: { text: '', examples: [], banned: [] }, appearance: { text: '', referenceAssetIds: [] }, voice: { voice: '', speed: 1 }, policy: { mood: true, learnExpressions: true, useExpressions: true }, tags: [] })
+    const scopeLabel = (s) => (s === 'global' ? '全局默认' : s === 'kind:group' ? '所有群默认' : s === 'kind:private' ? '所有私聊默认' : s.replace(/^chat:group:/, '群 ').replace(/^chat:private:/, '私聊 '))
+
     function Persona({ st, toast, reload }) {
-      const [list, setList] = useState(st.personas)
-      const [current, setCurrent] = useState(st.config.persona.current)
+      const [list, setList] = useState(null)
+      const [bindings, setBindings] = useState([])
+      const [showArchived, setShowArchived] = useState(false)
       const [sel, setSel] = useState(st.config.persona.current)
-      const [edit, setEdit] = useState(null)
+      const [card, setCard] = useState(null) // 服务端的这张卡
+      const [revs, setRevs] = useState([])
+      const [form, setForm] = useState(null) // 编辑中的 { name, layers }
       const [dirty, setDirty] = useState(false)
-      const load = async (id) => {
-        const r = await get('/persona/get?id=' + encodeURIComponent(id))
-        if (r.ok) { setEdit({ id: r.persona.id, name: r.persona.name, tags: (r.persona.tags || []).join('，'), body: r.persona.body }); setDirty(false) }
+      const [view, setView] = useState('edit') // edit / history / preview
+      const [creating, setCreating] = useState(null) // { id, name }
+      const loadSeq = useRef(0)
+
+      const loadList = async () => {
+        const r = await get('/persona/list')
+        if (r.ok) { setList(r.list); setBindings(r.bindings) } else toast(r.message)
       }
-      useEffect(() => { load(sel) }, [sel])
-      const refresh = async () => { const r = await get('/personas'); if (r.ok) { setList(r.list); setCurrent(r.current) } }
-      const save = async () => {
-        const r = await post('/persona/save', { id: edit.id, name: edit.name, tags: edit.tags.split(/[,，\s]+/).filter(Boolean), body: edit.body })
-        toast(r.message || (r.ok ? '保存好了' : '没保存成功'))
-        if (r.ok) { setDirty(false); refresh() }
+      const loadCard = async (id) => {
+        const seq = ++loadSeq.current // 切卡时丢掉迟到的加载结果
+        const r = await get('/persona/full?id=' + encodeURIComponent(id))
+        if (seq !== loadSeq.current) return
+        if (!r.ok || !r.persona) { setCard(null); setForm(null); return }
+        setCard(r.persona)
+        setRevs(r.revisions || [])
+        const layers = clone((r.persona.draft || r.persona.published || {}).layers || blankLayers())
+        setForm({ name: r.persona.name, layers })
+        setDirty(false)
       }
-      const upd = (k) => (e) => { setEdit({ ...edit, [k]: e.target.value }); setDirty(true) }
+      useEffect(() => { loadList() }, [])
+      useEffect(() => { if (sel) loadCard(sel) }, [sel])
+
+      const pick = (id) => {
+        if (id === sel) return
+        if (dirty && !confirm('这张卡有没保存的改动，切走会丢掉。继续？')) return
+        setView('edit')
+        setSel(id)
+      }
+      const setL = (path, v) => { setForm({ ...form, layers: setPath(form.layers, path, v) }); setDirty(true) }
+      const L = (path) => getPath(form.layers, path)
+      const handle = async (r, okMsg) => {
+        if (r.ok) {
+          if (okMsg || r.message) toast(okMsg || r.message, 'ok')
+          await loadList()
+          if (r.persona) { setCard(r.persona); setForm({ name: r.persona.name, layers: clone((r.persona.draft || r.persona.published).layers) }); setDirty(false) }
+          return true
+        }
+        if (r.code === 'STALE') toast('这张卡在别处改过了：点「重新载入」看最新的（你的改动还在编辑框里，可以先复制出来）', 'err')
+        else toast(r.message || '没成功', 'err')
+        return false
+      }
+      const saveDraft = async () => handle(await post('/persona/draft', { id: card.id, name: form.name, layers: form.layers, editRevision: card.editRevision }), '草稿存好了（还没生效，点「发布」才生效）')
+      const publish = async () => {
+        let c = card
+        if (dirty) {
+          const r = await post('/persona/draft', { id: card.id, name: form.name, layers: form.layers, editRevision: card.editRevision })
+          if (!(await handle(r))) return
+          c = r.persona
+        }
+        await handle(await post('/persona/publish', { id: c.id, editRevision: c.editRevision }), '发布了，下一轮回复起生效')
+        loadCard(c.id)
+      }
+      const used = (id) => bindings.filter((b) => b.personaId === id).map((b) => b.scope)
+
+      const listView = list ? list.filter((p) => showArchived || !p.archived) : []
+      const legacy = form && form.layers.legacy
+
       return h('div', { className: 'ab-persona' },
         h('div', { className: 'ab-plist' },
-          list.map((p) => h('button', { key: p.id, type: 'button', className: cx('ab-pitem', sel === p.id && 'on'), onClick: () => setSel(p.id) },
-            h('div', { className: 'nm' }, p.name, p.id === current ? h('span', { className: 'ab-badge' }, '正在用') : null),
-            h('div', { className: 'tg' }, (p.tags || []).join(' · ') || p.id + ' · ' + p.chars + ' 字'))),
-          h(Btn, { kind: 'ghost', onClick: () => { const id = 'persona-' + Date.now().toString(36); setEdit({ id, name: '新人格', tags: '', body: '你是……\n\n【说话方式】\n- 短句、口语，一次只说一两句。' }); setSel(id); setDirty(true) } }, '＋ 新建人格'),
+          list === null ? h(Empty, { icon: '⏳', text: '加载中…' }) : listView.map((p) => h('button', { key: p.id, type: 'button', className: cx('ab-pitem', sel === p.id && 'on'), onClick: () => pick(p.id) },
+            h('div', { className: 'nm' }, p.name,
+              used(p.id).includes('global') ? h('span', { className: 'ab-badge' }, '全局默认') : used(p.id).length ? h('span', { className: 'ab-badge' }, '绑定 ' + used(p.id).length + ' 处') : null,
+              p.hasDraft ? h('span', { className: 'ab-badge warn' }, '有草稿') : null,
+              p.archived ? h('span', { className: 'ab-badge' }, '已归档') : null),
+            h('div', { className: 'tg' }, (p.tags.length ? p.tags.join(' · ') + ' · ' : '') + (p.revision ? '第 ' + p.revision + ' 版' : '没发布过') + ' · ' + (ORIGIN[p.origin] || p.origin)))),
+          creating ? h(Card, { title: '新建一张卡' },
+            h(Row, { label: 'ID', hint: '英文字母、数字、- 和 _，以后不能改' }, h('input', { className: 'ab-input', value: creating.id, onChange: (e) => setCreating({ ...creating, id: e.target.value }) })),
+            h(Row, { label: '名字' }, h('input', { className: 'ab-input', value: creating.name, onChange: (e) => setCreating({ ...creating, name: e.target.value }) })),
+            h('div', { className: 'ab-flex' }, h('div', { className: 'ab-spacer' }),
+              h(Btn, { small: true, kind: 'ghost', onClick: () => setCreating(null) }, '取消'),
+              h(Btn, { small: true, kind: 'primary', onClick: async () => {
+                const layers = blankLayers()
+                layers.identity.name = creating.name
+                const r = await post('/persona/create', { id: creating.id, name: creating.name, layers })
+                if (await handle(r, '建好了，填好内容再发布')) { setCreating(null); setSel(creating.id) }
+              } }, '新建'))) : h('div', { className: 'ab-flex' },
+            h(Btn, { kind: 'ghost', onClick: () => setCreating({ id: 'persona-' + Date.now().toString(36), name: '新人设' }) }, '＋ 新建'),
+            h(ImportPersona, { toast, onDone: async (id) => { await loadList(); setSel(id) } })),
+          h('label', { className: 'ab-small ab-muted', style: { display: 'block', marginTop: 6 } }, h('input', { type: 'checkbox', checked: showArchived, onChange: (e) => setShowArchived(e.target.checked) }), ' 显示已归档的卡'),
+          h(PersonaBindings, { st, list: list || [], bindings, toast, onChange: (b) => { setBindings(b); reload() } }),
           h(AvatarCard, { st, toast, reload }),
         ),
-        edit ? h(Card, { title: '编辑人格', desc: '人格写在系统提示词的最前面。保存后，大肥鱼下一轮回复起就按新的来。',
-          right: h('div', { className: 'ab-flex' },
-            edit.id !== current ? h(Btn, { small: true, onClick: async () => { const r = await post('/persona/use', { id: edit.id }); toast(r.message); refresh(); reload() } }, '设为当前') : null,
-            edit.id !== current ? h(Btn, { small: true, kind: 'danger', onClick: async () => { if (!confirm('删掉这个人格？')) return; const r = await post('/persona/delete', { id: edit.id }); if (r.ok) { setList(r.list); setSel(current) } else toast(r.message) } }, '删除') : null) },
-          h(Row, { label: '名字' }, h('input', { className: 'ab-input', value: edit.name, onChange: upd('name') })),
-          h(Row, { label: '标签', hint: '用逗号隔开' }, h('input', { className: 'ab-input', value: edit.tags, onChange: upd('tags') })),
-          h('div', { style: { marginTop: 8 } }, h('textarea', { className: 'ab-textarea', style: { minHeight: 380 }, value: edit.body, onChange: upd('body') })),
-          h('div', { className: 'ab-flex', style: { marginTop: 10 } }, h('span', { className: 'ab-muted ab-small' }, edit.body.length + ' 字'), h('div', { className: 'ab-spacer' }), h(Btn, { kind: 'primary', disabled: !dirty, onClick: save }, dirty ? '保存人格' : '已保存')),
-        ) : h(Card, null, h(Empty, { icon: '⏳', text: '加载中…' })),
+        !card || !form ? h(Card, null, h(Empty, { icon: list && !list.length ? '🃏' : '⏳', text: list && !list.length ? '还没有人设卡' : '加载中…' })) : h(Card, {
+          title: form.name || card.id,
+          desc: (card.published ? '线上是第 ' + card.published.revision + ' 版' : '还没发布过') + (card.draft ? '，有没发布的草稿' : '') + (dirty ? '，编辑框里有没保存的改动' : '') + '。改动先存成草稿，点「发布」后从下一轮回复起生效；发布过的版本不会被改，可以随时回滚。',
+          right: h(Seg, { value: view, onChange: setView, options: [{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }, { value: 'history', label: '历史 ' + revs.length }] }),
+        },
+        card.archivedAt ? h('div', { className: 'ab-note' }, '这张卡已归档，不能改也不能绑定。', h(Btn, { small: true, onClick: async () => handle(await post('/persona/unarchive', { id: card.id }), '取消归档了') }, '取消归档'), ' ',
+          h(Btn, { small: true, kind: 'danger', onClick: async () => { if (!confirm('彻底删除这张卡和它的所有版本？删除后不能恢复。')) return; const r = await post('/persona/remove', { id: card.id }); if (r.ok) { toast('删掉了'); setSel(st.config.persona.current); loadList() } else toast(r.message, 'err') } }, '彻底删除')) : null,
+        view === 'edit' ? h('div', null,
+          h(Row, { label: '卡片名字' }, h('input', { className: 'ab-input', value: form.name, onChange: (e) => { setForm({ ...form, name: e.target.value }); setDirty(true) } })),
+          h(Row, { label: '标签', hint: '逗号隔开，只用来分类' }, h(ListArea, { value: L('tags') || [], onChange: (v) => setL('tags', v), placeholder: '甜美，粘人' })),
+          legacy ? h('div', { className: 'ab-psec' },
+            h('h4', null, '旧版原文'),
+            h('p', { className: 'ab-desc' }, '这张卡是从旧版人格原样导入的：整篇正文就是全部设定。下面的分层内容（如果填了）会补在原文后面。'),
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 260 }, value: legacy.body, onChange: (e) => setL('legacy.body', e.target.value) }),
+            h('div', { className: 'ab-muted ab-small' }, legacy.body.length + ' 字')) : null,
+          h('div', { className: 'ab-psec' },
+            h('h4', null, '她是谁'),
+            h(Row, { label: '名字', hint: '她怎么称呼自己' }, h('input', { className: 'ab-input', value: L('identity.name') || '', onChange: (e) => setL('identity.name', e.target.value) })),
+            h(Row, { label: '怎么叫主人', hint: '留空就用「权限」页里的称呼' }, h('input', { className: 'ab-input', value: L('identity.callOwner') || '', onChange: (e) => setL('identity.callOwner', e.target.value) })),
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 110 }, placeholder: '身份、关系、稳定的性格……', value: L('identity.core') || '', onChange: (e) => setL('identity.core', e.target.value) })),
+          h('div', { className: 'ab-psec' },
+            h('h4', null, '平时怎么做'),
+            h(Row, { label: '主动程度', hint: '仍然受「聊天」页的频率限制' }, h(Seg, { value: L('behavior.proactivity'), options: PROACTIVITY, onChange: (v) => setL('behavior.proactivity', v) })),
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 80 }, placeholder: '群里什么时候接话、什么时候追问……', value: L('behavior.text') || '', onChange: (e) => setL('behavior.text', e.target.value) })),
+          h('div', { className: 'ab-psec' },
+            h('h4', null, '说话方式'),
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 80 }, placeholder: '用词、句子长短、口头禅……', value: L('style.text') || '', onChange: (e) => setL('style.text', e.target.value) }),
+            h(Row, { label: '示例', hint: '一行一句她会说的话' }, h(ListArea, { value: L('style.examples') || [], onChange: (v) => setL('style.examples', v), placeholder: '哼 谁要你夸' })),
+            h(Row, { label: '别说的话', hint: '一行一个' }, h(ListArea, { value: L('style.banned') || [], onChange: (v) => setL('style.banned', v), placeholder: '综上所述' }))),
+          h('div', { className: 'ab-psec' },
+            h('h4', null, '样子与声音'),
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 70 }, placeholder: '外观描述（画她自己时也会用到）', value: L('appearance.text') || '', onChange: (e) => setL('appearance.text', e.target.value) }),
+            h(Row, { label: '音色', hint: '留空用「语音」页的默认音色' }, h('input', { className: 'ab-input', value: L('voice.voice') || '', onChange: (e) => setL('voice.voice', e.target.value) })),
+            h(Row, { label: '语速' }, h(Range, { min: 0.5, max: 2, step: 0.1, value: L('voice.speed') || 1, onChange: (v) => setL('voice.speed', v), fmt: (v) => Number(v).toFixed(1) + '×' }))),
+          h('div', { className: 'ab-psec' },
+            h('h4', null, '情绪与学习'),
+            h(Row, { label: '有心情起伏' }, h(Switch, { on: L('policy.mood') !== false, onChange: (v) => setL('policy.mood', v) })),
+            h(Row, { label: '学群友的说话方式', hint: '只学，不一定用' }, h(Switch, { on: L('policy.learnExpressions') !== false, onChange: (v) => setL('policy.learnExpressions', v) })),
+            h(Row, { label: '用学到的说话方式' }, h(Switch, { on: L('policy.useExpressions') !== false, onChange: (v) => setL('policy.useExpressions', v) }))),
+          h('div', { className: 'ab-flex', style: { marginTop: 12, flexWrap: 'wrap' } },
+            h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (dirty && !confirm('丢掉编辑框里没保存的改动？')) return; loadCard(card.id) } }, '重新载入'),
+            card.draft && card.published ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('丢掉草稿，回到线上的第 ' + card.published.revision + ' 版？')) return; handle(await post('/persona/discard', { id: card.id, editRevision: card.editRevision }), '草稿丢掉了') } }, '丢弃草稿') : null,
+            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const nid = card.id + '-copy'; const r = await post('/persona/duplicate', { id: card.id, newId: nid }); if (await handle(r, '复制了一张')) setSel(nid) } }, '复制一张'),
+            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await get('/persona/export?id=' + encodeURIComponent(card.id)); if (!r.ok) return toast(r.message, 'err'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.card, null, 2)], { type: 'application/json' })); a.download = card.id + '.persona.json'; a.click() } }, '导出'),
+            !card.archivedAt ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('归档这张卡？归档后不能改也不能绑定，随时可以取消归档。')) return; const r = await post('/persona/archive', { id: card.id, editRevision: card.editRevision }); if (r.code === 'IN_USE') toast('还绑定在：' + r.scopes.map(scopeLabel).join('、') + '。先在左边「绑定」里换成别的卡', 'err'); else handle(r, '归档了') } }, '归档') : null,
+            h('div', { className: 'ab-spacer' }),
+            h(Btn, { kind: 'ghost', disabled: !dirty || !!card.archivedAt, onClick: saveDraft }, '存草稿'),
+            h(Btn, { kind: 'primary', disabled: (!dirty && !card.draft) || !!card.archivedAt, onClick: publish }, '发布'))) : null,
+        view === 'preview' ? h(PersonaPreview, { layers: form.layers, published: card.published }) : null,
+        view === 'history' ? h('div', { className: 'ab-list' }, revs.map((r) => h(PersonaRevision, { key: r.revision, id: card.id, rev: r, current: card.published && card.published.revision === r.revision, onRollback: async () => {
+          if (dirty && !confirm('编辑框里没保存的改动会丢掉，继续回滚？')) return
+          if (!confirm('把第 ' + r.revision + ' 版的内容发布成新的一版？')) return
+          handle(await post('/persona/rollback', { id: card.id, revision: r.revision, editRevision: card.editRevision }), '回滚好了（发布成了新的一版）').then(() => loadCard(card.id))
+        } }))) : null,
+        ),
       )
     }
+
+    /** 预览：这张卡实际交给模型的正文（草稿 / 线上）。 */
+    function PersonaPreview({ layers, published }) {
+      const [a, setA] = useState('')
+      const [b, setB] = useState('')
+      useEffect(() => { post('/persona/preview', { layers }).then((r) => setA(r.text || '')) }, [JSON.stringify(layers)])
+      useEffect(() => { if (published) post('/persona/preview', { layers: published.layers }).then((r) => setB(r.text || '')) }, [published && published.revision])
+      return h('div', { className: 'ab-grid ab-g2' },
+        h('div', null, h('h4', null, '编辑框里的'), h('pre', { className: 'ab-pre' }, a || '（空）')),
+        h('div', null, h('h4', null, published ? '线上第 ' + published.revision + ' 版' : '线上（还没发布）'), h('pre', { className: 'ab-pre' }, published ? b : '—')))
+    }
+
+    function PersonaRevision({ id, rev, current, onRollback }) {
+      const [open, setOpen] = useState(false)
+      const [text, setText] = useState('')
+      const toggle = async () => {
+        if (!open && !text) {
+          const r = await get('/persona/revision?id=' + encodeURIComponent(id) + '&revision=' + rev.revision)
+          const p = r.ok && r.revision ? await post('/persona/preview', { layers: r.revision.layers }) : { text: '' }
+          setText(p.text || '')
+        }
+        setOpen(!open)
+      }
+      return h('div', { className: 'ab-li', style: { display: 'block' } },
+        h('div', { className: 'ab-flex' },
+          h('b', null, '第 ' + rev.revision + ' 版'), current ? h('span', { className: 'ab-badge' }, '线上') : null,
+          h('span', { className: 'ab-muted ab-small' }, new Date(rev.createdAt).toLocaleString() + (rev.note ? ' · ' + rev.note : '')),
+          h('div', { className: 'ab-spacer' }),
+          h(Btn, { small: true, kind: 'ghost', onClick: toggle }, open ? '收起' : '查看'),
+          !current ? h(Btn, { small: true, onClick: onRollback }, '回滚到这一版') : null),
+        open ? h('pre', { className: 'ab-pre', style: { marginTop: 8 } }, text || '（空）') : null)
+    }
+
+    /** 绑定：全局 / 所有群 / 所有私聊的默认，以及单个聊天。 */
+    function PersonaBindings({ st, list, bindings, toast, onChange }) {
+      const [chat, setChat] = useState('')
+      const [pid, setPid] = useState('')
+      const usable = list.filter((p) => !p.archived && p.revision > 0).map((p) => ({ value: p.id, label: p.name, desc: p.id }))
+      const of = (scope) => (bindings.find((b) => b.scope === scope) || {}).personaId || ''
+      const bind = async (scope, personaId) => {
+        const r = await post('/persona/bind', { scope, personaId })
+        if (r.ok) { onChange(r.bindings); toast(r.message, 'ok') } else toast(r.message, 'err')
+      }
+      const knownChats = Array.from(new Set([...Object.keys(st.sessions || {}).filter((k) => !k.startsWith('system:')), ...(st.config.allow.groups || []).map((g) => 'group:' + g), ...(st.config.allow.private || []).map((q) => 'private:' + q)]))
+      const perChat = bindings.filter((b) => b.scope.startsWith('chat:'))
+      return h(Card, { title: '绑定', desc: '每个聊天按「单个聊天 → 所有群 / 所有私聊默认 → 全局默认」找用哪张卡。换成另一张卡的聊天会开一个新会话，旧角色没说完的话不会带过来。' },
+        h('div', { className: 'ab-brow' }, h('span', null, '全局默认'), h(Select, { value: of('global'), options: usable, width: 150, onChange: (v) => bind('global', v) })),
+        h('div', { className: 'ab-brow' }, h('span', null, '所有群'), h(Select, { value: of('kind:group'), options: [{ value: '', label: '跟全局' }, ...usable], width: 150, onChange: (v) => bind('kind:group', v || null) })),
+        h('div', { className: 'ab-brow' }, h('span', null, '所有私聊'), h(Select, { value: of('kind:private'), options: [{ value: '', label: '跟全局' }, ...usable], width: 150, onChange: (v) => bind('kind:private', v || null) })),
+        perChat.map((b) => h('div', { key: b.scope, className: 'ab-brow' }, h('span', null, scopeLabel(b.scope)),
+          h('div', { className: 'ab-flex' }, h(Select, { value: b.personaId, options: usable, width: 110, onChange: (v) => bind(b.scope, v) }),
+          h(Btn, { small: true, kind: 'ghost', onClick: () => bind(b.scope, null) }, '去掉')))),
+        h('div', { className: 'ab-flex', style: { marginTop: 10, flexWrap: 'wrap' } },
+          h(Select, { value: chat, placeholder: '选一个聊天', width: 120, options: knownChats.filter((c) => !perChat.some((b) => b.scope === 'chat:' + c)).map((c) => ({ value: c, label: c.replace('group:', '群 ').replace('private:', '私聊 ') })), onChange: setChat }),
+          h(Select, { value: pid, placeholder: '用哪张卡', width: 100, options: usable, onChange: setPid }),
+          h(Btn, { small: true, disabled: !chat || !pid, onClick: async () => { await bind('chat:' + chat, pid); setChat(''); setPid('') } }, '单独绑定')))
+    }
+
+    function ImportPersona({ toast, onDone }) {
+      const ref = useRef(null)
+      return h(Fragment, null,
+        h(Btn, { kind: 'ghost', onClick: () => ref.current && ref.current.click() }, '导入'),
+        h('input', { ref, type: 'file', accept: '.json,application/json', style: { display: 'none' }, onChange: async (e) => {
+          const file = e.target.files && e.target.files[0]
+          e.target.value = ''
+          if (!file) return
+          let card
+          try { card = JSON.parse(await file.text()) } catch (err) { return toast('不是合法的 JSON 文件', 'err') }
+          let r = await post('/persona/import', { card })
+          if (r.code === 'EXISTS') {
+            const id = (card.id || 'persona') + '-' + Date.now().toString(36).slice(-4)
+            if (!confirm('已经有同 ID 的卡了，导入成「' + id + '」？')) return
+            r = await post('/persona/import', { card, id })
+          }
+          if (r.ok) { toast('导入了（还没绑定，确认内容后在左边绑定）', 'ok'); onDone(r.persona.id) } else toast(r.message, 'err')
+        } }))
+    }
+
 
     function Access({ draft, setDraft }) {
       const f = useField(draft, setDraft)
