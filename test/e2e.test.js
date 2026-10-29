@@ -38,6 +38,9 @@ import { png as fakePng } from './helpers/images.js'
 
 // 「模型」脚本
 async function brain({ preset, text, images, callTool }) {
+  // Completion receipts may precede the fresh input; this scripted model routes
+  // on the current chat message rather than treating those receipts as a task.
+  text = text.slice(Math.max(0, text.search(/^【(?:私聊|群聊)/m)))
   if (/^【(私聊|群聊)/.test(text) && text.includes('戳了戳你')) return '干嘛戳我<poke>'
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
   if (/^【私聊/.test(text) && text.includes('表情删除测试')) { const r = await callTool('qq_edit_sticker', { sticker: '改过的名字', delete: true }); return r.message }
@@ -701,7 +704,7 @@ test('表情包她自己整理：按聊天批准后发送、修改标签、显�
 })
 
 test('翻聊天记录：读当前聊天更早的消息', async () => {
-  mock.state.history = [{ time: 1700000000, user_id: 777, sender: { user_id: 777, nickname: '老张' }, message: [{ type: 'text', data: { text: '上周说好去吃火锅' } }] }]
+  mock.state.history = [{ time: 1700000000, user_id: OWNER, sender: { user_id: OWNER, nickname: '老张' }, message: [{ type: 'text', data: { text: '上周说好去吃火锅' } }] }]
   mock.push(priv(OWNER, text('翻聊天记录看看')))
   await until(() => fake.turns.at(-1)?.userText.includes('翻聊天记录') && fake.turns.at(-1).toolCalls.length)
   assert.match(fake.turns.at(-1).toolCalls[0].result.message, /老张：上周说好去吃火锅/)

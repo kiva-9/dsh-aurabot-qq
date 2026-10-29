@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { imageSize, mimeOf, stickerSizeOk, isStickerSegment } from '../chat/inbound.js'
 import { segmentBytes, fetchImage } from '../core/net.js'
+import { reportModelOutcome } from '../core/llm.js'
 import { makeScope, canSee, normalizeShareGroups } from '../domain/scope.js'
 import { createStickerRepository, fail, hash, newStickerId } from './repository.js'
 import { matchSticker, pickForReply, allowedForContext } from './selection.js'
@@ -74,7 +75,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     const a = storage.assets.get(it.assetId)
     return a?.state === 'stored' && existsSync(storage.assets.pathOf(a)) ? a : null
   }
-  const decorate = (it, viewer = it.scope) => ({ ...it, ...repo.usage(viewer, it.sha256), availability: assetOf(it) ? 'ready' : 'unavailable',
+  const decorate = (it, viewer = it.scope) => ({ ...it, ...repo.usage(viewer, it.sha256), availability: assetOf(it) && sourceValid(it) ? 'ready' : 'unavailable',
     qq: repo.qq(it.scope.account, it.sha256), emojiId: repo.qq(it.scope.account, it.sha256).emojiId || '' })
   function list(options = {}) {
     const c = context(options)
@@ -368,6 +369,8 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (repo.tasks(t.accountId, { itemId: t.itemId, kind: 'analyze', state: 'unknown', limit: 1 }).length) return repo.finish(t, 'canceled', { error: '较早识别结果未知，禁止再次调用模型' })
     validateSource(it.source)
     const ctrl = new AbortController()
+    const callId = `${t.id}:${t.attempts}`
+    let invoked = false
     controllers.add(ctrl)
     const timeout = setTimeout(() => {
       ctrl.abort(new Error('表情识别超时'))
@@ -401,9 +404,10 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       }
       const coverage = it.animated ? (sampled ? 'sampled_partial' : 'manual_partial') : 'still_image'
       t.analysisOutcome = 'unknown'
+      invoked = true
       const response = await analyzer({ images, frames, coverage, hint: it.source?.hint || '', animated: it.animated,
         policyVersion: t.input.policyVersion, signal: ctrl.signal, scope: it.scope, chatId: it.scope.chat,
-        operationId: it.id, callId: `${t.id}:${t.attempts}`, sourceMessageIds: it.source?.messageId ? [it.source.messageId] : [] })
+        operationId: it.id, callId, sourceMessageIds: it.source?.messageId ? [it.source.messageId] : [] })
       ctrl.signal.throwIfAborted()
       t.analysisOutcome = 'completed'
       const result = parseAnalysis(response, t.input.policyVersion)
@@ -413,11 +417,11 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
         result.reason = '动画只提供部分帧证据，须人工查看完整原图。' + result.reason
       }
       validateSource(it.source)
-      repo.db.tx(() => {
+      const accepted = repo.db.tx(() => {
         const current = repo.get(it.id)
-        if (!repo.owns(t)) return
-        if (stopped || cfg().enabled === false || cfg().caption === false || current.state === 'deleted' || current.revision !== t.input.revision || String(cfg().policyVersion || '1') !== t.input.policyVersion) {
-          repo.finish(t, 'canceled', { error: '素材/规则已改变，忽略迟到识别结果' }); return
+        if (!repo.owns(t)) return false
+        if (stopped || cfg().enabled === false || cfg().caption === false || !current || current.state === 'deleted' || current.revision !== t.input.revision || String(cfg().policyVersion || '1') !== t.input.policyVersion) {
+          repo.finish(t, 'canceled', { error: '素材/规则已改变，忽略迟到识别结果' }); return false
         }
         const saved = repo.update(it.id, (item) => {
           if (sampled) item.frames = frames.map((f, i) => ({ ...f, assetId: storage.assets.put(sampled.frames[i].bytes,
@@ -435,7 +439,15 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
         })
         repo.finish(t, 'done', { output: { itemId: it.id, state: saved.state } })
         if (saved.state === 'approved' && saved.wantsQQ) safe(() => queueQQ(saved))
+        return true
       })
+      reportModelOutcome(dsh, { callId, scope: it.scope, status: accepted ? 'success' : 'discarded', code: accepted ? '' : 'STALE_ANALYSIS' })
+    } catch (error) {
+      // Domain settlement updates the original call, without changing the task's
+      // unknown/retry barrier or counting usage for a second time.
+      if (invoked) reportModelOutcome(dsh, { callId, scope: it.scope, status: 'failed',
+        code: error.code || (t.analysisOutcome === 'unknown' ? 'ANALYSIS_UNKNOWN' : 'ANALYSIS_FAILED') })
+      throw error
     } finally { clearTimeout(timeout); controllers.delete(ctrl) }
   }
   async function processSync(t) {

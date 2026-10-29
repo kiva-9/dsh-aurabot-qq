@@ -9,7 +9,14 @@ const strings = (value, key, max = 12) => {
 
 export function parseAnalysis(value, policyVersion) {
   let result
-  try { result = typeof value === 'string' ? JSON.parse(value) : value } catch { fail('INVALID_ANALYSIS', '视觉结果不是 JSON') }
+  try {
+    if (typeof value === 'string') {
+      const text = value.trim()
+      // Only unwrap a whole JSON block; never mine prose or repair incomplete JSON.
+      const fence = text.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i)
+      result = JSON.parse(fence ? fence[1] : text)
+    } else result = value
+  } catch { fail('INVALID_ANALYSIS', '视觉结果不是 JSON') }
   if (!result || result.version !== ANALYSIS_VERSION || result.policyVersion !== policyVersion) fail('INVALID_ANALYSIS', '视觉结果的格式/规则版本不匹配')
   if (!['approve', 'reject', 'pending'].includes(result.decision)) fail('INVALID_ANALYSIS', '审核决定无效')
   if (typeof result.description !== 'string' || !result.description.trim() || result.description.length > 4000 ||

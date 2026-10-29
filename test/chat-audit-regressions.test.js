@@ -36,11 +36,11 @@ test('social restriction hides inherited and agent-local host tools and denies e
   const filters = [], guards = []; let active = true, suppressed = false
   let assemble, mode
   const agent = { id: 'social', ctx: { on: (name, fn) => { assert.equal(name, 'system-prompt/assemble'); assemble = fn; return () => { assemble = null } }, tools: { presentAs: m => { mode = m; return () => { mode = null } }, restrict: f => { filters.push(f); return () => filters.pop() }, guard: f => { guards.push(f); return () => guards.pop() } },
-    systemPrompt: { suppressRuntimeContext: () => { suppressed = true; return () => { suppressed = false } } } } }
+    systemPrompt: { refreshContext: assembly => assembly, suppressRuntimeContext: () => { suppressed = true; return () => { suppressed = false } } } } }
   const off = installSocialScope(agent, ['qq_chat_history'], () => active)
   assert.deepEqual(filters, [{ allow: [] }]); assert.equal(suppressed, true)
   assert.equal(mode, 'native')
-  const final = { tools: [{ name: 'qq_chat_history' }, { name: 'spawn_teammate' }], sections: ['persona'] }
+  const final = { tools: [{ name: 'qq_chat_history' }, { name: 'spawn_teammate' }], sections: ['persona'], contexts: [] }
   const assembly = await assemble({}, { scope: agent }, async () => final)
   assert.deepEqual(assembly.tools.map(tool => tool.name), ['qq_chat_history'])
   assert.equal(assembly.sections, final.sections)
@@ -66,6 +66,19 @@ test('unfinished jobs cannot be described as completed artwork, while answers an
   assert.match(result.text, /dict.fromkeys/); assert.doesNotMatch(result.text, /挺传神/); assert.match(result.text, /还在处理中/)
   assert.equal(publicReply(input, { jobs: [{ kind: 'image', state: 'delivered' }] }).text, input)
   assert.match(publicReply('歌曲已经发出来了。', { jobs: [{ kind: 'song', state: 'unknown' }] }).text, /尚未确认成功/)
+})
+
+test('live afternoon future-delivery replies keep their wording without bypassing actual completion claims', () => {
+  const jobs = [{ kind: 'image', state: 'running' }, { kind: 'song', state: 'running' }]
+  for (const text of ['在画了，泡浴缸伸腿的版本，画好直接发出来。', '散步版在画了，画好直接发群里。',
+    '画上了，初音那边拿葱应战，画好直接发群里。', '这首歌唱好以后就发给你。']) {
+    const result = publicReply(text, { jobs })
+    assert.equal(result.text, text)
+    assert.equal(result.correctedClaims, 0)
+  }
+  const result = publicReply('这张已经画好了，画好会发给你。', { jobs })
+  assert.equal(result.correctedClaims, 1)
+  assert.doesNotMatch(result.text, /已经画好了/)
 })
 
 test('short group answers coalesce without losing content, quotations or code boundaries', () => {

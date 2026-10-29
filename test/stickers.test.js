@@ -805,12 +805,14 @@ test('真实modelAnalyzer调用账本有账号/聊天/素材operationId/任务ca
   const it = store.list(groupAdmin).items[0]
   assert.equal(it.analysis.state, 'done')
   const task = store.queueStatus({ ...groupAdmin, kind: 'analyze' }).items[0]
-  assert.equal(events.length, 1)
+  assert.equal(events.length, 2)
   assert.equal(events[0].operationId, it.id)
   assert.equal(events[0].id, task.id + ':1')
   assert.equal(events[0].stage, 'sticker_analysis')
   assert.deepEqual(events[0].context, { account: '100', chatId: 'group:1', requestId: null, role: 'vision' })
   assert.deepEqual(events[0].sourceMessageIds, [source.messageId])
+  assert.deepEqual(events[1], { id: task.id + ':1', phase: 'business', businessStatus: 'success', businessError: '',
+    context: { account: '100', chatId: 'group:1' } })
   assert.equal(JSON.stringify(events).includes('PRIVATE-IMAGE-HINT'), false)
   assert.equal(JSON.stringify(events).includes(PNG.toString('base64')), false)
 })

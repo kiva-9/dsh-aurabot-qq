@@ -7,6 +7,9 @@ import { dataDir, readJson, writeJson } from '../core/store.js'
  * extra：扩展模块加的命令 [{ name, aliases, desc, run }]，命中时返回 { name, arg, ext }；和内置同名时扩展的优先。
  */
 export function parseCommand(text, extra = []) {
+  // Called only after owner identity is checked. Match the entire direct request,
+  // never quoted speech, questions, arbitrary group banter, or third-party names.
+  if (/^(?:你|大肥鱼|肥鱼)[，,\s]*(?:先|暂时)?(?:别说话|不要说话|安静一会儿?)(?:了|吧)?[。！!]?$/u.test(String(text || '').trim())) return { name: 'silent', arg: '' }
   const m = String(text || '').trim().match(/^[/／]\s*([A-Za-z0-9一-龥_-]+)\s*([\s\S]*)$/)
   if (!m) return null
   const word = m[1].toLowerCase()

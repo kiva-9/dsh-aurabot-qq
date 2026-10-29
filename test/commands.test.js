@@ -25,6 +25,15 @@ test('解析：英文、中文别名、全角斜杠、中文命令不加空格',
   assert.equal(parseCommand('在吗'), null)
 })
 
+test('主人明确要求安静可直接解析，转述、疑问和普通聊天不当作命令', () => {
+  for (const text of ['你别说话了', '大肥鱼，先别说话了。', '肥鱼安静一会儿']) {
+    assert.deepEqual(parseCommand(text), { name: 'silent', arg: '' })
+  }
+  for (const text of ['他说你别说话了', '你别说话了吗？', '“你别说话了”', '你别说话了然后画张图', '小明别说话了']) {
+    assert.equal(parseCommand(text), null)
+  }
+})
+
 function deps() {
   let cfg = normalize({ enabled: true, botQQ: '20000002', ownerQQ: '10000001', allow: { groups: ['555'] } })
   const calls = []

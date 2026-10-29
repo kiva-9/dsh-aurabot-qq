@@ -29,6 +29,7 @@ import { createWakeInbox } from '../runtime/wake-inbox.js'
 import { createParticipationController } from '../runtime/participation.js'
 import { installSocialScope, SOCIAL_SCOPE_VERSION } from './session-scope.js'
 import { createFollowupTracker, earlierMediaSource, refersToEarlierMedia } from './followup.js'
+import { historyTimeAllowed, historyScopeMatches, platformTimeMs } from './history-boundary.js'
 
 // QQ 会话的工作区目录，第一次收到消息时自动创建。老安装沿用 C:\Aurabot\qq-chats；新安装放在用户目录下（不用往 C 盘根目录写）
 const LEGACY_WORKSPACE = 'C:\\Aurabot\\qq-chats'
@@ -95,6 +96,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
   const sessionToChat = new Map() // sessionKey → chatId
   const turnState = new Map() // sessionKey → { lastTurn, text, images, senders:Set, system?: {resolve, reject} }
+  const sessionNotes = new Map() // chatId → scoped job receipts, consumed only by the next fresh user turn
   const groupBuf = new Map() // groupId → [{t, uid, nick, text, at}]
   const groupInterjects = new Map() // groupId → [t]  她主动开口（插话、接话）的时间
   const groupSaid = new Map() // groupId → [t]  她每次在群里说话的时间（刹车用）
@@ -105,7 +107,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const groupNames = new Map()
   const recentMedia = new Map() // chatId → [{ seg, userId, at, sticker }] 最近发来的图片和表情
   const followups = createFollowupTracker({ windowMs: () => (getConfig().conversation?.followupSeconds || 90) * 1000 })
-  const sentIds = new Set()
+  const sentIds = new Map() // [account, chatId, platformMsgId] → 发送确认时间
+  const sentKey = (account, chatId, id) => JSON.stringify([String(account), chatId, String(id)])
   const stats = { received: 0, sent: 0, voice: 0, stickers: 0, errors: 0, day: new Date().toDateString() }
   let selfId = ''
   let lastChatAt = 0
@@ -426,6 +429,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   async function transmit(chatId, message, note, { force = false } = {}) {
     if (disposed) return null
     const cfg = getConfig()
+    const account = String(cfg.botQQ)
     const tgt = targetOf(chatId)
     if (!tgt) return null
     // 扩展模块最后改一次（加签名、过滤敏感词、转发到别处……）；返回 null 就不发
@@ -454,8 +458,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     try {
       const r = await onebot.call(action, params)
       if (r && r.message_id !== undefined) {
-        sentIds.add(String(r.message_id))
-        if (sentIds.size > 500) sentIds.delete(sentIds.values().next().value)
+        sentIds.set(sentKey(account, chatId, r.message_id), Date.now())
+        if (sentIds.size > 500) sentIds.delete(sentIds.keys().next().value)
       }
       bump('sent')
       return r || {}
@@ -614,17 +618,16 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
 
   /** 给这个聊天的会话留一条说明（不叫醒她，下一轮能看到），比如「刚才那张图已经发出去了」。 */
-  function noteToSession(chatId, text) {
-    const sid = map().chats[chatId]?.sessionId
-    const agent = sid && (dsh.agents?.get?.(sid) || dsh.agents?.get?.('session-' + sid))
-    if (!agent || typeof agent.inject !== 'function') return false
-    try {
-      agent.inject({ id: randomUUID(), role: 'user', content: [{ type: 'text', text }], source: { kind: SOURCE_KIND } })
-      return true
-    } catch (error) {
-      log.debug('给会话留说明失败：', error.message)
-      return false
-    }
+  function noteToSession(chatId, text, { account = String(getConfig().botQQ), epoch = storage.epochs.current(chatId) } = {}) {
+    if (disposed || !getConfig().enabled || !map().chats[chatId] || account !== String(getConfig().botQQ) || epoch !== storage.epochs.current(chatId)) return false
+    const value = String(text || '').trim().slice(0, 1500)
+    if (!value) return false
+    // DSH inject() targets the next step of the ACTIVE turn. A completion receipt
+    // there can replace an unrelated answer with silence; keep it outside the agent.
+    const notes = (sessionNotes.get(chatId) || []).filter(n => n.account === account && n.epoch === epoch && Date.now() - n.at < 30 * 60000)
+    if (!notes.some(n => n.text === value)) notes.push({ account, epoch, at: Date.now(), text: value })
+    sessionNotes.set(chatId, notes.slice(-16))
+    return true
   }
 
   async function sendImage(chatId, src) {
@@ -879,17 +882,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     return groupNames.get(gid) || gid
   }
 
-  async function repliedToBot(replyId) {
-    if (!replyId) return false
-    if (sentIds.has(replyId)) return true
-    try {
-      const m = await onebot.call('get_msg', { message_id: Number(replyId) || replyId }, { timeoutMs: 5000 })
-      return String(m?.sender?.user_id ?? m?.user_id ?? '') === String(selfId || getConfig().botQQ)
-    } catch (error) {
-      return false
-    }
-  }
-
   /** 一条语音转文字：本地接口 → QQ 自带转写 → DSH 自带识别，依次试。转不出来返回空串。 */
   async function transcribeOne(rec, msg) {
     // 本地接口接管：用用户自己的识别服务（最先试）
@@ -957,13 +949,16 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
   async function onMessage(event) {
     if (disposed) return
-    selfId = String(event.self_id || selfId || getConfig().botQQ)
     const cfg = getConfig()
-    const msg = parseMessageEvent(event, selfId)
-    if (msg.userId === selfId) return
+    const account = String(event.self_id || selfId || cfg.botQQ)
+    if (cfg.botQQ && account !== String(cfg.botQQ)) return
+    if (!historyTimeAllowed(storage, account, platformTimeMs(event.time))) return
+    selfId = account
+    const msg = parseMessageEvent(event, account)
+    if (msg.userId === account) return
     // 先登记进主库：重连后网关重放的同一条消息（同一个 QQ 消息 ID）在这里挡掉
     const ing = storage.messages.ingest({
-      account: selfId, chatId: msg.chatId, eventKind: event.aurabot_kind || 'message', platformMsgId: msg.messageId,
+      account, chatId: msg.chatId, eventKind: event.aurabot_kind || 'message', platformMsgId: msg.messageId,
       authorId: msg.userId, authorName: msg.nickname, platformTime: msg.platformTime, text: msg.text,
       segments: Array.isArray(event.message) ? event.message : [], replyTo: msg.replyId, forwards: msg.forwards, mentioned: msg.mentioned,
     })
@@ -1001,7 +996,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       recentMedia.set(msg.chatId, list.slice(-6))
     }
     // 主人命令（/silent /active …）：总开关关着也处理，回复直接发
-    if (onCommand && isOwner(cfg, msg.userId) && /^\s*[/／]/.test(msg.text)) {
+    if (onCommand && isOwner(cfg, msg.userId)) {
       try {
         const reply = await onCommand(msg)
         if (reply) {
@@ -1049,10 +1044,13 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     }
     onActivity?.({ kind: 'in', chatId: msg.chatId, account: String(cfg.botQQ), messageId: dbId, sourceMessageIds: [dbId],
       userId: msg.userId, nickname: msg.nickname, text: msg.text, direct: msg.kind === 'private' || msg.mentioned, owner: isOwner(cfg, msg.userId) })
+    // 文本、媒体和“是否回复了机器人”共用同一份已核验引用。
+    let quote = msg.replyId ? await quotedOf(msg.chatId, msg.replyId, account) : null
     let mode = 'must'
     if (msg.kind === 'group' && !supplement) {
       const policy=policyFor(cfg.group,cfg.group.overrides,msg.groupId)
-      msg.repliedToBot=await repliedToBot(msg.replyId)
+      const sentAt = sentIds.get(sentKey(account, msg.chatId, msg.replyId))
+      msg.repliedToBot=!!quote?.isBot || sentAt != null && historyTimeAllowed(storage, account, sentAt)
       mode=msg.mentioned||msg.repliedToBot||(policy.wakeWords||[]).some(word=>word&&msg.text.includes(word))?'must':'interject'
       const follow = followups.accept({ account: String(cfg.botQQ), chatId: msg.chatId, actorId: msg.userId,
         epoch: storage.epochs.current(msg.chatId), messageId: dbId, text: msg.text, direct: mode === 'must',
@@ -1070,13 +1068,13 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
     }
     // 引用：找回被引用的那条（原话和里面的图），一起交给她
-    let quote = msg.replyId ? await quotedOf(msg.chatId, msg.replyId) : null
-    if (!quote && mode === 'must' && !msg.images.length && !msg.stickers.length && (msg.continuedRequest || refersToEarlierMedia(msg.text))) {
-      const previous = earlierMediaSource(storage, { account: String(cfg.botQQ), chatId: msg.chatId, actorId: msg.userId, before: ing.recvSeq, exclude: [dbId], now })
-      if (previous) quote = { messageId: previous.id, name: previous.authorName || previous.authorId, text: previous.text, isBot: false }
+    if (!quote && !msg.replyId && mode === 'must' && !msg.images.length && !msg.stickers.length && (msg.continuedRequest || refersToEarlierMedia(msg.text))) {
+      const previous = earlierMediaSource(storage, { account, chatId: msg.chatId, actorId: msg.userId, before: ing.recvSeq, exclude: [dbId], now })
+      if (previous && historyTimeAllowed(storage, account, previous.platformTime)) quote = { messageId: previous.id, name: previous.authorName || previous.authorId, text: previous.text, isBot: false, account, platformTime: previous.platformTime }
     }
+    if (String(getConfig().botQQ) !== account || !historyTimeAllowed(storage, account, platformTimeMs(event.time))) return
     // 图片、语音登记后在后台处理，调度器等它们好了（或等到上限）再交给她
-    media.register({ messageId: dbId, msg, account: selfId, wantTranscript: cfg.voice.asr })
+    media.register({ messageId: dbId, msg, account, wantTranscript: cfg.voice.asr })
     lastChatAt = now
     if (msg.kind === 'private' && msg.userId === cfg.ownerQQ) lastOwnerChatAt = now
 
@@ -1095,24 +1093,30 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
    * 被引用的消息：先查主库，再查她自己发过的（outbox），都没有就问网关要（顺手登记进主库、下载里面的图）。
    * 返回 { messageId, name, text, isBot }；找不到返回 null。
    */
-  async function quotedOf(chatId, replyId) {
+  async function quotedOf(chatId, replyId, account) {
     try {
-      const stored = storage.messages.byPlatformId(chatId, replyId, 'message', selfId || getConfig().botQQ)
-      if (stored) return stored.recalledAt == null ? { messageId: stored.id, name: stored.authorName || stored.authorId, text: stored.text, isBot: false } : null
+      const stored = storage.messages.byPlatformId(chatId, replyId, 'message', account)
+      if (stored) return stored.account === account && stored.chatId === chatId && stored.recalledAt == null && historyTimeAllowed(storage, account, stored.platformTime)
+        ? { messageId: stored.id, name: stored.authorName || stored.authorId, text: stored.text, isBot: stored.authorId === account, account, platformTime: stored.platformTime } : null
       const mine = outbox.byPlatformId(chatId, replyId)
-      if (mine) {
+      // outbox 没有账号列，须有同账号、同聊天的请求来源或本次运行的发送凭据。
+      const sources = mine?.requestId ? storage.requests.get(mine.requestId)?.sourceMessageIds.map(id => storage.messages.get(id)) : null
+      const sentAt = sentIds.get(sentKey(account, chatId, replyId))
+      const mineInScope = sentAt != null || sources?.length && sources.every(m => m?.account === account && m.chatId === chatId)
+      if (mine && mineInScope && historyTimeAllowed(storage, account, mine.createdAt)) {
         const text = (mine.payload.message || []).filter((s) => s.type === 'text').map((s) => s.data.text).join('') || mine.payload.note || ''
         const assets = (mine.payload.message || []).filter((s) => s.type === 'image' && s.data?.file?.startsWith('asset:')).map((s) => s.data.file.slice(6))
-        return { messageId: null, name: '你自己', text, isBot: true, assets, generatedJobId: mine.batchId.startsWith('image:') ? mine.batchId.slice(6) : null }
+        return { messageId: null, name: '你自己', text, isBot: true, assets, account, platformTime: mine.createdAt, generatedJobId: mine.batchId.startsWith('image:') ? mine.batchId.slice(6) : null }
       }
       const raw = await onebot.call('get_msg', { message_id: Number(replyId) || replyId }, { timeoutMs: 8000 })
-      if (!raw) return null
+      if (String(getConfig().botQQ) !== account || !historyScopeMatches(raw, { account, chatId }, { requireChat: true }) ||
+        (raw.message_id != null && String(raw.message_id) !== String(replyId)) || !historyTimeAllowed(storage, account, platformTimeMs(raw.time))) return null
       const ev = { message_type: chatId.startsWith('group:') ? 'group' : 'private', group_id: chatId.slice(6), user_id: raw.sender?.user_id ?? raw.user_id, message_id: replyId, time: raw.time, sender: raw.sender || {}, message: raw.message ?? raw.content ?? [] }
-      const qm = parseMessageEvent(ev, selfId)
-      const isBot = String(qm.userId) === String(selfId)
-      const ing = storage.messages.ingest({ account: selfId, chatId, eventKind: 'message', platformMsgId: replyId, authorId: qm.userId, authorName: qm.nickname, platformTime: qm.platformTime, text: qm.text, segments: Array.isArray(ev.message) ? ev.message : [] })
-      if (!ing.duplicate) media.register({ messageId: ing.id, msg: { ...qm, chatId }, account: selfId, wantTranscript: false })
-      return { messageId: ing.id, name: isBot ? '你自己' : qm.nickname, text: qm.text, isBot }
+      const qm = parseMessageEvent(ev, account)
+      const isBot = String(qm.userId) === account
+      const ing = storage.messages.ingest({ account, chatId, eventKind: 'message', platformMsgId: replyId, authorId: qm.userId, authorName: qm.nickname, platformTime: qm.platformTime, text: qm.text, segments: Array.isArray(ev.message) ? ev.message : [] })
+      if (!ing.duplicate) media.register({ messageId: ing.id, msg: { ...qm, chatId }, account, wantTranscript: false })
+      return { messageId: ing.id, name: isBot ? '你自己' : qm.nickname, text: qm.text, isBot, account, platformTime: qm.platformTime }
     } catch (error) {
       log.debug('找不到被引用的消息：', error.message)
       return null
@@ -1146,8 +1150,11 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const pokeAt = new Map() // chatId → 上次处理戳一戳的时间
   /** 有人戳了她：当成一条对她说的话交给她（群里也一定回），同一个聊天 20 秒内只算一次。 */
   async function onPoke(ev) {
+    if (disposed) return
     const self = String(ev.self_id || selfId || getConfig().botQQ)
     if (String(ev.target_id) !== self) return
+    if (getConfig().botQQ && self !== String(getConfig().botQQ)) return
+    if (!historyTimeAllowed(storage, self, platformTimeMs(ev.time))) return
     if (hooks?.poke) {
       try { if (await hooks.poke(ev)) return } catch (error) {}
     }
@@ -1166,7 +1173,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     log.info(`${chatId}：${nickname} 戳了戳她`)
     await onMessage({
       post_type: 'message', message_type: group ? 'group' : 'private', sub_type: group ? 'normal' : 'friend', aurabot_kind: 'poke',
-      self_id: Number(self), user_id: Number(poker), ...(group ? { group_id: Number(group) } : {}), message_id: 0,
+      self_id: Number(self), user_id: Number(poker), ...(group ? { group_id: Number(group) } : {}), message_id: 0, time: ev.time,
       sender: { user_id: Number(poker), nickname, card: nickname },
       message: [{ type: 'at', data: { qq: self } }, { type: 'text', data: { text: ` [戳了戳你${ev.action ? '：' + ev.action + (ev.suffix || '') : ''}]` } }],
     })
@@ -1175,6 +1182,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   /** 群聊这一段的提示词：之前的几句当背景，上次交给她之后群里新说的话全部列出来，让她看完整段再回。 */
   async function groupPrompt(chat, mode, entries) {
     const name = await groupName(chat.groupId)
+    const cfg = getConfig(), policy = policyFor(cfg.group, cfg.group.overrides, chat.groupId), now = Date.now()
     const buf = groupBuf.get(chat.groupId) || []
     const since = groupFedAt.get(chat.groupId) || 0
     const ids = new Set(entries.map(e => e.messageId))
@@ -1184,7 +1192,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       seq: storage.messages.get(e.messageId)?.recvSeq, uid: e.actorId, nick: e.msg.nickname,
       text: e.finalText, at: e.msg.mentioned, mid: e.msg.messageId, dbId: e.messageId,
     })
-    const older = buf.filter(x => !ids.has(x.dbId) && x.seq < firstSeq).slice(-8)
+    const older = buf.filter(x => !ids.has(x.dbId) && x.seq < firstSeq && now - x.t < policy.activeWindowSec * 1000)
+      .filter(x => { const m = storage.messages.get(x.dbId); return m?.account === String(cfg.botQQ) && historyTimeAllowed(storage, m.account, m.platformTime) }).slice(-8)
     groupFedAt.set(chat.groupId, Math.max(since, ...fresh.map(x => x.seq || 0)))
     const line = (x) => `${x.nick}(${x.uid})${x.at ? '@了你' : ''}：${x.text || (x.at ? '（只点名，尚未提供问题或附件）' : '（无文字）')}`
     // 新消息带编号，她想专门回某一条时可以引用；编号 → QQ 消息 ID 记下来，发的时候换成引用
@@ -1315,7 +1324,11 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   /** 一批消息到期：拼好提示词、给每个提出请求的人登记请求，交给她。 */
   async function dispatch(chat, batch, { steer }) {
     const cfg = getConfig()
+    let groupDecisionEvent
     if (!cfg.enabled || !checkAllowed(cfg, chat).allowed || isMuted?.(chat.chatId)) return release(chat.chatId)
+    batch.entries = batch.entries.filter(e => { const m = storage.messages.get(e.messageId); return m?.account === String(cfg.botQQ) && historyTimeAllowed(storage, m.account, m.platformTime) })
+    if (!batch.entries.length) return release(chat.chatId)
+    for (const e of batch.entries) if (e.quote && (e.quote.account !== String(cfg.botQQ) || !historyTimeAllowed(storage, e.quote.account, e.quote.platformTime))) e.quote = null
     if(chat.kind==='group') {
       const now=Date.now(),pol0=policyFor(cfg.group,cfg.group.overrides,chat.groupId),scope={account:String(cfg.botQQ),chatId:chat.chatId}
       const explicit=batch.entries.some(e=>e.mode==='must')
@@ -1336,7 +1349,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       const throttled=!explicit&&cfg.participation?.enabled!==false&&!control.allowed
       if(throttled)Object.assign(decision,{reply:false,mode:'none',reason:'自动参与限制：'+control.reason})
       const part={scope,batchId:batch.entries[0].messageId,trigger:explicit?'explicit':'automatic',messageCount:batch.entries.length}
-      onDiagnostic?.({account:scope.account,chatId:chat.chatId,traceId:storage.messages.get(batch.entries[0].messageId)?.traceId,kind:'群聊决策',payload:{decision,messageId:part.batchId,batchSize:batch.entries.length,mentioned:explicit,memoryScore:memScore,policy:{interjectChance:pol.interjectChance,minRelevance:pol.minRelevance,maxPerHour:pol.maxPerHour,cooldownSec:pol.cooldownSec},participation:control.diagnostics,policyRevision:cfg.policyRevision||0,replay:{policyVersion:GROUP_POLICY_REPLAY_VERSION,input:decisionInput,random:randomDraw,baseDecision}}})
+      groupDecisionEvent = onDiagnostic?.({account:scope.account,chatId:chat.chatId,traceId:storage.messages.get(batch.entries[0].messageId)?.traceId,kind:'群聊决策',payload:{decision,messageId:part.batchId,batchSize:batch.entries.length,mentioned:explicit,memoryScore:memScore,policy:{interjectChance:pol.interjectChance,minRelevance:pol.minRelevance,maxPerHour:pol.maxPerHour,cooldownSec:pol.cooldownSec},participation:control.diagnostics,policyRevision:cfg.policyRevision||0,replay:{policyVersion:GROUP_POLICY_REPLAY_VERSION,input:decisionInput,random:randomDraw,baseDecision}}})
       if(!decision.reply) {
         participation.observeDecision(scope,{...part,decision:throttled?'throttled':'skip'})
         for(const e of batch.entries)logChat(chat.chatId,e.msg.nickname,e.msg.text,e.actorId)
@@ -1426,7 +1439,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       byActor.get(e.actorId).push(e.messageId)
     }
     const requests = [...byActor.entries()].map(([actorId, ids]) => storage.requests.create({ chatId: chat.chatId, actorId, sourceMessageIds: ids, policyRevision: getConfig().policyRevision || 0 }))
-    if (requests.length) try { onRequestBatch?.({ account: String(cfg.botQQ), chatId: chat.chatId, epoch: requests[0].epoch, requestIds: requests.map(q => q.id) }) }
+    if (requests.length) try { onRequestBatch?.({ account: String(cfg.botQQ), chatId: chat.chatId, epoch: requests[0].epoch, requestIds: requests.map(q => q.id), decisionEventIds: groupDecisionEvent?.id ? [groupDecisionEvent.id] : [] }) }
     catch (error) { log.warn('记录聚合请求失败：', error.message) }
     const actors = [...byActor.keys()]
     await pushToSession(chat, content, actors[0], {
@@ -1540,7 +1553,14 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       return
     }
     startTyping(key, chat)
-    const message = { id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND } }
+    let turnContent = admitted
+    if (!opts.steer) {
+      const notes = (sessionNotes.get(chat.chatId) || []).filter(n => n.account === account && n.epoch === st.epoch &&
+        Date.now() - n.at < 30 * 60000 && historyTimeAllowed(storage, account, n.at))
+      sessionNotes.delete(chat.chatId)
+      if (notes.length) turnContent = [{ type: 'text', text: '【已处理任务的回执，仅供了解进度，无需重复回复或执行】\n' + notes.map(n => n.text).join('\n') }, ...admitted]
+    }
+    const message = { id: randomUUID(), role: 'user', content: turnContent, source: { kind: SOURCE_KIND } }
     // 正在跑的这一轮：steer = 下一步就看到这句（DSH 界面插话走的也是它）；空闲时照旧 followup 开新一轮
     if (opts.steer && typeof agent.steer === 'function') {
       log.info(`${chat.chatId}：她还在忙，这句直接插进当前这一轮（steer）`)
@@ -1674,6 +1694,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
    * 停下正在跑的这一轮。换人设、重开会话时用。
    */
   function abandonChat(chatId, sessionId, reason) {
+    sessionNotes.delete(chatId)
     turnState.get(sessionKey(sessionId))?.controller?.abort()
     try { storage.epochs.bump(chatId, reason) } catch (error) {}
     scheduler.drop(chatId)
@@ -1689,6 +1710,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
   /** 换身份：代次 +1、作废上一代没发出去的段、停下旧会话、归档。攒着的新消息不丢（它们要交给新角色）。 */
   function switchIdentity(chatId, sessionId) {
+    sessionNotes.delete(chatId)
     turnState.get(sessionKey(sessionId))?.controller?.abort()
     try { storage.epochs.bump(chatId, '换人设') } catch (error) {}
     try { outbox.cancelPending(chatId, '换人设') } catch (error) {}
@@ -1803,6 +1825,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     },
     dispose: () => {
       disposed = true
+      sessionNotes.clear()
       for (const st of turnState.values()) st.controller?.abort()
       scheduler.dispose(); media.dispose()
       const wakeClosing=Promise.allSettled([wakeInbox.close(),proactiveInbox.close()])

@@ -222,13 +222,13 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       if (execution.shouldContinue?.() === false) return
       if (job.epoch !== storage.epochs.current(job.chatId) || (job.input.accountId && job.input.accountId !== String(getConfig().botQQ))) return
       if (event === 'delivered') {
-        hub.noteToSession?.(job.chatId, `【系统】你刚才画的图（任务 ${job.id}）已经发到聊天里了。`)
+        hub.noteToSession?.(job.chatId, `【系统】你刚才画的图（任务 ${job.id}）已经发到聊天里了。`, { account: job.input.accountId, epoch: job.epoch })
         onDelivered?.(job)
         return
       }
       if (event === 'failed') {
         await hub.sendText(job.chatId, `（画图没成功：${info.message}）`, null, { batchId: `image-notice:${job.id}:failed`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
-        hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 失败了：${info.message}`)
+        hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 失败了：${info.message}`, { account: job.input.accountId, epoch: job.epoch })
       }
       if (event === 'unknown') {
         await hub.sendText(job.chatId, '（画图服务没回应，不确定画没画好。为了不重复扣费先不重画，主人可以在面板「生图」里看看）', null, { batchId: `image-notice:${job.id}:unknown`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})

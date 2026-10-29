@@ -3,6 +3,9 @@
 const writingNote = /^(?:轻松接一句就好|这里(?:应该|可以|需要)(?:回复|回答|接话)|(?:回复|回答)时(?:要|应当|应该|需要)|我(?:应该|需要)(?:简短|轻松|自然)地?(?:回复|回答|接话))/u
 const imageClaim = /(?:我画得|(?:图|画|漫画).{0,12}(?:画好|画完|发出来了|已经发|已发|完成了)|(?:画好了|画完了|已经画好))/u
 const songClaim = /(?:我唱得|(?:歌曲|翻唱|歌|语音).{0,12}(?:唱好|唱完|录好|发出来了|已经发|已发|完成了)|(?:唱好了|唱完了|已经唱好))/u
+// A promise to send after completion is not a claim that the work is finished.
+// Remove only that future clause for detection; a separate "已经画好了" still counts.
+const futureDelivery = /(?:等(?:我|它)?|待)?(?:画|唱|录|生成)(?:好|完)(?:以后|之后|后)?(?:我)?(?:就|再|会|直接|自动|马上|立刻)[^，。！？!?;；]*/gu
 const protectedText = text => /```|^\s*>|[「『“"]/.test(text)
 export function publicReply(text, { jobs = [], userText = '' } = {}) {
   let removedNotes = 0, correctedClaims = 0
@@ -15,7 +18,8 @@ export function publicReply(text, { jobs = [], userText = '' } = {}) {
     if (!requestedWriting && writingNote.test(line.trim()) && !protectedText(line)) { removedNotes++; return [] }
     if (protectedText(line)) return [line]
     return [line.replace(/[^。！？!?]+[。！？!?]?/gu, sentence => {
-      const job = pending.find(j => j.kind === 'song' ? songClaim.test(sentence) : /image|draw/.test(j.kind) && imageClaim.test(sentence))
+      const claim = sentence.replace(futureDelivery, '')
+      const job = pending.find(j => j.kind === 'song' ? songClaim.test(claim) : /image|draw/.test(j.kind) && imageClaim.test(claim))
       if (!job) return sentence
       correctedClaims++
       const label = job.kind === 'song' ? '翻唱' : '图片'

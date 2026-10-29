@@ -57,6 +57,24 @@ export function createFakeDsh({ brain }) {
           context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) },
           section: (s) => { sections.set(s.name, s); return () => sections.delete(s.name) },
           suppressRuntimeContext: () => {agent.runtimeSuppressed=true;return ()=>{agent.runtimeSuppressed=false}},
+          refreshContext(assembly) {
+            // Match DSH request admission: reevaluate registered providers and
+            // restore required entries removed by the assembly waterfall.
+            const required = new Map([...contexts].filter(([, c]) => c.required === true))
+            const refreshed = []
+            const resolve = c => ({ name: c.name, text: typeof c.text === 'function' ? c.text({ agent, scope: agent }) : c.text })
+            for (const accepted of assembly.contexts) {
+              const provider = contexts.get(accepted.name)
+              required.delete(accepted.name)
+              if (agent.runtimeSuppressed && provider?.required !== true) continue
+              refreshed.push(provider ? resolve(provider) : accepted)
+            }
+            for (const provider of required.values()) {
+              const index = refreshed.findIndex(c => contexts.get(c.name)?.order > provider.order)
+              refreshed.splice(index < 0 ? refreshed.length : index, 0, resolve(provider))
+            }
+            return { ...assembly, contexts: refreshed }
+          },
         },
       },
       steered: [],
@@ -78,15 +96,19 @@ export function createFakeDsh({ brain }) {
           canceled = null
           const text = msg.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
           const images = msg.content.filter((c) => c.type === 'image')
-          const ctxText = [...contexts.values()].filter(c=>!agent.runtimeSuppressed||c.required).map((c) => c.text()).filter(Boolean).join('\n')
           const persona = sections.get('deployment:persona-prefix')?.text?.() ?? variables.get('aurabot_persona')?.({ agent }) ?? ''
           const calls = []
           const visible = new Map([...globalTools].filter(([name])=>[...agent.restrictions].every(f=>(!f.allow||f.allow.includes(name))&&!f.deny?.includes(name))))
           for(const [name,tool] of tools)visible.set(name,tool)
-          const assembly = { tools: [...visible.values()] }
+          const assembly = { tools: [...visible.values()], contexts: [...contexts.values()]
+            .filter(c => !agent.runtimeSuppressed || c.required === true)
+            .sort((a, b) => a.order - b.order)
+            .map(c => ({ name: c.name, text: typeof c.text === 'function' ? c.text({ agent, scope: agent }) : c.text })) }
           const assemblers = [...scopedListeners.get('system-prompt/assemble') || []]
           const next = () => (assemblers.shift() || (() => assembly))(assembly, { scope: agent }, next)
           const presented = await next()
+          const refreshed = agent.ctx.systemPrompt.refreshContext(presented, { agent, scope: agent })
+          const ctxText = refreshed.contexts.map(c => c.text).filter(Boolean).join('\n')
           const callTool = async (name, args) => {
             const t = visible.get(name)
             if (!t) { calls.push({ name, args, result: { ok: false, message: 'no such tool' } }); return null }
