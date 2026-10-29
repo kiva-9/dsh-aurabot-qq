@@ -24,6 +24,7 @@ export const DEFAULTS = {
   ownerLevel: 'full', // full | social | chat
   profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' }, // 改资料类操作的权限：off 关 / owner 仅主人私聊 / all 所有人
   toolCallsPerTurn: 6, // 一轮里最多调用几次插件工具（防止模型反复自我唤醒、烧额度）；DSH 自带的电脑工具不算
+  conversation: { maxTurns: 48, maxContextTokens: 48000, maxAgeMinutes: 480, followupSeconds: 90 },
   longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   allow: { private: [], groups: [] }, // 主人永远能私聊，不用写进白名单
   snowluma: {
@@ -75,6 +76,7 @@ export const DEFAULTS = {
     defaultVoice: '', // 人设没指定音色时用这个
     speed: 1,
     autoChance: 0.15, // 短回复自动变语音的概率
+    groupAutoChance: 0, // 群聊默认保留文字；明确请求及 voice 标记仍生效
     autoMaxChars: 80,
     asr: true, // 听语音
   },
@@ -211,6 +213,7 @@ export function normalize(raw) {
   g.quietHours = g.quietHours.map((h) => num(h, 0, 0, 23))
   if (!isObj(g.overrides)) g.overrides = {}
   c.voice.autoChance = num(c.voice.autoChance, 0.15, 0, 1)
+  c.voice.groupAutoChance = num(c.voice.groupAutoChance, 0, 0, 1)
   c.voice.autoMaxChars = num(c.voice.autoMaxChars, 80, 1, 500)
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
@@ -257,6 +260,10 @@ export function normalize(raw) {
   g.interests = (Array.isArray(g.interests) ? g.interests : String(g.interests || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.minRelevance = num(g.minRelevance, 0.25, 0, 1)
   c.merge.enabled = bool(c.merge.enabled, true)
+  c.conversation.maxTurns = num(c.conversation.maxTurns, 48, 8, 200)
+  c.conversation.maxContextTokens = num(c.conversation.maxContextTokens, 48000, 8000, 200000)
+  c.conversation.maxAgeMinutes = num(c.conversation.maxAgeMinutes, 480, 30, 1440)
+  c.conversation.followupSeconds = num(c.conversation.followupSeconds, 90, 15, 180)
   c.merge.waitSec = num(c.merge.waitSec, 2.5, 0, 30)
   c.merge.maxSec = Math.max(c.merge.waitSec, num(c.merge.maxSec, 8, 0, 60))
   c.merge.groupWaitSec = num(c.merge.groupWaitSec, 5, 0, 60)

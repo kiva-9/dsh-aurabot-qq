@@ -5,6 +5,8 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {createStorage} from '../src/storage/index.js'
 import {createMemoryStore} from '../src/features/memory.js'
+import {EXTRACTION_SYSTEM,DEDUP_SYSTEM,deduplicationInput} from '../src/memory/extraction.js'
+import {normalizeFact,validateDecisions} from '../src/memory/contracts.js'
 
 const S={account:'bot',chat:'group:101',persona:'fish'}
 const waitGate=()=>{let release;const promise=new Promise(r=>{release=r});return {promise,release}}
@@ -45,6 +47,7 @@ test('model exceptions, invalid JSON and absent summary never become successful 
   const {memory,ingest}=fixture(t,{extract:async()=>{if(response instanceof Error)throw response;return response}})
   ingest()
   for(const output of [new Error('timeout'),'','non-json','{"facts":[]}',{facts:[],summary:null,unexpected:true}]) {
+    memory.resumeExtraction(S)
     response=output
     const r=await memory.consolidate({scope:S})
     assert.equal(r.ok,false)
@@ -53,12 +56,13 @@ test('model exceptions, invalid JSON and absent summary never become successful 
     assert.ok(memory.status(S).error)
   }
   response={facts:[],summary:null}
+  memory.resumeExtraction(S)
   assert.equal((await memory.consolidate({scope:S})).ok,true)
   assert.ok(memory.status(S).recvSeq>0)
   assert.equal(memory.list({scope:S}).length,0)
 })
 test('invalid dedup decisions roll back the entire current batch and summary',async t=>{
-  const {storage,memory,ingest}=fixture(t,{deduplicate:async({facts})=>[{inputId:facts[0].inputId,action:'keep'}]})
+  const {storage,memory,ingest}=fixture(t,{deduplicate:async()=>[]})
   ingest('喜欢咖啡');ingest('也喜欢茶')
   const r=await memory.consolidate({scope:S})
   assert.equal(r.ok,false)
@@ -77,6 +81,7 @@ test('SQLite commit failure atomically rolls back facts, evidence, episodes, aud
   for(const table of ['memory_facts','memory_evidence','memory_episodes','memory_audit']) assert.equal(storage.db.get(`SELECT COUNT(*) AS n FROM ${table}`).n,0,table)
   assert.equal(memory.status(S).recvSeq,0)
   storage.db.exec('DROP TRIGGER fail_checkpoint')
+  memory.resumeExtraction(S)
   assert.equal((await memory.consolidate({scope:S})).ok,true)
 })
 test('long input is fully chunked including one oversized message, with no tail-only checkpoint',async t=>{
@@ -101,6 +106,8 @@ test('only successfully committed earlier blocks advance; failure retries the ex
   assert.equal((await memory.consolidate({scope:S})).ok,false)
   assert.equal(memory.status(S).recvSeq,first.recvSeq)
   assert.equal(memory.list({scope:S}).length,1)
+  assert.equal((await memory.consolidate({scope:S})).code,'EXTRACTION_BACKOFF')
+  memory.resumeExtraction(S)
   assert.equal((await memory.consolidate({scope:S})).processed,1)
   assert.equal(memory.status(S).recvSeq,last.recvSeq)
 })
@@ -177,6 +184,7 @@ test('extraction evidence must belong to the current fragment and speaker',async
   ingest()
   assert.equal((await memory.consolidate({scope:S})).ok,false)
   bad='speaker'
+  memory.resumeExtraction(S)
   assert.equal((await memory.consolidate({scope:S})).ok,false)
   assert.equal(memory.status(S).recvSeq,0)
 })
@@ -189,12 +197,12 @@ test('default memory role adapter executes real askModel parsing and validated d
     yield {type:'finish',reason:{kind:'completed'}}
   }}}
   const memory=createMemoryStore({storage,dsh,getConfig:()=>({model:{provider:'test-provider',model:'test-model'},memory:{}})})
-  ingest()
+  ingest();ingest('也喜欢咖啡')
   const r=await memory.consolidate({scope:S})
   assert.equal(r.ok,true,r.message)
   assert.equal(seen.length,2)
   assert.ok(seen[1].input.candidates)
-  assert.equal(memory.recall('咖啡',{scope:S}).length,1)
+  assert.equal(memory.recall('咖啡',{scope:S}).length,2)
 })
 test('expired persisted lease can be resumed after a crash',async t=>{
   const {storage,memory,ingest}=fixture(t)
@@ -204,4 +212,51 @@ test('expired persisted lease can be resumed after a crash',async t=>{
   assert.equal(r.ok,true,r.message)
   assert.equal(memory.status(S).state,'idle')
   assert.equal(storage.db.get('SELECT lease_token FROM memory_checkpoints').lease_token,null)
+})
+
+test('empty authorized candidate sets use native keep without a second model call',async t=>{
+  let calls=0
+  const {memory,ingest}=fixture(t,{deduplicate:async()=>{calls++;throw new Error('not needed')}})
+  ingest()
+  const r=await memory.consolidate(S)
+  assert.equal(r.ok,true);assert.equal(r.added,1);assert.equal(r.processed,1);assert.equal(calls,0)
+})
+
+test('compact dedup payload matches native reuse rules and removes misleading nested IDs',()=>{
+  const fact={...normalizeFact(extracted({messageId:'m',speakerId:'u',text:'证据'})),inputId:'0:f2',evidenceMessageIds:['m']}
+  const candidate={...fact,inputId:'0:f1',id:'batch:0:f1',evidence:[{messageId:'m'}]}
+  const batch={scope:S,facts:[fact],candidates:{'0:f2':[candidate,{...candidate,id:'different-slot',slot:'single'},{...candidate,id:'unknown',conditions:null}]}}
+  const input=deduplicationInput(batch)
+  assert.deepEqual(input.candidates['0:f2'].map(c=>c.canReuse),[true,false,false])
+  assert.equal('inputId' in input.candidates['0:f2'][0],false)
+  assert.equal('evidence' in input.candidates['0:f2'][0],false)
+  assert.doesNotThrow(()=>validateDecisions(batch.facts,[{inputId:'0:f2',action:'reuse',targetId:'batch:0:f1'}],batch.candidates))
+  for(const targetId of ['0:f1','m','different-slot','unknown']) assert.throws(()=>validateDecisions(batch.facts,[{inputId:'0:f2',action:'reuse',targetId}],batch.candidates))
+  assert.throws(()=>validateDecisions(batch.facts,[{inputId:'0:f2',action:'reuse',targetId:'batch:0:f1',candidateIds:null}],batch.candidates),/不能含 candidateIds/)
+  assert.match(DEDUP_SYSTEM,/不用的字段必须省略/)
+})
+
+test('out-of-scope reuse is still rejected when the other fact has a deterministic keep',async t=>{
+  const {memory,ingest}=fixture(t,{deduplicate:async({facts})=>facts.map(f=>({inputId:f.inputId,action:'reuse',targetId:'foreign-fact'}))})
+  ingest();ingest('也喜欢咖啡')
+  assert.equal((await memory.consolidate(S)).code,'INVALID_DECISIONS')
+  assert.equal(memory.list(S).length,0);assert.equal(memory.status(S).recvSeq,0)
+})
+
+test('typed extraction prompt and native validation reject null, empty, object and array values without advancing',async t=>{
+  let value=null
+  const {memory,ingest}=fixture(t,{extract:async({messages,system})=>{
+    assert.match(system,/value 只能是非空字符串、有限数值或布尔值/)
+    return {facts:[extracted(messages[0],{value})],summary:null}
+  }})
+  ingest()
+  for(const invalid of [null,'',[],{},Infinity]) {
+    value=invalid;memory.resumeExtraction(S)
+    assert.equal((await memory.consolidate(S)).code,'INVALID_STRUCTURE')
+    assert.equal(memory.status(S).recvSeq,0);assert.equal(memory.list(S).length,0)
+  }
+  value=false;memory.resumeExtraction(S)
+  assert.equal((await memory.consolidate(S)).ok,true)
+  assert.equal(memory.list(S)[0].value,false)
+  assert.match(EXTRACTION_SYSTEM,/conditions 只能是 null/)
 })

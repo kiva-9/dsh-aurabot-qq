@@ -45,4 +45,13 @@ test('管理路由完成上传、待审过滤、编辑、批准、停用、删�
   assert.equal((await query('/stickers', {})).total, 0)
   assert.equal((await query('/stickers', { status: 'deleted' })).total, 1)
   assert.equal((await query('/stickers/queue', { kind: 'sync' })).ok, true)
+  assert.equal((await post('/stickers/batch', { action: 'approve', entries: [{ id, expectedRevision: 1 }] })).ok, false)
+  const second = await post('/sticker/upload', { data, chatId: 'group:2', toQQ: false })
+  const entries = [{ id: second.item.id, expectedRevision: second.item.revision }]
+  const scoped = await post('/stickers/batch', { chatId: 'group:1', action: 'approve', entries, admin: false, accountId: 'other' })
+  assert.equal(scoped.succeeded, 0, '面板认证由宿主提供；不能越过明确选择的聊天范围')
+  assert.equal((await post('/stickers/batch', { chatId: 'group:2', action: 'approve', entries })).succeeded, 1)
+  assert.equal((await query('/stickers/queue', { chatId: 'group:2' })).runtime.enabled, true)
+  assert.equal((await post('/sticker/analysis/reconcile', { chatId: 'group:2', taskId: 'missing' })).ok, false)
+  assert.equal((await post('/sticker/sync/bind', { chatId: 'group:2', id: second.item.id, emojiId: 'id', confirmedExisting: true })).code, 'NOT_BINDABLE')
 })

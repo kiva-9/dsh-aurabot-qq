@@ -42,7 +42,7 @@ export const MEMORY_VECTOR_CONFIG_SCHEMA = {
     roles: { type: 'object', additionalProperties: false, properties: { text: roleSchema, image: roleSchema, joint: roleSchema } },
     reranker: RERANKER_SCHEMA,
     queue: { type: 'object', additionalProperties: false, properties: { batchSize: bounded(1, 128, 32), maxPending: bounded(1, 4096, 256), maxAttempts: bounded(1, 10, 3) } },
-    retrieval: { type: 'object', additionalProperties: false, properties: { maxCandidates: bounded(1, 10000, 5000), lexicalLimit: bounded(1, 1000, 80), vectorLimit: bounded(1, 1000, 80), rrfK: bounded(1, 1000, 60), limit: bounded(1, 1000, 10) } },
+    retrieval: { type: 'object', additionalProperties: false, properties: { maxCandidates: bounded(1, 10000, 5000), lexicalLimit: bounded(1, 1000, 80), vectorLimit: bounded(1, 1000, 80), rrfK: bounded(1, 1000, 60), limit: bounded(1, 1000, 10), contextTimeoutMs: bounded(100, 2000, 800) } },
   },
 }
 

@@ -59,8 +59,9 @@ export function normalizeFact(v) {
   return f
 }
 // Equality is deliberately structural; similarity is only a candidate retrieval hint.
+export const REUSE_FIELDS = Object.freeze(['subject','predicate','value','speakerId','polarity','modality','conditions','eventTime','validFrom','validTo','stability','slot'])
 export function structuralKey(f) {
-  return canonical(Object.fromEntries(['subject','predicate','value','speakerId','polarity','modality','conditions','eventTime','validFrom','validTo','stability','slot'].map(k => [k, f[k]])))
+  return canonical(Object.fromEntries(REUSE_FIELDS.map(k => [k, f[k]])))
 }
 export const factFingerprint = f => hash(structuralKey(f))
 export function reusable(a, b) {
@@ -86,7 +87,8 @@ export function validateDecisions(facts, decisions, candidates) {
     const allowed = new Map((candidates[d.inputId] || []).map(f => [f.id, f]))
     if (d.action === 'keep' && ('targetId' in d || 'candidateIds' in d)) fail('INVALID_DECISIONS', 'keep 不能包含目标')
     if (d.action === 'reuse') {
-      if ('candidateIds' in d || !allowed.has(d.targetId)) fail('INVALID_DECISIONS', 'reuse 目标不在本次授权候选中')
+      if ('candidateIds' in d) fail('INVALID_DECISIONS', 'reuse 不能含 candidateIds，即使值为 null 或空数组')
+      if (!allowed.has(d.targetId)) fail('INVALID_DECISIONS', 'reuse 目标不在本次授权候选中')
       if (!reusable(incoming.get(d.inputId), allowed.get(d.targetId))) fail('STRUCTURAL_CONFLICT', 'reuse 主体、说话人、肯否、数值、模态、条件或时间不一致/未知')
     }
     if (d.action === 'possible_duplicate') {

@@ -80,8 +80,8 @@ before(async () => {
   }))
   fake = createFakeDsh({ brain: async ({ text }) => {
     if (text.includes('MODEL_SKIP')) return '[沉默]'
-    if (text.includes('SUCCESS_BATCH')) return '第一句|||第二句|||第三句'
-    if (text.includes('PARTIAL_BATCH')) return '已确认的一句|||回执未知的一句'
+    if (text.includes('SUCCESS_BATCH')) return ['甲'.repeat(110), '乙'.repeat(110), '丙'.repeat(110)].join('|||')
+    if (text.includes('PARTIAL_BATCH')) return '已确认的一句' + '甲'.repeat(100) + '|||' + '回执未知的一句' + '乙'.repeat(100)
     return '收到这条请求'
   } })
   host = (await import('../src/host.js')).apply(fake.ctx)

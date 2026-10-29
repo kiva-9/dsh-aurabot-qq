@@ -338,5 +338,18 @@ export function wantsVoice(text) {
 
 export function bubbleDelay(next = '', rand = Math.random) {
   if (typeof next === 'function') { rand = next; next = '' }
-  return Math.round(Math.min(4500, Math.max(700, 350 + stringOf(next).length * 110)) * (0.8 + rand() * 0.5))
+  return Math.round(Math.min(1400, Math.max(250, 150 + stringOf(next).length * 25)) * (0.8 + rand() * 0.5))
+}
+
+/** 合并短答碎片；引用、代码、表格与媒体边界保持原样。 */
+export function compactShortReplies(items, maxChars = 100) {
+  const out = []
+  for (const item of items) {
+    const previous = out.at(-1)
+    if (item.kind === 'text' && previous?.kind === 'text' && !item.replyTo && !previous.replyTo &&
+      !/[`|]/.test(previous.value + item.value) && !item.value.includes('\n') && previous.value.length + item.value.length + 1 <= maxChars) {
+      out[out.length - 1] = { ...previous, value: previous.value + '\n' + item.value }
+    } else out.push({ ...item })
+  }
+  return out
 }

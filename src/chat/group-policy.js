@@ -65,6 +65,7 @@ export function decideGroupReply(p) {
   const said = p.botReplyTimes || []
   if (p.mentioned) return { reply: true, mode: 'must', reason: '被 @' }
   if (p.repliedToBot) return { reply: true, mode: 'must', reason: '引用了她的消息' }
+  if (p.continuedRequest) return { reply: true, mode: 'must', reason: '补充同一请求的材料或问题' }
   const hit = (pol.wakeWords || []).find((w) => w && text.includes(w))
   if (hit) return { reply: true, mode: 'must', reason: `叫到了「${hit}」` }
   // 自动参与的刹车；上面已经处理有效显式请求。

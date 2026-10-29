@@ -39,7 +39,7 @@ test('dispose aborts and settles extraction, then late model output never touche
 })
 test('stop while dedup is pending rolls back publication and waits for the worker to release its lease',async t=>{
   const {storage}=fixture(t),entered=gate(),resume=gate()
-  const memory=createMemoryStore({storage,extract:async({messages})=>({facts:messages.map(fact),summary:null}),deduplicate:async({facts})=>{entered.release();await resume.promise;return facts.map(f=>({inputId:f.inputId,action:'keep'}))}})
+  const memory=createMemoryStore({storage,extract:async({messages})=>({facts:[fact(messages[0]),{...fact(messages[0]),inputId:'two',value:'茶'}],summary:null}),deduplicate:async({facts})=>{entered.release();await resume.promise;return facts.map(f=>({inputId:f.inputId,action:'keep'}))}})
   const job=memory.consolidate({scope:S});await entered.promise
   await memory.stop()
   assert.equal((await job).ok,false)

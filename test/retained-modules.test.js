@@ -61,9 +61,9 @@ test('翻唱工具不借用同轮主人身份；明确 turnActor 后绑定 reque
 test('翻唱模块用真实 receipt 写范围经历，并以真实请求来源接新版 mood.nudge', async (t) => {
   const f = fixture(t, songModule), r = f.actor('10000001'), scope = f.hub.scopeFor('group:22')
   const job = f.service.runner.enqueue({ kind: 'song', chatId: 'group:22', requestId: r.id, actorId: r.actorId, epoch: r.epoch,
-    input: { scope, dryRun: false, personaSnapshot: f.hub.personaFor('group:22') } })
-  const output = { title: '测试歌', receipt: { delivered: 1, message_id: 'confirmed-qq' } }
-  f.storage.db.run("UPDATE jobs SET state='delivered',output_json=? WHERE id=?", JSON.stringify(output), job.id)
+    input: { scope, query: '测试歌 测试歌手', track: '测试歌', artist: '测试歌手', dryRun: false, personaSnapshot: f.hub.personaFor('group:22') } })
+  const output = { title: '测试歌 — 测试歌手', track: { id: 'fixture', name: '测试歌', artists: '测试歌手' }, receipt: { delivered: 1, message_id: 'confirmed-qq' } }
+  f.storage.db.run("UPDATE jobs SET state='delivered',output_json=?,finished_at=? WHERE id=?", JSON.stringify(output), Date.now(), job.id)
   const execution = { guard: () => true, commit: (fn) => fn() }
   await f.service.handler.notify(f.service.runner.get(job.id), 'delivered', {}, execution)
   await f.service.handler.notify(f.service.runner.get(job.id), 'delivered', {}, execution)

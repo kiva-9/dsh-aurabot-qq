@@ -108,6 +108,21 @@ test('确定性必回分支不需要随机值，唤醒词不保存原文也能�
   assert.equal(JSON.stringify(v).includes('PRIVATE RAW MESSAGE'),false)
 })
 
+test('任务后续 continuedRequest 真/假按实际输入冻结，旧记录不补造字段', t => {
+  const s=setup(t),r=s.make()
+  for(const continuedRequest of [true,false,undefined]) {
+    const p=snapshot()
+    if(continuedRequest!==undefined)p.replay.input.continuedRequest=continuedRequest
+    p.replay.baseDecision=decideGroupReply({...p.replay.input,rand:()=>.2})
+    const e=s.event(r,1100,p),v=s.d.replay({eventId:e.id}).events[0]
+    assert.equal(v.recorded.facts.continuedRequest,continuedRequest)
+    assert.equal(Object.hasOwn(v.recorded.facts,'continuedRequest'),continuedRequest!==undefined)
+    assert.equal(v.recomputation.status,'recomputed')
+    assert.equal(v.recomputation.matchesRecordedBase,true)
+    if(continuedRequest===true)assert.equal(v.recomputation.decision.mode,'must')
+  }
+})
+
 test('账号、聊天和显式request关联隔离；混合来源请求被拒绝',t=>{
   const s=setup(t),own=s.make(),other=s.make({account:'21'}),elsewhere=s.make({chatId:'group:99'})
   const a=s.event(own,1100,snapshot()),b=s.event(other,1100,snapshot(),{account:'21'})
@@ -256,4 +271,94 @@ test('脱敏改动了策略输入时明确无法精确回放，不导出密钥',
   const e=s.event(r,1100,p),v=s.d.replay({eventId:e.id})
   assert.deepEqual(v.events[0].recomputation,{status:'unavailable',missing:['unredacted_historical_input']})
   assert.equal(JSON.stringify(v).includes('replay-secret-fixture'),false)
+})
+
+test('歌曲scope.account与旧accountId都计入真实回执样本，内容匹配独立于运输状态', t => {
+  const s=setup(t)
+  for(let i=0;i<5;i++) {
+    const r=s.make(),batch=s.receipt(r,{at:2000+i}),job=s.job(r,'delivered','20',batch)
+    s.event(r,1200,{decision:{reply:true}});s.storage.requests.setState(r.id,'answered')
+    s.storage.db.run("UPDATE jobs SET kind='song',input_json=?,output_json=? WHERE id=?",
+      JSON.stringify({scope:{account:'20',chat:r.chatId,persona:'fish'}}),
+      JSON.stringify({deliveryBatchId:batch,title:'Wanted Dead or Alive - Bon Jovi'}),job)
+    const m=s.d.requestLatency(r.id)
+    assert.equal(m.latencyMs.firstConfirmedReply,1000+i);assert.equal(m.latencyMs.finalDelivery,1000+i)
+    assert.deepEqual(m.issues,[])
+    const view=s.d.replay({requestId:r.id}).observedLedger.jobs[0]
+    assert.equal(view.title,'Wanted Dead or Alive - Bon Jovi');assert.equal(view.contentMatch,'unverified')
+  }
+  assert.equal(s.d.latencies().metrics.finalDelivery.sampleCount,5)
+  assert.equal(s.d.latencies().uniqueConfirmedReceipts,5)
+  const d=createDiagnostics({storage:s.storage,getConfig:()=>s.config,hub:()=>null,modules:()=>null})
+  try {assert.deepEqual(d.summary().jobs.map(x=>({...x})),[{state:'delivered',n:5}])} finally {d.dispose()}
+})
+
+test('冲突账号/聊天scope仍隔离，不因兼容scope.account而放宽所有权',t=>{
+  const s=setup(t)
+  for(const input of [{accountId:'21',scope:{account:'20'}},{accountId:'20',scope:{account:'21'}},{scope:{account:'20',chat:'group:other'}}]) {
+    const r=s.make(),batch=s.receipt(r),job=s.job(r,'delivered','20',batch)
+    s.storage.db.run('UPDATE jobs SET input_json=? WHERE id=?',JSON.stringify(input),job)
+    s.storage.requests.setState(r.id,'answered')
+    assert.equal(s.d.requestLatency(r.id).latencyMs.finalDelivery,null)
+    assert.ok(s.d.replay({requestId:r.id}).unknown.includes('ledger_scope_mismatch'))
+  }
+})
+
+test('后台批次从job持久化引用补链，request_id缺失也用真实outbox时间，不能只靠job finished时间',t=>{
+  const s=setup(t),r=s.make(),batch=s.receipt(r,{at:2400}),job=s.job(r,'delivered')
+  s.storage.db.run('UPDATE outbox SET request_id=NULL WHERE id=?',batch)
+  s.storage.db.run('UPDATE jobs SET output_json=?,finished_at=999999 WHERE id=?',JSON.stringify({receipt:{batchId:batch}}),job)
+  s.storage.requests.setState(r.id,'answered')
+  assert.equal(s.d.requestLatency(r.id).latencyMs.finalDelivery,1400)
+  assert.equal(s.d.timeline(r.id).events.find(e=>e.kind==='QQ回执').at,2400)
+  s.storage.db.run('DELETE FROM outbox WHERE id=?',batch)
+  assert.equal(s.d.requestLatency(r.id).latencyMs.finalDelivery,null)
+})
+
+test('共享批次显式链接多个请求，分别计请求延迟但不重复计运输回执，不制造记录时间',t=>{
+  const s=setup(t),a=s.make(),b=s.make({receivedAt:1050}),event=s.event(a,1200,{decision:{reply:true}})
+  const batch=s.receipt(a,{at:1500})
+  s.storage.requests.setState(a.id,'answered');s.storage.requests.setState(b.id,'answered')
+  assert.equal(s.d.requestLatency(b.id).latencyMs.finalDelivery,null,'没有显式成员关系时不按时间猜测')
+  s.time(99999)
+  s.d.linkRequestBatch({chatId:a.chatId,epoch:a.epoch,requestIds:[a.id,b.id],batchIds:[batch],decisionEventIds:[event.id]})
+  // Duplicated membership records are not duplicated deliveries or decisions.
+  s.d.linkRequestBatch({chatId:a.chatId,epoch:a.epoch,requestIds:[a.id,b.id],batchIds:[batch],decisionEventIds:[event.id]})
+  assert.deepEqual(s.d.requestLatency(b.id).latencyMs,{firstDecision:150,firstConfirmedReply:450,finalDelivery:450})
+  assert.equal(s.d.requestLatency(b.id).counts.sharedReceipts,1)
+  assert.equal(s.d.timeline(b.id).events.filter(e=>e.kind==='QQ回执').length,1)
+  assert.equal(s.d.latencies().metrics.finalDelivery.sampleCount,2)
+  assert.equal(s.d.latencies().uniqueConfirmedReceipts,1)
+})
+
+test('共享关联拒绝跨账号、跨群、跨代、混合来源与未知批次；受污染后台批次不借链',t=>{
+  const s=setup(t),r=s.make(),batch=s.receipt(r),foreign=s.make({account:'21'}),elsewhere=s.make({chatId:'group:other'})
+  for(const args of [
+    {requestIds:[r.id,foreign.id]}, {requestIds:[r.id,elsewhere.id]}, {epoch:9}, {batchIds:['missing']}, {account:'21'},
+  ]) assert.throws(()=>s.d.linkRequestBatch({chatId:r.chatId,epoch:r.epoch,requestIds:[r.id],batchIds:[batch],...args}),/范围|账号|参数/)
+  const other=s.make(),job=s.job(r,'delivered','20',batch)
+  s.storage.db.run('UPDATE outbox SET request_id=? WHERE id=?',other.id,batch)
+  s.storage.requests.setState(r.id,'answered')
+  assert.equal(s.d.requestLatency(r.id).latencyMs.finalDelivery,null)
+  assert.equal(s.d.replay({requestId:r.id}).observedLedger.jobs.length,0)
+  assert.ok(job)
+})
+
+test('关联记录没有decision时间或确认回执时仍缺样本，0回执无效、未来补链不改变旧时钟',t=>{
+  const s=setup(t),r=s.make(),other=s.make(),batch=s.receipt(r,{messageId:'0'})
+  s.storage.requests.setState(r.id,'answered');s.storage.requests.setState(other.id,'answered')
+  s.time(55555)
+  s.d.linkRequestBatch({chatId:r.chatId,epoch:r.epoch,requestIds:[r.id,other.id],batchIds:[batch]})
+  assert.deepEqual(s.d.requestLatency(other.id).latencyMs,{firstDecision:null,firstConfirmedReply:null,finalDelivery:null})
+  assert.equal(s.d.latencies().metrics.finalDelivery.sampleCount,0)
+})
+
+test('来源时间损坏不能转成0或用请求/诊断登记时刻代替',t=>{
+  const s=setup(t),r=s.make()
+  s.event(r,1200,{decision:{reply:true}});s.receipt(r);s.storage.requests.setState(r.id,'answered')
+  s.storage.db.run('UPDATE messages SET received_at=? WHERE id=?','missing',r.sourceMessageIds[0])
+  const m=s.d.requestLatency(r.id)
+  assert.equal(m.times.receivedAt,null)
+  assert.deepEqual(m.latencyMs,{firstDecision:null,firstConfirmedReply:null,finalDelivery:null})
+  assert.equal(s.d.latencies().metrics.finalDelivery.sampleCount,0)
 })

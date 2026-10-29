@@ -33,6 +33,7 @@ function harness(t) {
     get: (path, query = {}) => routes.get(path)({ method: 'GET', query }),
     post: (path, body = {}) => routes.get(path)({ method: 'POST', body }),
     event: (a) => { for (const fn of events.get('activity') || []) fn(a) },
+    configEvent: cfg => { for(const fn of events.get('config') || []) fn(cfg) },
   }
 }
 test('module file lists exist and routes require HTTP method, explicit scope and current account', async t => {
@@ -166,10 +167,10 @@ test('events resolve msg.chatId and hub.personaFor; stale identity and system co
   const f = harness(t), mood = f.start(moodModule), learning = f.start(learningModule)
   const m = f.message('谢谢你，摸鱼一会儿')
   f.event({ kind: 'in', msg: { chatId: S.chat }, chatId: 'group:2', account: 'bot', messageId: m.id })
+  assert.ok(f.resolutions.every(id => id === S.chat))
   assert.equal(mood.state(S).value, 66)
   assert.equal(mood.state({ ...S, chat: 'group:2' }).value, 60)
   assert.equal(learning.checkpoint(S, 'jargon').queued, 1)
-  assert.ok(f.resolutions.every(id => id === S.chat))
   const later = f.message('谢谢你')
   f.event({ kind: 'in', chatId: S.chat, account: 'old-account', messageId: later.id })
   assert.equal(mood.state(S).value, 66)
@@ -233,10 +234,45 @@ for (const reason of ['error', 'max-tokens', 'aborted', 'tool-calls', null]) {
       yield { type: 'text-delta', text: '{"items":[],"noInfo":true}' }
       if (reason) yield { type: 'finish', reason }
     } } }
-    await assert.rejects(modelText(dsh, { cfg: { model: { provider: 'test', model: 'stream' } }, system: '', text: 'evidence', signal: new AbortController().signal }), { code: 'MODEL_FAILED' })
+    await assert.rejects(modelText(dsh, { cfg: { model: { provider: 'test', model: 'stream' } }, system: '', text: 'evidence', signal: new AbortController().signal }),
+      { code: reason==='error'?'MODEL_FAILED':reason==='aborted'?'MODEL_ABORTED':'MODEL_INCOMPLETE' })
   })
 }
 test('model output is bounded while streaming', async () => {
   const dsh = { llm: { stream: async function* () { yield { type: 'text-delta', text: 'x'.repeat(16001) }; yield { type: 'finish', reason: 'stop' } } } }
   await assert.rejects(modelText(dsh, { cfg: { model: { provider: 'test', model: 'stream' } }, system: '', text: 'evidence', signal: new AbortController().signal }), { code: 'MODEL_OUTPUT_TOO_LARGE' })
+})
+
+for(const module of [learningModule,moodModule]) test(`${module.id} config hook cancels a revoked snapshot even if the current config was re-enabled`,async t=>{
+  const f=harness(t),entered=deferred(),late=deferred()
+  f.cfg.allow={groups:['1']};f.cfg.mood.judge=true
+  const service=f.start(module),ids=sources(f)
+  f.model.handler=async()=>{entered.resolve();await late.promise;return module===learningModule?'{"items":[],"noInfo":true}':'{"delta":5,"confidence":1,"reason":"旧结果"}'}
+  const job=module===learningModule?service.learn(S,'expression'):service.judge(S,{sourceMessageIds:[ids[0]]})
+  await entered.promise
+  const revoked=structuredClone(f.cfg);revoked.allow.groups=[]
+  // Hook delivery may be asynchronous: it must honor the revoked event snapshot.
+  f.configEvent(revoked)
+  assert.equal((await job).ok,false);assert.equal(f.calls[0].signal.aborted,true)
+  late.resolve();await settled()
+  if(module===learningModule) {
+    assert.equal(service.checkpoint(S,'expression').processedSeq,0)
+    f.cfg.allow.groups=[]
+    await f.timers[0]();assert.equal(f.calls.length,1,'persisted scopes cannot bypass allowlist on periodic runs')
+  } else assert.equal(service.state(S).value,60)
+})
+
+test('mood manual retry API requires current scoped evidence and never bypasses disabled policy',async t=>{
+  const f=harness(t);f.cfg.mood.judge=true;f.cfg.allow={groups:['1']};const mood=f.start(moodModule)
+  const message=f.message('谢谢')
+  f.model.handler=async()=>'{"delta":5,"confidence":1,"reason":"交流愉快"}'
+  assert.equal((await f.get('/mood/judge',S)).code,'METHOD_NOT_ALLOWED')
+  assert.equal((await f.post('/mood/judge',{scope:S})).code,'EVIDENCE_REQUIRED')
+  assert.equal((await f.post('/mood/judge',{scope:S,sourceMessageIds:[message.id]})).value,65)
+  assert.equal((await f.post('/mood/resume',{scope:S})).ok,true)
+  assert.equal((await f.post('/mood/judge',{scope:S,sourceMessageIds:[message.id]})).code,'DUPLICATE')
+  f.cfg.allow.groups=[]
+  assert.equal((await f.post('/mood/resume',{scope:S})).code,'SCOPE_DISABLED')
+  assert.equal((await f.post('/mood/judge',{scope:S,sourceMessageIds:[message.id]})).code,'DISABLED')
+  assert.equal(mood.state(S).value,65);assert.equal(f.calls.length,1)
 })

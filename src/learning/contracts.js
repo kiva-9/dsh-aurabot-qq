@@ -28,12 +28,17 @@ export const DEFAULT_LEARNING = Object.freeze({
   maxAgeDays: 30, maxItemsPerScope: 200, maxEvidencePerItem: 12, maxQueue: 200, batchSize: 24,
   minEvidence: 3, minAuthors: 2, minIntervalMs: 300000, noInfoBackoffMs: 3600000,
   maxCallsPerDay: 30, maxConcurrent: 2, timeoutMs: 30000, maxContextItems: 4, contextCooldownMs: 600000,
+  retryBaseMs: 60000, retryMaxMs: 3600000, pauseAfterFailures: 6, maxOutputTokens: 2400,
 })
 export function settings(cfg = {}) {
   const raw = cfg.learning || {}, c = { ...DEFAULT_LEARNING, ...raw }
   for (const k of ['enabled', 'learnEnabled', 'useEnabled', 'learnExpressions', 'useExpressions', 'learnJargon', 'useJargon', 'allowPrivate']) c[k] = raw[k] === undefined ? DEFAULT_LEARNING[k] : raw[k] === true
-  const bounds = { maxAgeDays: [1, 90], maxItemsPerScope: [1, 1000], maxEvidencePerItem: [1, 30], maxQueue: [1, 1000], batchSize: [1, 100], minEvidence: [2, 20], minAuthors: [2, 10], minIntervalMs: [0, 86400000], noInfoBackoffMs: [1000, 604800000], maxCallsPerDay: [1, 200], maxConcurrent: [1, 4], timeoutMs: [100, 120000], maxContextItems: [1, 8], contextCooldownMs: [0, 86400000] }
+  // Zero removes only the daily ceiling; reservations, concurrency and retries still apply.
+  const bounds = { maxAgeDays: [1, 90], maxItemsPerScope: [1, 1000], maxEvidencePerItem: [1, 30], maxQueue: [1, 1000], batchSize: [1, 100], minEvidence: [2, 20], minAuthors: [2, 10], minIntervalMs: [0, 86400000], noInfoBackoffMs: [1000, 604800000], maxCallsPerDay: [1, 1000000], maxConcurrent: [1, 4], timeoutMs: [100, 120000], maxContextItems: [1, 8], contextCooldownMs: [0, 86400000] }
   for (const [key, [min, max]] of Object.entries(bounds)) c[key] = numberIn(raw[key], DEFAULT_LEARNING[key], min, max)
+  if (raw.maxCallsPerDay === 0 || raw.maxCallsPerDay === '0') c.maxCallsPerDay = 0
+  for (const [key,min,max] of [['retryBaseMs',60000,3600000],['retryMaxMs',60000,86400000],['pauseAfterFailures',3,20],['maxOutputTokens',1000,8000]]) c[key]=numberIn(raw[key],DEFAULT_LEARNING[key],min,max)
+  c.retryMaxMs=Math.max(c.retryBaseMs,c.retryMaxMs)
   c.minEvidence = Math.max(c.minEvidence, c.minAuthors)
   c.maxQueue = Math.max(c.maxQueue, c.minEvidence)
   c.batchSize = Math.max(c.minEvidence, Math.min(c.batchSize, c.maxQueue))

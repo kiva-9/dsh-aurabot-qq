@@ -5,11 +5,13 @@ import { defineTool, str } from '../../tools/tools.js'
 export default {
   id: 'memory', name: '记忆', version: '2.0.0', tab: 'memory',
   description: '带来源、范围隔离和审计的 SQLite 事实记忆',
-  files: ['features/memory.js','memory/index.js','memory/schema.js','memory/scope.js','memory/contracts.js','memory/store.js','memory/lexical.js','memory/extraction.js','memory/profiles.js','memory/legacy.js','memory/lifecycle.js','memory/query.js'],
+  files: ['features/memory.js','memory/index.js','memory/schema.js','memory/scope.js','memory/contracts.js','memory/store.js','memory/lexical.js','memory/extraction.js','memory/profiles.js','memory/legacy.js','memory/lifecycle.js','memory/query.js','memory/background.js'],
   setup(api) {
     const { hub, http, storage } = api.core
     const getAccount=()=>String(api.config().botQQ || hub?.selfId || '')
     const memory = createMemoryStore({ storage, dsh:api.dsh, getConfig:api.config, hub, log:api.log, getAccount })
+    api.on?.('config',cfg=>memory.refreshPolicy(cfg))
+    api.onDispose?.(()=>memory.stop())
     const activeScopes = new Map()
     const requireCurrent=scope=>{
       if(getAccount() && scope.account!==getAccount()) throw Object.assign(new Error('账号已改变，旧会话不能访问记忆'),{code:'ACCOUNT_CHANGED'})
@@ -24,6 +26,7 @@ export default {
       if (args.chat.kind === 'system') return ''
       let scope
       try { scope = resolveScope(args) } catch { return '' }
+      if (!memory.canProcess(scope)) return ''
       const factScope={...scope,persona:''}
       activeScopes.set(JSON.stringify(factScope),factScope)
       memory.enqueue(factScope)
@@ -37,7 +40,7 @@ export default {
       const scopes = new Map(activeScopes)
       for (const scope of memory.registeredScopes()) scopes.set(JSON.stringify(scope),scope)
       for (const scope of scopes.values()) {
-        if(getAccount() && scope.account!==getAccount()) continue
+        if(!memory.canProcess(scope)) continue
         const result = await memory.tick({scope})
         if (!result.ok) api.log.warn('记忆提炼保留待处理区间：',result.message)
       }
@@ -105,6 +108,10 @@ export default {
     route('/memory/recalls',req => {const q=query(req);return envelope(q.scope,{list:memory.recalls(q)})})
     route('/memory/extraction',req => {const q=query(req);return envelope(q.scope,{checkpoint:memory.status(q),pending:memory.recentPending(q),episodes:memory.episodes(q)})})
     route('/memory/extract',async req => memory.consolidate(await http.body(req)))
+    route('/memory/extraction/resume',async req => {
+      if(req.method!=='POST') return {ok:false,code:'METHOD_NOT_ALLOWED',message:'此接口只接受 POST'}
+      return memory.resumeExtraction(requireCurrent(scopeOf(await http.body(req))))
+    })
     route('/profiles',req => {const q=query(req);return envelope(q.scope,{list:memory.profiles(q)})})
     route('/profiles/override',req => {const q=query(req);return envelope(q.scope,memory.getOverrides(q.subject || q.qq,q))})
     route('/profiles/rebuild',async req => {const b=await http.body(req),scope=scopeOf(b);return envelope(scope,{profile:await memory.buildProfile(b.subject || b.qq,{...b,scope})})})

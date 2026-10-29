@@ -13,6 +13,9 @@ import { prepareRestore, isolatedRestoreConfig } from '../src/migrate/restore.js
 import { ensureSchema as learningSchema } from '../src/learning/schema.js'
 import { STICKER_SCHEMA } from '../src/stickers/schema.js'
 import { createUsageLedger } from '../src/diagnostics/usage.js'
+import { createLearning } from '../src/learning/index.js'
+import { createMood } from '../src/features/mood.js'
+import { scopeKey } from '../src/memory/scope.js'
 
 const scope={account:'fixture-bot',chat:'group:1',persona:''}
 const admin={scope,actorId:'fixture-admin',reason:'explicit fixture review'}
@@ -218,6 +221,122 @@ test('new usage ledger keeps post-backup reported values and nulls without inven
     {input_tokens:12,output_tokens:4,credits:2,amount:0.125,currency:'fixture-currency'})
   assert.equal(db.prepare("SELECT amount FROM service_calls WHERE id='unknown-call'").get().amount,null)
   assert.equal(result.counts.preservedUsageCalls,2)
+})
+
+test('background recovery preserves scoped checkpoints and receive sequence without replaying queues or model leases',async t=>{
+  const f=fixture(t),a=f.fact(),other={...scope,account:'another-bot'},b=f.fact('茶',other)
+  const learned={...scope,persona:'fish'},key=JSON.stringify([learned.account,learned.chat,learned.persona])
+  learningSchema(f.storage.db)
+  f.memory.enqueue(scope);f.memory.enqueue(other)
+  f.storage.db.run('UPDATE memory_checkpoints SET recv_seq=? WHERE scope_key=?',a.message.recvSeq,scopeKey(scope))
+  const retry=(namespace,s,body)=>f.storage.db.run('INSERT OR REPLACE INTO background_work_state VALUES(?,?,?)',namespace,JSON.stringify([s.account,s.chat,s.persona]),JSON.stringify(body))
+  retry('memory',scope,{failures:2,batchLimit:8,charLimit:6000,phase:'running',lastCallId:'old-call'})
+  retry('memory',other,{failures:9,batchLimit:1,charLimit:500,paused:true})
+  f.storage.db.run(`INSERT INTO wp6_learning_checkpoints(scope_key,account_id,chat_id,persona_id,kind,scan_seq,processed_seq,attempts,lease_owner,lease_until,outcome)
+    VALUES(?,?,?,?,?, ?,0,2,'old-worker',9999999999999,'running')`,key,scope.account,scope.chat,learned.persona,'expression',a.message.recvSeq)
+  f.storage.db.run('INSERT INTO wp6_learning_queue VALUES(?,?,?,?,?)',key,'expression',a.message.id,a.message.recvSeq,'old-spam')
+  f.storage.db.run('INSERT INTO wp6_model_calls VALUES(?,?,?,?)','reservation',key,'expression',9999999999999)
+  f.storage.db.run('INSERT INTO wp6_model_budget VALUES(?,?)','2026-10-29',7)
+  f.backup()
+  const fresh=f.fact('新事实'),currentOnly={...scope,chat:'group:2'}
+  const latest=f.fact('仅当前库',currentOnly)
+  f.memory.enqueue(scope);f.memory.enqueue(currentOnly)
+  f.storage.db.run("UPDATE memory_checkpoints SET recv_seq=?,state='running',lease_token='current-worker',lease_until=9999999999999 WHERE scope_key=?",fresh.message.recvSeq,scopeKey(scope))
+  retry('memory',scope,{failures:5,batchLimit:2,charLimit:1000,nextAttemptAt:9999999999999,lastCallId:'current-call',phase:'extraction'})
+  f.storage.db.run('UPDATE wp6_learning_checkpoints SET scan_seq=?,processed_seq=?,attempts=6,overflow_from=?,overflow_to=?',fresh.message.recvSeq,a.message.recvSeq,b.message.recvSeq,fresh.message.recvSeq)
+  f.storage.db.run('INSERT INTO wp6_learning_queue VALUES(?,?,?,?,?)',key,'expression',fresh.message.id,fresh.message.recvSeq,'new-spam')
+  f.storage.db.run('UPDATE wp6_model_budget SET calls=20')
+  f.storage.db.run('INSERT INTO wp6_model_calls VALUES(?,?,?,?)','mood-reservation',key,'mood',9999999999999)
+  await f.close();const before=[hash(f.currentDb),hash(f.backupDb)]
+  const result=await f.run(),db=f.open(result.candidateDb)
+  assert.deepEqual([hash(f.currentDb),hash(f.backupDb)],before)
+  assert.equal(result.backgroundRequiresReview,true)
+  const cp=db.prepare('SELECT * FROM memory_checkpoints WHERE scope_key=?').get(scopeKey(scope))
+  assert.equal(cp.recv_seq,fresh.message.recvSeq);assert.equal(cp.watermark,fresh.message.recvSeq)
+  assert.equal(cp.lease_token,null);assert.equal(cp.lease_until,null)
+  assert.equal(db.prepare('SELECT recv_seq FROM memory_checkpoints WHERE scope_key=?').get(scopeKey(other)).recv_seq,0)
+  assert.equal(db.prepare('SELECT watermark FROM memory_checkpoints WHERE scope_key=?').get(scopeKey(currentOnly)).watermark,latest.message.recvSeq)
+  const lc=db.prepare('SELECT * FROM wp6_learning_checkpoints').get()
+  assert.equal(lc.scan_seq,fresh.message.recvSeq);assert.equal(lc.processed_seq,a.message.recvSeq)
+  assert.equal(lc.overflow_from,b.message.recvSeq);assert.equal(lc.overflow_to,fresh.message.recvSeq)
+  assert.equal(lc.attempts,6);assert.equal(lc.lease_owner,null);assert.equal(lc.lease_until,0);assert.equal(lc.outcome,'paused')
+  for(const table of ['wp6_learning_queue','wp6_model_calls']) assert.equal(db.prepare(`SELECT COUNT(*) n FROM ${table}`).get().n,0)
+  assert.equal(db.prepare('SELECT calls FROM wp6_model_budget').get().calls,20)
+  const progress=s=>JSON.parse(db.prepare("SELECT body FROM background_work_state WHERE namespace='memory' AND scope_key=?").get(JSON.stringify([s.account,s.chat,s.persona])).body)
+  assert.equal(progress(scope).failures,5);assert.equal(progress(other).failures,9)
+  assert.equal(progress(scope).batchLimit,2);assert.equal(progress(scope).charLimit,1000)
+  for(const row of db.prepare('SELECT body FROM background_work_state').all()) {
+    const p=JSON.parse(row.body);assert.equal(p.paused,true);assert.equal(p.pauseReason,'RESTORE_REQUIRES_REVIEW')
+    assert.equal(p.lastCallId,null);assert.equal(p.nextAttemptAt,0);assert.equal(p.phase,'paused')
+  }
+  assert.ok(db.prepare("SELECT COUNT(*) n FROM restore_records WHERE source='current' AND source_table='wp6_learning_queue'").get().n>=2)
+  let calls=0
+  const storage=createStorage({file:result.candidateDb,filesDir:''}),config={enabled:true,botQQ:scope.account,allow:{groups:['1','2']},
+    learning:{enabled:true,learnEnabled:true},mood:{enabled:true,judge:true}},getIdentity=()=>({account:scope.account,personaId:'fish',layers:{policy:{}}})
+  const infer=async()=>{calls++;throw new Error('Restored work must not call a model')}
+  const memory=createMemoryStore({storage,extract:infer}),learning=createLearning({storage,getConfig:()=>config,getIdentity,infer}),mood=createMood({storage,getConfig:()=>config,getIdentity,infer})
+  f.cleanup.push(async()=>{await Promise.all([memory.stop(),learning.stop(),mood.stop()]);storage.close()})
+  assert.equal((await memory.consolidate(scope)).code,'EXTRACTION_PAUSED')
+  assert.equal((await memory.consolidate(other)).code,'EXTRACTION_PAUSED')
+  assert.ok((await learning.tick(learned)).every(r=>r.code==='LEARNING_PAUSED'))
+  assert.equal((await mood.judge(learned,{sourceMessageIds:[a.message.id]})).code,'MOOD_PAUSED')
+  assert.equal(calls,0)
+  const next=storage.messages.ingest({account:scope.account,chatId:scope.chat,authorId:'alice',text:'新的入站',eventKind:'message'})
+  assert.ok(next.recvSeq>latest.message.recvSeq,'new messages must be above all restored high-water marks')
+})
+
+for(const corrupt of ['scope','namespace','checkpoint-account']) test(`invalid background ${corrupt} refuses without weakening scope isolation`,async t=>{
+  const f=fixture(t);f.fact();learningSchema(f.storage.db);f.backup()
+  if(corrupt==='checkpoint-account') f.storage.db.run(`INSERT INTO wp6_learning_checkpoints(scope_key,account_id,chat_id,persona_id,kind)
+    VALUES(?,?,?,?,?)`,JSON.stringify([scope.account,scope.chat,'fish']),'foreign-bot',scope.chat,'fish','expression')
+  else f.storage.db.run('INSERT INTO background_work_state VALUES(?,?,?)',corrupt==='namespace'?'future-work':'memory',corrupt==='scope'?JSON.stringify(scope):JSON.stringify([scope.account,scope.chat,'']),'{}')
+  await f.close();const before=[hash(f.currentDb),hash(f.backupDb)]
+  await assert.rejects(f.run(),{code:corrupt==='namespace'?'UNSUPPORTED_SCHEMA':corrupt==='scope'?'INVALID_RECORD':'IDENTITY_CONFLICT'})
+  assert.deepEqual([hash(f.currentDb),hash(f.backupDb)],before)
+})
+
+function legacyUsage(db) {
+  db.exec(`CREATE TABLE service_calls(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,chat_id TEXT,request_id TEXT,service TEXT NOT NULL,
+    model TEXT,role TEXT,status TEXT NOT NULL,billing TEXT NOT NULL,started_at INTEGER NOT NULL,duration_ms REAL,
+    input_tokens REAL,output_tokens REAL,cached_tokens REAL,input_count REAL,input_chars REAL,credits REAL,amount REAL,currency TEXT);
+    CREATE TABLE service_call_requests(call_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(call_id,request_id));`)
+  db.run(`INSERT INTO service_calls VALUES('legacy-call',?,'group:1',NULL,'llm','offline','learning','success','unknown',100,30,12,4,NULL,NULL,NULL,NULL,NULL,NULL)`,scope.account)
+}
+
+test('legacy backup gains nullable usage columns and later business outcomes without duplicating charges',async t=>{
+  const f=fixture(t);f.fact();legacyUsage(f.storage.db);f.backup()
+  const usage=createUsageLedger({storage:f.storage,getAccount:()=>scope.account})
+  f.storage.db.run("UPDATE service_calls SET provider='offline',finished_at=130,attempts=1,usage_complete=1,operation_id='operation',stage='expression',source_ids_json='[]',finish_reason='stop'")
+  usage.record({id:'legacy-call',phase:'business',account:scope.account,chatId:scope.chat,businessStatus:'failed',businessError:'INVALID_MODEL_OUTPUT'})
+  usage.record({id:'orphan-outcome',phase:'business',account:'other-bot',chatId:'group:2',businessStatus:'discarded',businessError:'SCOPE_DISABLED'})
+  await f.close();const result=await f.run(),db=f.open(result.candidateDb)
+  const call=db.prepare('SELECT * FROM service_calls').get()
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM service_calls').get().n,1)
+  assert.equal(call.account_id,scope.account);assert.equal(call.started_at,100);assert.equal(call.finished_at,130)
+  assert.equal(call.input_tokens,12);assert.equal(call.output_tokens,4);assert.equal(call.amount,null)
+  assert.equal(call.provider,'offline');assert.equal(call.operation_id,'operation');assert.equal(call.stage,'expression')
+  assert.equal(call.business_status,'failed');assert.equal(call.business_error,'INVALID_MODEL_OUTPUT')
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM service_call_outcomes').get().n,2)
+  assert.equal(db.prepare("SELECT account_id FROM service_call_outcomes WHERE call_id='orphan-outcome'").get().account_id,'other-bot')
+  assert.equal(result.counts.preservedUsageCalls,1)
+})
+
+test('newer backup usage metadata survives an older current schema with unknown extension columns',async t=>{
+  const f=fixture(t);f.fact();legacyUsage(f.storage.db);f.backup();await f.close()
+  const backup=f.open(f.backupDb)
+  createUsageLedger({storage:{db:{run:(sql,...args)=>backup.prepare(sql).run(...args),all:(sql,...args)=>backup.prepare(sql).all(...args)}},getAccount:()=>scope.account})
+  backup.exec("UPDATE service_calls SET provider='offline',finished_at=130,attempts=1,usage_complete=0,business_status='discarded',business_error='SCOPE_DISABLED'")
+  backup.close()
+  const result=await f.run(),db=f.open(result.candidateDb),call=db.prepare('SELECT * FROM service_calls').get()
+  assert.equal(call.finished_at,130);assert.equal(call.business_status,'discarded');assert.equal(call.usage_complete,0)
+  assert.equal(call.output_tokens,4);assert.equal(call.amount,null)
+})
+
+test('usage business outcomes cannot be restored onto another account receipt',async t=>{
+  const f=fixture(t);f.fact();const usage=createUsageLedger({storage:f.storage,getAccount:()=>scope.account})
+  usage.record({id:'call',chatId:scope.chat,status:'success'});f.backup()
+  usage.record({id:'call',phase:'business',account:'another-bot',chatId:scope.chat,businessStatus:'failed',businessError:'INVALID_MODEL_OUTPUT'})
+  await f.close();await assert.rejects(f.run(),{code:'USAGE_CONFLICT'})
 })
 
 test('conflicting usage receipt refuses instead of choosing or summing a fee',async t=>{

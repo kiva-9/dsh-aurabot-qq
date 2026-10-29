@@ -7,7 +7,7 @@ import { dataDir } from '../../core/store.js'
 export default {
   id: 'stickers', name: '表情包', version: '2.0.0', tab: 'stickers',
   description: '按聊天收藏、审核和选择表情；QQ 收藏同步独立跟踪',
-  files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/analysis.js', 'stickers/legacy.js'],
+  files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/analysis.js', 'stickers/legacy.js', 'runtime/image-frames.js'],
   setup(api) {
     const { hub, onebot, http, storage } = api.core
     const legacyDir = api.core.stickerLegacyDir ?? dataDir('stickers')
@@ -86,7 +86,10 @@ export default {
     post('/sticker/analysis/retry', (b, o) => store.retryAnalysis(idOf(b), o))
     post('/sticker/sync', (b, o) => store.queueSync(idOf(b), o))
     post('/sticker/task/retry', (b, o) => store.retryTask(b.taskId, o))
+    post('/stickers/batch', (b, o) => store.batch(b.action, b.entries, o))
+    post('/sticker/analysis/reconcile', (b, o) => store.reconcileAnalysis(b.taskId, o))
     post('/sticker/sync/reconcile', (b, o) => store.reconcileSync(b.taskId, o))
+    post('/sticker/sync/bind', (b, o) => store.bindQQ(idOf(b), o))
     post('/sticker/import-qq', (_b, o) => store.importFromQQ(o))
     post('/sticker/legacy/import', (_b, o) => store.importLegacy(legacyDir, o))
     post('/sticker/legacy/assign', (b, o) => store.assignLegacy(b.id, o))

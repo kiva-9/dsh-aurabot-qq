@@ -51,7 +51,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     // 纯表情、只当上下文的消息不重新计停顿
     const extendsQuiet = !(entry.stickerOnly && b.entries.length > 1) && entry.mode !== 'context'
     const s = effective(chat)
-    if (extendsQuiet) b.quietAt = now + (entry.mentioned ? Math.min(s.waitMs, s.mentionWaitMs) : s.waitMs)
+    if (extendsQuiet) b.quietAt = now + (entry.attentionOnly && s.enabled !== false ? Math.max(s.mentionWaitMs, Math.min(3000, s.waitMs)) : entry.mentioned ? Math.min(s.waitMs, s.mentionWaitMs) : s.waitMs)
     if (entry.mentioned) b.mentioned = true
     arm(b, s)
     return true

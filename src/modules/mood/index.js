@@ -8,9 +8,10 @@ export default {
   version: '2.0.0',
   description: '按账号、聊天和人设隔离的短期心情；明确请求与承诺不受情绪阻断',
   tab: 'mood',
-  files: ['features/mood.js', 'learning/contracts.js', 'learning/runtime.js', 'learning/evidence.js', 'learning/module-api.js'],
+  files: ['features/mood.js', 'learning/contracts.js', 'learning/runtime.js', 'learning/evidence.js', 'learning/module-api.js', 'memory/background.js'],
   setup(api) {
     const mood = createMood({ storage: api.core.storage, getConfig: api.config, dsh: api.dsh, getIdentity: (scope) => identityFor(api, scope) })
+    api.on('config',cfg=>mood.refreshPolicy(cfg))
     api.context((args) => { try { return mood.contextLine(hookScope(api, args)) } catch { return '' } })
     api.on('activity', (a) => {
       let scope
@@ -19,13 +20,17 @@ export default {
       const ids = Array.isArray(sourceIds) ? sourceIds.filter((id) => typeof id === 'string').slice(0, 8) : []
       if (a.kind === 'in') for (const messageId of ids.slice(0, 8)) mood.observe(scope, { messageId, direct: a.direct !== false, owner: a.owner === true })
       if (a.kind === 'out' && a.confirmed === true && a.reply && ids.length) {
-        void mood.judge(scope, { sourceMessageIds: ids, reply: a.reply, epoch: a.epoch, personaRevision: a.personaRevision }).catch(() => {})
+        void mood.judge(scope, { sourceMessageIds: ids, reply: a.reply, epoch: a.epoch, personaRevision: a.personaRevision, requestId:a.requestId }).catch(() => {})
       }
     })
     registerRoute(api, '/mood/state', 'GET', (_q, scope) => ({ ok: true, ...mood.state(scope) }))
     registerRoute(api, '/mood/history', 'GET', (_q, scope) => ({ ok: true, scope, items: mood.state(scope).history }))
     registerRoute(api, '/mood/nudge', 'POST', (b, scope) => mood.nudge(scope, b.delta, b.reason || '', { expectedRevision: b.expectedRevision, origin: 'manual' }))
     registerRoute(api, '/mood/reset', 'POST', (b, scope) => mood.reset(scope, { expectedRevision: b.expectedRevision }))
+    registerRoute(api, '/mood/resume', 'POST', (_b, scope) => mood.resumeJudge(scope))
+    registerRoute(api, '/mood/judge', 'POST', (b, scope) => mood.judge(scope, {
+      sourceMessageIds:b.sourceMessageIds,reply:b.reply,requestId:b.requestId,epoch:b.epoch,personaRevision:b.personaRevision,
+    }))
     api.onDispose?.(() => mood.stop())
     return mood
   },

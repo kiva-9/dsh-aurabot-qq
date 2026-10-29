@@ -169,6 +169,7 @@ export default {
     }
     async function prepareContext(input) {
       if (!config().enabled || input.chat?.kind === 'system') return { ready: false, disabled: true }
+      if (!active) return { ready: false, initializing: true }
       const scope = hostScope(input), state = await required(), epoch = input.epoch ?? storage.epochs.current(scope.chat)
       state.outbox.registerScope(scope)
       const isCurrent = () => {
@@ -185,7 +186,7 @@ export default {
         return active.service.contextFor(chat, sessionId, { scope, epoch })
       } catch { return '' }
     }
-    api.prepareContext?.(input => track(prepareContext(input)))
+    api.prepareContext?.(input => track(prepareContext(input)), { timeoutMs: 2500 })
     api.context(({ chat, sessionId }) => contextFor(chat, sessionId))
     api.tool(({ chat, sessionId }) => {
       if (!config().enabled || chat.kind === 'system') return []

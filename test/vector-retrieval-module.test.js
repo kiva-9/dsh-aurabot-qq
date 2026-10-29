@@ -123,6 +123,23 @@ test('real module hook warms synchronous context; source tombstones, scope, epoc
   assert.equal(f.state.requests.length, 0)
 })
 
+test('slow foreground embedding yields lexical evidence within budget and records request scope', async t => {
+  const f = await fixture(t, { embeddings: true })
+  f.fact('小明喜欢咖啡')
+  await f.panel('probe', { roles: ['text'] })
+  const service = (await f.api.ensureReady()).service
+  await service.waitForIdle()
+  const release = gate()
+  f.state.hold = () => release.promise
+  const started = performance.now()
+  try {
+    await f.modules.prepareContext({ chat: { chatId: S.chat, kind: 'group' }, chatId: S.chat, sessionId: 'bounded', text: '咖啡', account: 'bot', persona: '', requestId: 'foreground-request' })
+    assert.ok(performance.now() - started < 2000, 'front reply must not await provider timeout')
+    assert.match(f.modules.contextFor({ chat: { chatId: S.chat }, sessionId: 'bounded' }), /小明喜欢咖啡/)
+    assert.ok(f.usage.some(u => u.requestId === 'foreground-request' && u.chatId === S.chat))
+  } finally { release.resolve(); f.state.hold = null }
+})
+
 test('history image refs return provenance, recheck actor/shareGroups/recall and never expose a filesystem path', async t => {
   const f = await fixture(t), mine = f.image(), others = f.image(S, 'other', 3), privateImage = f.image(P, 'user', 5), context = f.request()
   const result = await f.api.materializeReference({ occurrenceId: mine.occurrenceId, role: 'identity' }, context)

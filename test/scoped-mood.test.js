@@ -2,6 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { parseMoodJudge } from '../src/features/mood.js'
 import { fixture, S, deferred, settled } from './helpers/wp6.js'
+import { observeModelUsage } from '../src/core/llm.js'
+import { createUsageLedger } from '../src/diagnostics/usage.js'
 
 test('mood values, reasons and history are isolated by account/chat/persona; no-scope is neutral', async t => {
   const f = fixture(t), mood = f.mood(), privateScope = { ...S, chat: 'private:alice' }
@@ -100,4 +102,52 @@ test('mood timeout releases slot and low-confidence result changes nothing', asy
   const other = f.mood({ infer: async () => ({ delta: 15, confidence: 0.2, reason: '猜测' }) })
   assert.equal((await other.judge(S, { sourceMessageIds: [f.message('谢谢你').id] })).changed, false)
   assert.equal(other.state(S).value, 60)
+})
+
+test('removing a group cancels mood judgment and blocks late state changes after re-enable',async t=>{
+  const f=fixture(t),entered=deferred(),late=deferred()
+  f.cfg.mood.judge=true;f.cfg.allow={groups:['1']}
+  let signal
+  const mood=f.mood({infer:async args=>{signal=args.signal;entered.resolve();await late.promise;return {delta:15,reason:'旧结果',confidence:1}}})
+  const message=f.message('谢谢'),job=mood.judge(S,{sourceMessageIds:[message.id]})
+  await entered.promise;f.cfg.allow.groups=[];mood.refreshPolicy()
+  assert.equal((await job).code,'SCOPE_DISABLED');assert.equal(signal.aborted,true)
+  assert.equal((await mood.judge(S,{sourceMessageIds:[message.id]})).code,'DISABLED')
+  assert.equal(mood.state(S).judgment.blockedReason,'SCOPE_DISABLED')
+  assert.equal(mood.state(S).judgment.failures,0)
+  f.cfg.allow.groups=['1'];late.resolve();await settled()
+  assert.equal(mood.state(S).value,60);assert.equal(mood.state(S).history.length,0)
+  assert.equal(f.storage.db.get('SELECT COUNT(*) n FROM wp6_model_calls').n,0)
+})
+
+test('mood uses the unified ledger and pauses repeated invalid judgments with evidence left unconsumed',async t=>{
+  const f=fixture(t);f.cfg.mood.judge=true;f.cfg.model={provider:'mock',model:'offline'}
+  const message=f.message('谢谢');let calls=0,valid=false
+  const dsh={llm:{stream:async function*(){
+    calls++
+    yield {type:'text-delta',text:valid?' {"delta":5,"confidence":1,"reason":"愉快"} ':'invalid'}
+    yield {type:'usage',usage:{inputTokens:4,outputTokens:2}}
+    yield {type:'finish',reason:'stop'}
+  }}}
+  const ledger=createUsageLedger({storage:f.storage,getAccount:()=>S.account})
+  t.after(observeModelUsage(dsh,event=>ledger.record(event)))
+  let mood=f.mood({dsh})
+  for(let i=0;i<6;i++) {
+    assert.equal((await mood.judge(S,{sourceMessageIds:[message.id]})).code,'INVALID_MODEL_OUTPUT')
+    const cp=mood.state(S).judgment
+    assert.equal(cp.failures,i+1);assert.equal(cp.nextAttemptAt-f.now(),60000*2**i)
+    f.advance(cp.nextAttemptAt-f.now())
+  }
+  await mood.stop();mood=f.mood({dsh})
+  assert.equal((await mood.judge(S,{sourceMessageIds:[message.id]})).code,'MOOD_PAUSED')
+  assert.equal(calls,6);assert.equal(mood.state(S).value,60)
+  assert.equal(f.storage.db.get('SELECT COUNT(*) n FROM wp6_mood_seen').n,0)
+  assert.equal(ledger.report().items.length,6)
+  for(const call of ledger.report().items) {
+    assert.equal(call.role,'judge');assert.equal(call.status,'success');assert.equal(call.businessStatus,'failed')
+    assert.equal(call.businessError,'INVALID_MODEL_OUTPUT');assert.deepEqual(call.sourceMessageIds,[message.id])
+  }
+  valid=true;assert.equal(mood.resumeJudge(S).ok,true)
+  assert.equal((await mood.judge(S,{sourceMessageIds:[message.id]})).value,65)
+  assert.equal(calls,7)
 })

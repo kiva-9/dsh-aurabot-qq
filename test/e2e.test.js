@@ -272,7 +272,7 @@ test('群聊一段一回：好几个人连着 @ 她，她看完整段只回一�
   const mine = fake.turns.slice(before).filter((t) => t.userText.includes('群聊'))
   assert.equal(mine.length, 1, '只交给她一次')
   for (const w of ['第一个人', '第二个人', '第三个人', '第四个人']) assert.ok(mine[0].userText.includes(w), w)
-  assert.match(mine[0].userText, /不要一条一条地挨个回/)
+  assert.match(mine[0].userText, /只回应当前新消息/)
   // 检索记忆用的只是大家说的话，不带提示词里的说明；也记下了这一段是谁在说
   const sid = api.hub.sessions()['group:558'].sessionId
   assert.doesNotMatch(api.hub.lastTextOf(sid), /挨个回|引用回复/)
@@ -523,7 +523,7 @@ test('每轮工具次数有上限：超过就不执行，让她先把结果说�
   await fake.call('/save', { toolCallsPerTurn: 6 })
   assert.equal(calls.length, 2)
   assert.notEqual(calls[0].result.message, calls[1].result.message)
-  assert.match(calls[1].result.message, /已经调用了 1 次工具/)
+  assert.match(calls[1].result.message, /已经调用了 1 次工具|本次唤醒预算已用完/)
 })
 
 test('连发合并：一口气发两句，她只回一次', async () => {

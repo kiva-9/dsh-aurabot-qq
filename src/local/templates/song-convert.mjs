@@ -3,7 +3,10 @@
 // 下载歌曲、分离人声、混音、发语音条还是插件来做，这里只管「人声 → 换成她的声音」这一步。
 // 约定见同目录的「README-本地接口.md」。改完保存就生效，不用重启 DSH。
 //
-// 输入：{ input, output, pitch, voice, voiceFile, indexFile, log }
+// 输入：{ input, output, pitch, voice, voiceFile, indexFile, log, signal, contract, stage, sourceTrack }
+//   contract='vocal-conversion/v1'，stage='converting'；sourceTrack 是已核验的实际曲目。
+//   只处理 input 人声，不重新搜歌、选曲或用请求名称替换 sourceTrack。
+//   旧版返回路径字符串仍兼容；若返回 {file, track}，track 必须保留实际曲目信息。
 //   input     分离出来的人声（wav）
 //   output    换好声音后要写到的路径（wav）
 //   pitch     变调半音（她是女声、原唱是男声时一般 +12）
@@ -20,10 +23,10 @@ import { spawn } from 'node:child_process'
 const PYTHON = 'D:/RVC/runtime/python.exe'
 const PROJECT = 'D:/RVC'
 
-export default async function convert({ input, output, pitch, voiceFile, indexFile, log }) {
+export default async function convert({ input, output, pitch, voiceFile, indexFile, log, signal }) {
   const args = ['tools/infer_cli.py', '--input_path', input, '--opt_path', output, '--f0up_key', String(pitch), '--model_name', voiceFile, '--index_path', indexFile || '', '--f0method', 'rmvpe']
   await new Promise((resolve, reject) => {
-    const child = spawn(PYTHON, args, { cwd: PROJECT, windowsHide: true })
+    const child = spawn(PYTHON, args, { cwd: PROJECT, windowsHide: true, signal })
     let tail = ''
     child.stdout.on('data', (b) => { tail = (tail + b).slice(-2000) })
     child.stderr.on('data', (b) => { tail = (tail + b).slice(-2000) })

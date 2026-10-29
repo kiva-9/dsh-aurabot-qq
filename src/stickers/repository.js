@@ -110,29 +110,44 @@ export function createStickerRepository({ storage, now = Date.now, limits }) {
       return task(id)
     })
   }
-  const qq = (account, sha256) => decode(db.get('SELECT body_json FROM sticker_qq WHERE account=? AND sha256=?', account, sha256)) || { state: 'idle', emojiId: '', error: null, taskId: null }
+  const qq = (account, sha256) => {
+    const stored = decode(db.get('SELECT body_json FROM sticker_qq WHERE account=? AND sha256=?', account, sha256))
+    if (stored) return stored
+    // 兼容旧导入：来源已证明收藏存在，缺 ID 不能当作未收藏而再次 add。
+    const imported = db.get("SELECT 1 FROM sticker_items WHERE account=? AND sha256=? AND json_extract(body_json,'$.from')='qq' LIMIT 1", account, sha256)
+    return { state: imported ? 'unidentified' : 'idle', emojiId: '', taskId: null,
+      error: imported ? '已从 QQ 收藏导入，但未取得收藏 ID；请核对并绑定已有收藏' : null }
+  }
   const saveQQ = (account, sha256, value) => db.run('INSERT INTO sticker_qq(account,sha256,body_json) VALUES (?,?,?) ON CONFLICT(account,sha256) DO UPDATE SET body_json=excluded.body_json', account, sha256, JSON.stringify(value))
   function recover(account) {
     return db.tx(() => {
       const result = { requeued: 0, unknown: 0 }
       for (const t of tasks(account, { state: 'running' })) {
         if (alive(t.owner)) continue
-        const state = t.kind === 'sync' ? 'unknown' : 'queued'
+        // 识别也可能已经计费；丢失进程不能证明外部调用没有发生。
+        const state = ['sync', 'analyze'].includes(t.kind) ? 'unknown' : 'queued'
         db.run('UPDATE sticker_tasks SET state=?,owner_json=NULL,error=?,outcome=?,updated_at=? WHERE id=? AND state=?', state, '后台进程退出', state === 'unknown' ? 'unknown' : null, now(), t.id, 'running')
         if (t.kind === 'sync') {
           const q = qq(account, t.input.sha256)
           if (q.taskId === t.id) saveQQ(account, t.input.sha256, { ...q, state: 'unknown', error: '同步时进程退出，结果未知' })
-          result.unknown++
-        } else result.requeued++
+        }
+        if (t.kind === 'analyze') {
+          const it = get(t.itemId)
+          if (it && it.state !== 'deleted') update(it.id, (item) => {
+            item.analysis = { ...item.analysis, state: 'unknown', error: '识别时进程退出，可能已计费；需核对任务，不能直接重试' }
+          })
+        }
+        if (state === 'unknown') result.unknown++
+        else result.requeued++
       }
       return result
     })
   }
-  function claim(account, { sync = true } = {}) {
+  function claim(account, { sync = true, analyze = true, collect = true } = {}) {
     const result = db.tx(() => {
       recover(account)
       if (db.get("SELECT COUNT(*) AS n FROM sticker_tasks WHERE account=? AND state='running'", account).n >= limits().concurrency) return null
-      const r = db.get(`SELECT * FROM sticker_tasks WHERE account=? AND state='queued' ${sync ? '' : "AND kind!='sync'"} ORDER BY created_at,id LIMIT 1`, account)
+      const r = db.get(`SELECT * FROM sticker_tasks WHERE account=? AND state='queued' ${sync ? '' : "AND kind NOT IN ('sync','import')"} ${analyze ? '' : "AND kind!='analyze'"} ${collect ? '' : "AND kind!='collect'"} ORDER BY created_at,id LIMIT 1`, account)
       if (!r) return null
       const owner = { pid: process.pid, host, runtime, token: randomUUID() }
       db.run("UPDATE sticker_tasks SET state='running',owner_json=?,attempts=attempts+1,error=NULL,updated_at=? WHERE id=? AND state='queued'", JSON.stringify(owner), now(), r.id)

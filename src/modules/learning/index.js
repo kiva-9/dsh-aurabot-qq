@@ -6,10 +6,11 @@ export default {
   id: 'learning', name: '表达与黑话', version: '1.0.0', tab: 'learning',
   description: '带范围、来源和人工审核的表达习惯与群内词典，学习和使用独立开关',
   files: ['learning/index.js', 'learning/contracts.js', 'learning/runtime.js', 'learning/evidence.js',
-    'learning/module-api.js', 'learning/schema.js', 'learning/store.js', 'learning/visibility.js'],
+    'learning/module-api.js', 'learning/schema.js', 'learning/store.js', 'learning/visibility.js', 'memory/background.js'],
   setup(api) {
     const learning = createLearning({ storage: api.core.storage, getConfig: api.config, dsh: api.dsh,
       getIdentity: (scope) => identityFor(api, scope) })
+    api.on('config',cfg=>learning.refreshPolicy(cfg))
     const actorId = () => String(api.config().ownerQQ || 'owner-panel')
     const options = (b) => ({ expectedRevision: b.expectedRevision, actorId: actorId() })
     const envelope = (scope, value) => ({ ok: true, scope, ...value })
@@ -66,6 +67,7 @@ export default {
     registerRoute(api, '/learning/revert', 'POST', (b, scope) => envelope(scope, { item: learning.revert(scope, b.id, b.targetRevision, options(b)) }))
     registerRoute(api, '/learning/evidence/delete', 'POST', (b, scope) => envelope(scope, { item: learning.removeEvidence(scope, b.id, b.messageId, options(b)) }))
     registerRoute(api, '/learning/run', 'POST', (b, scope) => learning.learn(scope, b.kind))
+    registerRoute(api, '/learning/resume', 'POST', (b, scope) => learning.resume(scope,b.kind))
     api.onDispose?.(() => learning.stop())
     return learning
   },

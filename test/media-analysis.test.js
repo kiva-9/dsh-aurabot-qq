@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 import { createStorage } from '../src/storage/index.js'
-import { createMediaAnalysis, DEFAULT_MEDIA_MEMORY, MEDIA_MEMORY_SCHEMA, mediaMemorySettings, parseMediaAnalysis } from '../src/runtime/media-analysis.js'
+import { createMediaAnalysis, DEFAULT_MEDIA_MEMORY, MEDIA_MEMORY_SCHEMA, mediaMemorySettings, parseMediaAnalysis, parseModelMediaAnalysis } from '../src/runtime/media-analysis.js'
 import mediaModule from '../src/modules/media-memory/index.js'
 import { PNG, JPG, png } from './helpers/images.js'
 
@@ -29,7 +29,7 @@ function fixture(t, options = {}) {
   const cfg = { botQQ: 'bot', ownerQQ: 'owner', allow: { groups: ['1', '2'], private: ['alice'] },
     roles: { vision: { provider: 'mock', model: 'vision-a' } }, mediaMemory: { enabled: true, minIntervalMs: 0, retryBackoffMs: 0, ...options } }
   const calls = [], services = [], ask = { run: async () => JSON.stringify(RESULT) }
-  const deps = () => ({ storage, getConfig: () => cfg, now: () => time, ask: async (o) => { calls.push(o); return ask.run(o) } })
+  const deps = () => ({ storage, getConfig: () => cfg, now: () => time, sampleFrames: async () => ({ ok: false, code: 'FFMPEG_UNAVAILABLE' }), ask: async (o) => { calls.push(o); return ask.run(o) } })
   const f = { cfg, calls, ask, dir, deps, get storage() { return storage }, now: () => time, advance: (ms) => { time += ms },
     create: () => { const s = createMediaAnalysis(deps()); services.push(s); return s },
     track: (s) => { services.push(s); return s },
@@ -330,6 +330,21 @@ test('GIF is needs_frames without vision calls; explicit human explanation is oc
   const copy = f.image({ buf: GIF, mime: 'image/gif', chatId: 'group:2' })
   assert.equal(s.get(copy).result, null)
   assert.equal(f.storage.db.get("SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'media-analysis:%:cache:%'").n, 0)
+})
+
+test('GIF samples become explicitly partial evidence, scoped usage and never a whole-animation cache', async t => {
+  const f = fixture(t), s = f.track(createMediaAnalysis({ ...f.deps(), sampleFrames: async () => ({ ok: true, sampling: { complete: false, sourceFrames: 8, sampledFrames: 1 }, frames: [{ bytes: PNG, mime: 'image/png', atMs: 500 }] }) }))
+  const im = f.image({ buf: GIF, mime: 'image/gif' })
+  await f.run(s, im)
+  assert.equal(s.get(im).status, 'ready'); assert.equal(s.get(im).coverage, 'sampled_partial')
+  assert.match(f.calls[0].text, /未覆盖完整动画/); assert.equal(f.calls[0].images[0].mediaType, 'image/png')
+  assert.equal(f.calls[0].chatId, im.chatId); assert.equal(f.calls[0].scope.account, 'bot'); assert.deepEqual(f.calls[0].sourceMessageIds, [im.messageId])
+  assert.equal(f.storage.db.get("SELECT COUNT(*) AS n FROM meta WHERE key LIKE 'media-analysis:%:cache:%'").n, 0)
+})
+
+test('model JSON adapter accepts a whole fenced object but refuses prose or truncation', () => {
+  assert.deepEqual(parseModelMediaAnalysis('```json\n' + JSON.stringify(RESULT) + '\n```'), RESULT)
+  for (const text of ['解释\n' + JSON.stringify(RESULT), '```json\n{"version":1', JSON.stringify(RESULT) + '尾注']) assert.throws(() => parseModelMediaAnalysis(text))
 })
 
 test('bad bytes, hash mismatches and pixel/byte limits fail before any model call', async (t) => {

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { roleModel, pickReasoningEffort } from '../core/llm.js'
+import { askModel } from '../core/llm.js'
 import { fail, hash, scopeOf, scopeKey } from './contracts.js'
 
 export function ensureRuntime(db) {
@@ -12,7 +12,7 @@ export function reserveCall(db, scope, kind, c, now) {
     if (db.get('SELECT 1 FROM wp6_model_calls WHERE scope_key=?', scopeKey(scope))) return null
     const day = new Date(now).toISOString().slice(0, 10)
     if (Number(db.get('SELECT COUNT(*) AS n FROM wp6_model_calls').n) >= c.maxConcurrent) return null
-    if (Number(db.get('SELECT calls FROM wp6_model_budget WHERE day = ?', day)?.calls || 0) >= c.maxCallsPerDay) return null
+    if (c.maxCallsPerDay > 0 && Number(db.get('SELECT calls FROM wp6_model_budget WHERE day = ?', day)?.calls || 0) >= c.maxCallsPerDay) return null
     const id = randomUUID()
     db.run('INSERT INTO wp6_model_budget(day,calls) VALUES (?,1) ON CONFLICT(day) DO UPDATE SET calls=calls+1', day)
     db.run('INSERT INTO wp6_model_calls(id,scope_key,kind,expires_at) VALUES (?,?,?,?)', id, scopeKey(scope), kind, now + c.timeoutMs + 5000)
@@ -43,26 +43,8 @@ export function sameIdentity(token, deps) {
     return current.epoch === token.epoch && current.fingerprint === token.fingerprint
   } catch { return false }
 }
-export async function modelText(dsh, { cfg, role = 'learning', system, text, signal, maxTokens = 1200 }) {
-  const target = roleModel(dsh, cfg, role), llm = dsh?.llm || dsh?.get?.('llm')
-  if (!target || !llm?.stream) fail('MODEL_UNAVAILABLE', '未配置学习/判断模型')
-  const reasoningEffort = await pickReasoningEffort(dsh, target.provider, target.model, target.reasoningEffort || 'low')
-  signal.throwIfAborted()
-  let output = '', finished = false
-  for await (const block of llm.stream({ provider: target.provider, model: target.model, reasoningEffort, system,
-    messages: [{ role: 'user', id: randomUUID(), content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'aurabot' } }],
-    temperature: 0.2, maxTokens, signal })) {
-    signal.throwIfAborted()
-    if (block.type === 'text-delta') output += block.text || ''
-    if (output.length > 16000) fail('MODEL_OUTPUT_TOO_LARGE', '模型结果超过上限')
-    if (block.type === 'finish') {
-      const kind = typeof block.reason === 'string' ? block.reason : block.reason?.kind
-      if (!['stop', 'completed'].includes(kind)) fail('MODEL_FAILED', '模型没有完整完成判断')
-      finished = true
-    }
-  }
-  if (!finished) fail('MODEL_FAILED', '模型流提前结束')
-  return output
+export async function modelText(dsh, options) {
+  return askModel(dsh, { role: 'learning', maxTokens: 2400, maxOutputChars: 16000, temperature: 0.2, ...options })
 }
 export async function boundedCall(fn, timeoutMs, parentSignal) {
   const controller = new AbortController()
@@ -75,9 +57,10 @@ export async function boundedCall(fn, timeoutMs, parentSignal) {
       onAbort = () => reject(controller.signal.reason || new Error('工作已取消'))
       controller.signal.addEventListener('abort', onAbort, { once: true })
     })
+    aborted.catch(() => {})
     controller.signal.throwIfAborted()
     timer = setTimeout(() => controller.abort(Object.assign(new Error('模型判断超时'), { code: 'MODEL_TIMEOUT' })), timeoutMs)
-    return await Promise.race([Promise.resolve().then(() => fn(controller.signal)), aborted])
+    return await Promise.race([Promise.resolve().then(() => { controller.signal.throwIfAborted(); return fn(controller.signal) }), aborted])
   } finally {
     clearTimeout(timer)
     controller.signal.removeEventListener('abort', onAbort)

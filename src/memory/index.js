@@ -1,4 +1,4 @@
-import { askModel } from '../core/llm.js'
+import { askModel, reportModelOutcome } from '../core/llm.js'
 import { createFactRepository } from './store.js'
 import { createExtractor } from './extraction.js'
 import { createProfiles } from './profiles.js'
@@ -7,6 +7,7 @@ import { createLifecycle } from './lifecycle.js'
 import { scopeOf, sameScope, receipt, fail, hash } from './scope.js'
 import { memoryLine } from './lexical.js'
 import { ids } from './contracts.js'
+import { backgroundBlockReason } from './background.js'
 
 export { ensureSchema } from './schema.js'
 export { scopeOf, MemoryError } from './scope.js'
@@ -20,9 +21,12 @@ export function createMemoryStore(options) {
   const cfg = () => getConfig()?.memory || {}
   const repo = createFactRepository({storage,now,getPolicy:getPolicy || (() => ({shareGroups:cfg().shareGroups || []}))})
   const legacyReports = importLegacyQuarantine(repo,{legacyDir:opts.legacyDir})
-  const lifecycle=createLifecycle({getAccount:opts.getAccount})
-  const model = ({system,signal,...payload}) => askModel(dsh,{role:'memory',cfg:getConfig(),system,signal,scope:payload.scope,text:JSON.stringify(payload),maxTokens:6000,temperature:0})
-  const extractor = createExtractor(repo,{extract:opts.extract || model,deduplicate:opts.deduplicate || model,config:() => cfg().extraction || {},lifecycle})
+  const lifecycle=createLifecycle({getAccount:opts.getAccount,getBlockReason:scope=>backgroundBlockReason(getConfig(),scope) || (cfg().enabled === false ? 'MEMORY_DISABLED' : '')})
+  const model = ({system,signal,maxTokens,callId,operationId,stage,sourceMessageIds,...payload}) => askModel(dsh,{
+    role:'memory',cfg:getConfig(),system,signal,scope:payload.scope,text:JSON.stringify(payload),
+    maxTokens,maxOutputChars:50000,temperature:0,callId,operationId,stage,sourceMessageIds})
+  const extractor = createExtractor(repo,{extract:opts.extract || model,deduplicate:opts.deduplicate || model,config:() => cfg().extraction || {},lifecycle,
+    onOutcome: outcome => reportModelOutcome(dsh,outcome)})
   const profiles = createProfiles(repo,{generate:opts.generateProfile,config:() => cfg().profiles || {},lifecycle})
   const recallLog = []
   const resultError = error => ({ok:false,code:error.code || 'MEMORY_ERROR',message:error.message})
@@ -113,6 +117,8 @@ export function createMemoryStore(options) {
     importCandidates:(text,options)=>repo.quarantineImport({text:String(text)},options),
     importCommit:(items,options)=>repo.quarantineImport(items,options),
     ...extractor,...profiles,
+    refreshPolicy:cfg=>lifecycle.refresh(cfg ? scope=>backgroundBlockReason(cfg,scope) || (cfg.memory?.enabled===false?'MEMORY_DISABLED':'') : undefined),
+    canProcess:scope=>!lifecycle.reason(scopeOf(scope)),
     topicScore:(text,options)=>{ try { const h=recall(text,{...options,limit:1}); return h.length ? Math.min(1,h[0].score/3) : 0 } catch { return 0 } },
     lastConsolidate:options=>{ try { return extractor.status(scopeOf(options)) } catch { return null } },
   }

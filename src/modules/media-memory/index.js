@@ -3,7 +3,7 @@ import { createMediaAnalysis, DEFAULT_MEDIA_MEMORY, MEDIA_MEMORY_SCHEMA } from '
 export default {
   id: 'media-memory', name: '图片理解', version: '1.0.0', tab: 'media-memory',
   description: '按图片出现记录保存视觉描述和 OCR，默认关闭，持久任务与独立人工说明',
-  files: ['runtime/media-analysis.js'],
+  files: ['runtime/media-analysis.js', 'runtime/image-frames.js'],
   setup(api) {
     const service = createMediaAnalysis({ storage: api.core.storage, getConfig: api.config, ask: (options) => api.ask(options), dsh: api.dsh, log: api.log })
     function route(path, method, handler) {

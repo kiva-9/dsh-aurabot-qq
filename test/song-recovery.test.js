@@ -24,7 +24,7 @@ function fixture(t, extra = {}) {
   const hub = { personaFor: () => ({ personaId, revision: 1, layers: { identity: { name: '鱼' } } }) }
   const sent = [], sung = [], services = [], warnings = []
   const deps = { getConfig: () => cfg, storage, hub, log: { info() {}, debug() {}, warn: (...x) => warnings.push(x) },
-    processSong: async () => { generated++; return { file: audio, title: '本地测试歌', voice: 'fish' } },
+    processSong: async (task) => { generated++; return { file: audio, track: { id: 'fixture-song', name: task.query, artists: '测试歌手' }, voice: 'fish' } },
     sendVoiceFile: async (...args) => { sent.push(args); return { ...receipt } },
     sendText: () => assert.fail('unknown 禁止回落文字或宣称发送失败'),
     onSung: async (...args) => { sung.push(args); return { ok: true } }, ...extra }
@@ -166,6 +166,7 @@ test('发送后崩溃：从真实 outbox 回执恢复 delivered，补记经历�
   assert.equal(sends, 1); assert.equal(f.generated(), 1); assert.equal(f.sung.length, 1)
   assert.match(f.sung[0][2].sourceId, /real-qq-receipt$/)
   assert.equal(next.runner.get(r.job_id).output.assetId, 'audio-1')
+  assert.equal(f.sung[0][2].eventTime, f.storage.db.get('SELECT updated_at FROM outbox WHERE platform_msg_id=?', 'real-qq-receipt').updated_at)
 })
 
 test('本地 HTTP 网关收取请求后断线：outbox unknown，重启不重复 POST 或推理', async (t) => {
@@ -189,4 +190,55 @@ test('本地 HTTP 网关收取请求后断线：outbox unknown，重启不重复
   assert.equal(posts, 1); assert.equal(f.generated(), 1); assert.equal(f.sung.length, 0)
   assert.equal(next.runner.get(r.job_id).output.delivery.unknown, true)
   assert.equal(next.resend(r.job_id, ctx).code, 'DELIVERY_UNKNOWN')
+})
+
+test('请求登记不冒称匹配；错歌结果不发送、不记经历，通知和查询返回实际标题', async t => {
+  const notifications = [], f = fixture(t, { onResult: r => notifications.push(r) })
+  f.s.stop()
+  const s = f.create({ processSong: async () => ({ file: f.audio, title: 'Wanted Dead or Alive - Bon Jovi' }) })
+  const ctx = f.context(), admission = s.request({ song: 'Wanted Dead or Alive 2Pac', ...ctx })
+  assert.equal(s.request({ song: 'x'.repeat(301), ...f.context() }).ok, false)
+  assert.equal(admission.title, null); assert.equal(admission.contentMatched, false)
+  assert.equal(admission.match.status, 'pending'); assert.match(admission.message, /尚未匹配/)
+  await s.tick()
+  assert.equal(s.runner.get(admission.job_id).state, 'failed')
+  assert.equal(f.sent.length, 0); assert.equal(f.sung.length, 0)
+  assert.equal(notifications.at(-1).match.actual.title, 'Wanted Dead or Alive - Bon Jovi')
+  assert.equal(notifications.at(-1).title, 'Wanted Dead or Alive - Bon Jovi')
+  assert.equal(notifications.at(-1).stage, 'matching_failed'); assert.equal(notifications.at(-1).contentMatched, false)
+  assert.equal(s.result(admission.job_id, { ...ctx, actorId: 'other' }).ok, false)
+})
+
+test('明确纠错持久保存否定SHA；第二请求即使改称正确标题也不能重复发送同一音频', async t => {
+  const f = fixture(t), ctx = f.context(), first = f.s.request({ song: '测试', ...ctx })
+  await f.s.tick()
+  f.s.stop()
+  const notifications = [], next = f.create({ storage: f.open(), onResult: r => notifications.push(r) })
+  const secondCtx = f.context(), second = next.request({ song: '测试', correctsJobId: first.job_id, ...secondCtx })
+  assert.equal(second.ok, true)
+  await next.tick()
+  assert.equal(f.sent.length, 1); assert.equal(f.sung.length, 1)
+  assert.equal(next.runner.get(second.job_id).state, 'failed')
+  assert.equal(notifications.at(-1).match.status, 'rejected')
+  const other = next.request({ song: '测试', correctsJobId: first.job_id, ...f.context(f.cfg.ownerQQ, 'group:other') })
+  assert.equal(other.ok, false)
+  // A later correction inherits the original rejected hash, across connections.
+  const third = next.request({ song: '测试', correctsJobId: second.job_id, ...f.context() })
+  await next.tick()
+  assert.equal(next.runner.get(third.job_id).state, 'failed'); assert.equal(f.sent.length, 1)
+})
+
+test('旧已生成结果仅有真实 title 时可校验恢复；旧错歌结果不能借恢复路径发送', async t => {
+  for (const title of ['测试 - 测试歌手', '同名错歌 - 其他歌手']) {
+    await t.test(title, async t => {
+      const f = fixture(t), r = f.s.request({ song: '测试', ...f.context() })
+      f.s.handler.store = () => { f.s.stop(); throw new Error('crash') }
+      await f.s.tick()
+      const j = f.s.runner.get(r.job_id), { track, match, ...legacy } = j.output
+      f.storage.db.run('UPDATE jobs SET output_json=? WHERE id=?', JSON.stringify({ ...legacy, title }), j.id)
+      const next = f.create(); next.recover(); await next.tick()
+      assert.equal(f.sent.length, title.startsWith('测试') ? 1 : 0)
+      assert.equal(f.generated(), 1, '不重新推理旧已产出的音频')
+    })
+  }
 })

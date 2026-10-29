@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { createStorage } from '../src/storage/index.js'
 import { createStickerStore, parseSelection } from '../src/features/stickers.js'
+import { observeModelUsage } from '../src/core/llm.js'
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jHn8AAAAASUVORK5CYII=', 'base64')
 const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
@@ -23,7 +24,9 @@ function fixture(t, overrides = {}) {
   const stores = [], connections = []
   const open = () => { const s = createStorage(dbOptions); connections.push(s); return s }
   const storage = open()
-  const create = (options = {}) => { const store = createStickerStore({ storage, getConfig: () => cfg, now: () => clock, analyze: async () => answer(), autoStart: false, ...options }); stores.push(store); return store }
+  const create = (options = {}) => { const store = createStickerStore({ storage, getConfig: () => cfg, now: () => clock, analyze: async () => answer(),
+    sampleFrames: async () => ({ ok: false, state: 'needs_frames', code: 'FFMPEG_UNAVAILABLE', message: '测试环境没有 ffmpeg' }),
+    autoStart: false, ...options }); stores.push(store); return store }
   t.after(() => { stores.forEach((s) => s.stop()); connections.forEach((s) => s.close()); rmSync(root, { recursive: true, force: true }) })
   let seq = 0
   const incoming = (seg = segment(), chatId = 'group:1') => {
@@ -230,7 +233,7 @@ test('拒绝/停用不会被重新收藏或重启恢复；删除 tombstone 阻�
   assert.equal(next.approve(item.id, admin).code, 'TOMBSTONED')
 })
 
-test('GIF 保存原动画，需显式关键帧；单帧证据不能自动批准动画', async (t) => {
+test('GIF 自动取帧不可用时可手工选帧；单帧证据不能自动批准动画', async (t) => {
   const f = fixture(t, { autoReview: true })
   const seen = []
   const store = f.create({ analyze: async (input) => { seen.push(input); return answer() } })
@@ -288,7 +291,7 @@ test('QQ 同步独立于本地审核；试运行保持 queued，实际确认后�
   store.approve(item.id, admin)
   await store.drain()
   assert.equal(store.get(item.id, admin).qq.state, 'queued')
-  assert.equal(store.queueStatus(admin).items[0].blockedReason, 'dry_run')
+  assert.match(store.queueStatus(admin).items[0].blockedReason, /试运行/)
   assert.equal(calls.length, 0)
   f.cfg.dryRun = false
   await store.drain()
@@ -375,11 +378,13 @@ test('识别超时不放行，也不提前释放未结束外部调用的并发�
   assert.equal(await next.tick(), 0)
   unblock.release()
   await work
-  assert.equal(store.get(item.id, admin).analysis.state, 'failed')
+  assert.equal(store.get(item.id, admin).analysis.state, 'unknown')
   assert.equal(store.get(item.id, admin).state, 'pending')
-  next.retryAnalysis(item.id, admin)
+  assert.equal(next.retryAnalysis(item.id, admin).code, 'ANALYSIS_UNKNOWN')
+  const task = next.queueStatus(admin).items.find((j) => j.kind === 'analyze')
+  assert.equal(next.retryTask(task.id, admin).code, 'NOT_RETRYABLE')
   await next.drain()
-  assert.equal(next.get(item.id, admin).analysis.state, 'done')
+  assert.equal(next.get(item.id, admin).analysis.state, 'unknown')
 })
 
 test('QQ 已成功但回执事务失败，保守 unknown 不因数据库异常自动重复收藏', async (t) => {
@@ -424,9 +429,10 @@ test('收藏 QQ 过程中删除本地素材：迟到成功不会复活，随后�
   assert.equal(store.get(item.id, admin).qq.state, 'removed')
 })
 
-for (const mode of ['collect', 'sync']) {
+for (const mode of ['collect', 'sync', 'analyze']) {
   test(`真实后台进程 ${mode} 活着不抢占，退出后恢复不伪造 QQ 成功`, { timeout: 15000 }, async (t) => {
     const f = fixture(t, { caption: false })
+    if (mode === 'analyze') f.cfg.stickers.caption = true
     const code = `
       import { createStorage } from ${JSON.stringify(new URL('../src/storage/index.js', import.meta.url).href)};
       import { createStickerStore } from ${JSON.stringify(new URL('../src/features/stickers.js', import.meta.url).href)};
@@ -434,9 +440,9 @@ for (const mode of ['collect', 'sync']) {
       const storage = createStorage(dbOptions);
       process.on('message', command => { if (command === 'exit') process.exit(0) });
       const hold = async () => { process.send({event:'held'}); return new Promise(() => {}) };
-      const store = createStickerStore({storage,getConfig:()=>cfg,autoStart:false,download:hold,onebot:{call:hold}});
+      const store = createStickerStore({storage,getConfig:()=>cfg,autoStart:false,download:hold,analyze:hold,onebot:{call:hold}});
       if (mode === 'collect') await store.collect({type:'image',data:{sub_type:1,file:'base64://'+png}},'group:1');
-      else { const r=await store.addFromBuffer(Buffer.from(png,'base64'),{chatId:'group:1'}); store.approve(r.item.id,{admin:true}); }
+      else { const r=await store.addFromBuffer(Buffer.from(png,'base64'),{chatId:'group:1'}); if(mode==='sync') store.approve(r.item.id,{admin:true}); }
       await store.tick();
     `
     const child = spawn(process.execPath, ['--input-type=module', '--eval', code, JSON.stringify({ dbOptions: f.dbOptions, cfg: f.cfg, mode, png: PNG.toString('base64') })], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], windowsHide: true })
@@ -450,10 +456,361 @@ for (const mode of ['collect', 'sync']) {
     assert.deepEqual(store.recover(), { requeued: 0, unknown: 0 })
     child.send('exit')
     await closed
-    assert.deepEqual(store.recover(), { requeued: mode === 'collect' ? 1 : 0, unknown: mode === 'sync' ? 1 : 0 })
+    assert.deepEqual(store.recover(), { requeued: mode === 'collect' ? 1 : 0, unknown: mode === 'collect' ? 0 : 1 })
     await store.drain()
     assert.equal(qqCalls, 0)
     if (mode === 'sync') assert.equal(store.list(admin).items[0].qq.state, 'unknown')
+    else if (mode === 'analyze') {
+      const it = store.list(admin).items[0]
+      assert.equal(it.analysis.state, 'unknown')
+      assert.equal(store.retryAnalysis(it.id, admin).code, 'ANALYSIS_UNKNOWN')
+    }
     else assert.equal(store.list(admin).items[0].state, 'pending')
   })
 }
+
+const entry = (it, extra = {}) => ({ id: it.id, expectedRevision: it.revision, ...extra })
+const taskEntry = (t) => ({ id: t.id, expectedState: t.state, expectedAttempts: t.attempts })
+const groupAdmin = { admin: true, chatId: 'group:1', accountId: '100' }
+
+test('批量审核逐项返回范围/版本/动画错误，既不扩大范围也不隐式确认 GIF', async (t) => {
+  const f = fixture(t, { caption: false })
+  f.cfg.shareGroups = [{ id: 'images', chats: ['group:1', 'group:2'], categories: ['image'] }]
+  const store = f.create()
+  const add = async (buf, chatId = 'group:1') => (await store.addFromBuffer(buf, { chatId, toQQ: false })).item
+  const good = await add(PNG), foreign = await add(picture(2), 'group:2'), stale = await add(picture(3)), gif = await add(GIF)
+  store.edit(stale.id, { name: 'changed' }, groupAdmin)
+  const r = store.batch('approve', [good, foreign, stale, gif].map(it => entry(it)), groupAdmin)
+  assert.deepEqual([r.ok, r.succeeded, r.failed, r.partial], [true, 1, 3, true])
+  assert.deepEqual(r.results.map(x => x.code), [undefined, 'WRONG_SCOPE', 'STALE_REVISION', 'REVIEW_ORIGINAL'])
+  assert.equal(store.get(foreign.id, admin).state, 'pending')
+  assert.equal(store.batch('approve', [entry(gif, { reviewedOriginal: true })], groupAdmin).succeeded, 1)
+  assert.equal(store.batch('approve', [entry(good)], groupAdmin).results[0].code, 'STALE_REVISION')
+  assert.equal(store.batch('approve', [entry(stale)], admin).ok, false, '批量必须显式给出聊天')
+  assert.equal(store.batch('approve', [entry(stale)], { ...groupAdmin, admin: false }).code, 'ADMIN_REQUIRED')
+  assert.equal(store.batch('approve', [entry(stale)], { ...groupAdmin, accountId: 'other' }).code, 'WRONG_ACCOUNT')
+  assert.equal(store.batch('approve', Array(201).fill(entry(stale)), groupAdmin).code, 'INVALID_BATCH')
+})
+
+test('批量拒绝/停用/删除保留墓碑与共享资产，重复 ID 不执行第二次，不自动删除 QQ', async (t) => {
+  const f = fixture(t, { caption: false })
+  let qqCalls = 0
+  const store = f.create({ onebot: { call: async () => { qqCalls++; return { emoji_id: 'remote' } } } })
+  const a = (await store.addFromBuffer(PNG, { chatId: 'group:1', toQQ: false })).item
+  const b = (await store.addFromBuffer(PNG, { chatId: 'group:2', toQQ: false })).item
+  const first = store.batch('reject', [entry(a), entry(a)], groupAdmin)
+  assert.equal(first.succeeded, 1)
+  assert.equal(first.results[1].code, 'INVALID_BATCH_ITEM')
+  assert.equal(store.batch('disable', [entry(store.get(a.id, admin))], groupAdmin).succeeded, 1)
+  const removed = store.batch('delete', [entry(store.get(a.id, admin))], { ...groupAdmin, fromQQ: true })
+  assert.equal(removed.results[0].tombstone, true)
+  assert.equal(store.get(a.id, admin).state, 'deleted')
+  assert.equal(store.get(b.id, admin).state, 'pending')
+  assert.equal((await store.addFromBuffer(PNG, { chatId: 'group:1' })).code, 'TOMBSTONED')
+  await store.drain()
+  assert.equal(qqCalls, 0)
+  assert.deepEqual(store.preview(b.id, admin).bytes, PNG)
+})
+
+test('批量识别只登记队列，跨连接重复提交不重复计费，队列满逐项回滚', async (t) => {
+  const f = fixture(t, { caption: false, maxQueued: 1 })
+  let calls = 0
+  const store = f.create({ analyze: async () => { calls++; return answer() } }), other = f.create({ storage: f.open() })
+  const a = (await store.addFromBuffer(PNG, { chatId: 'group:1', toQQ: false })).item
+  const b = (await store.addFromBuffer(picture(2), { chatId: 'group:1', toQQ: false })).item
+  const r = store.batch('analysis_retry', [entry(a), entry(b)], groupAdmin)
+  assert.equal(r.succeeded, 1)
+  assert.equal(r.results[1].code, 'QUEUE_FULL')
+  assert.equal(store.get(b.id, admin).revision, b.revision)
+  assert.equal(other.batch('analysis_retry', [entry(a)], groupAdmin).results[0].code, 'STALE_REVISION')
+  await store.drain()
+  assert.equal(calls, 0, 'caption=false 暂停旧识别队列')
+  assert.match(store.queueStatus(groupAdmin).items[0].blockedReason, /识别已关闭/)
+  f.cfg.stickers.caption = true
+  await store.drain()
+  assert.equal(calls, 1)
+})
+
+test('批量和单项任务重试限制聊天、类型、状态，旧识别任务不再次派生付费工作', async (t) => {
+  const f = fixture(t)
+  let calls = 0
+  const store = f.create({ analyze: async () => { calls++; return 'bad json' } })
+  const it = (await store.addFromBuffer(PNG, { chatId: 'group:1', toQQ: false })).item
+  await store.drain()
+  const task = store.queueStatus(groupAdmin).items[0]
+  assert.equal(store.retryTask(task.id, { ...admin, chatId: 'group:2' }).code, 'NOT_FOUND')
+  assert.equal(store.batch('task_retry', [taskEntry(task)], { ...groupAdmin, kind: 'sync' }).results[0].code, 'WRONG_TASK_KIND')
+  const result = store.batch('task_retry', [taskEntry(task)], { ...groupAdmin, kind: 'analyze' })
+  assert.equal(result.succeeded, 1)
+  assert.equal(store.batch('task_retry', [taskEntry(task)], { ...groupAdmin, kind: 'analyze' }).results[0].code, 'STALE_TASK')
+  await store.drain()
+  assert.equal(calls, 2)
+  assert.equal(store.retryTask(task.id, groupAdmin).code, 'NOT_RETRYABLE')
+  assert.equal(store.get(it.id, admin).state, 'pending')
+})
+
+test('识别未知不能经重试/选帧绕过，逐项核对有依据后只登记、不自动付费', async (t) => {
+  const f = fixture(t)
+  let calls = 0
+  const store = f.create({ analyze: async () => { calls++; throw new Error('connection reset') } })
+  const it = (await store.addFromBuffer(PNG, { chatId: 'group:1', toQQ: false })).item
+  await store.drain()
+  const task = store.queueStatus(groupAdmin).items[0], current = store.get(it.id, admin)
+  assert.equal(current.analysis.state, 'unknown')
+  assert.equal(store.batch('analysis_retry', [entry(current)], groupAdmin).results[0].code, 'ANALYSIS_UNKNOWN')
+  assert.equal(store.retryTask(task.id, groupAdmin).code, 'NOT_RETRYABLE')
+  assert.equal(store.reconcileAnalysis(task.id, { ...admin, chatId: 'group:2', confirmedNotApplied: true, reason: 'checked' }).code, 'NOT_FOUND')
+  assert.equal(store.reconcileAnalysis(task.id, { ...groupAdmin, confirmedNotApplied: true }).code, 'CONFIRMATION_REQUIRED')
+  assert.equal(store.reconcileAnalysis(task.id, { ...groupAdmin, confirmedNotApplied: true, reason: '模拟服务日志确认未提交' }).ok, true)
+  await store.drain()
+  assert.equal(calls, 1)
+  assert.equal(store.retryTask(task.id, groupAdmin).ok, true)
+  await store.drain()
+  assert.equal(calls, 2)
+})
+
+test('GIF 缺少 ffmpeg 保留待审，批量重试自动取样不重复排队，仍可人工审核', async (t) => {
+  const f = fixture(t)
+  const store = f.create({ analyze: async () => assert.fail('缺帧不能调用模型') })
+  const it = (await store.addFromBuffer(GIF, { chatId: 'group:1', toQQ: false })).item
+  await store.drain()
+  const before = store.queueStatus(admin).total
+  const r = store.batch('analysis_retry', [entry(store.get(it.id, admin))], groupAdmin)
+  assert.equal(r.succeeded, 1)
+  assert.equal(store.queueStatus(admin).total, before + 1)
+  assert.equal(store.retryAnalysis(it.id, admin).taskId, r.results[0].taskId)
+  await store.drain()
+  assert.equal(store.get(it.id, admin).analysis.state, 'needs_frames')
+  assert.match(store.get(it.id, admin).analysis.error, /ffmpeg/)
+  assert.equal(store.batch('approve', [entry(store.get(it.id, admin), { reviewedOriginal: true })], groupAdmin).succeeded, 1)
+})
+
+test('QQ unknown 禁止批量重试且核对不得跨范围，已确认未发送可重试且旧请求幂等', async (t) => {
+  const f = fixture(t, { caption: false })
+  let calls = 0
+  const store = f.create({ onebot: { call: async () => { calls++; throw new Error('socket lost') } } })
+  const it = (await store.addFromBuffer(PNG, { chatId: 'group:1' })).item
+  store.approve(it.id, groupAdmin)
+  await store.drain()
+  const task = store.queueStatus(groupAdmin).items[0]
+  assert.equal(task.state, 'unknown')
+  assert.equal(store.reconcileSync(task.id, { ...admin, chatId: 'group:2', confirmedNotApplied: true }).code, 'NOT_FOUND')
+  assert.equal(store.batch('task_retry', [taskEntry(task)], { ...groupAdmin, kind: 'sync' }).succeeded, 0)
+  assert.equal(store.queueSync(it.id, groupAdmin).ok, false)
+  assert.equal(store.reconcileSync(task.id, { ...groupAdmin, confirmedNotApplied: true }).ok, true)
+  const reconciled = store.queueStatus(groupAdmin).items[0]
+  assert.equal(store.batch('task_retry', [taskEntry(reconciled)], { ...groupAdmin, kind: 'sync' }).succeeded, 1)
+  assert.equal(store.batch('task_retry', [taskEntry(reconciled)], { ...groupAdmin, kind: 'sync' }).results[0].code, 'STALE_TASK')
+  await store.drain()
+  assert.equal(calls, 2)
+})
+
+test('批量批准本地成功与 QQ 排队失败独立报告', async (t) => {
+  const f = fixture(t, { caption: false, maxQueued: 1 })
+  const store = f.create()
+  const it = (await store.addFromBuffer(PNG, { chatId: 'group:1' })).item
+  await store.collect(segment(picture(2)), f.incoming(segment(picture(2))))
+  const r = store.batch('approve', [entry(it)], groupAdmin)
+  assert.equal(r.succeeded, 1)
+  assert.equal(r.syncFailed, 1)
+  assert.equal(r.results[0].sync.code, 'QUEUE_FULL')
+  assert.equal(store.get(it.id, admin).state, 'approved')
+})
+
+test('关闭模块阻止选择与发送，关闭收藏阻止在途写回，试运行暂停 QQ 导入', async (t) => {
+  const f = fixture(t, { caption: false })
+  const entered = gate(), unblock = gate()
+  const store = f.create({ download: async () => { entered.release(); await unblock.promise; return PNG }, onebot: { call: async () => assert.fail('试运行不可访问 QQ') } })
+  const it = (await store.addFromBuffer(picture(2), { chatId: 'group:1', name: '开心', toQQ: false })).item
+  store.approve(it.id, groupAdmin)
+  assert.ok(store.pickForReply('开心', 'group:1'))
+  f.cfg.stickers.enabled = false
+  assert.equal(store.pickForReply('开心', 'group:1'), null)
+  assert.equal(store.segmentFor(it, 'group:1'), null)
+  f.cfg.stickers.enabled = true
+  await store.collect(segment(), f.incoming())
+  const work = store.tick()
+  await entered.promise
+  f.cfg.stickers.collect = false
+  unblock.release(); await work
+  assert.equal(store.list(admin).total, 1)
+  f.cfg.dryRun = true
+  await store.importFromQQ(groupAdmin)
+  await store.drain()
+  assert.match(store.queueStatus({ ...groupAdmin, kind: 'import' }).items[0].blockedReason, /试运行/)
+})
+
+test('分页、动画/识别/QQ 筛选总数与当前页一致；管理不能借共享权编辑', async (t) => {
+  const f = fixture(t, { caption: false })
+  const store = f.create()
+  for (let i = 0; i < 5; i++) await store.addFromBuffer(picture(i), { chatId: 'group:1', toQQ: false })
+  const gif = (await store.addFromBuffer(GIF, { chatId: 'group:1', toQQ: false })).item
+  const r = store.list({ ...groupAdmin, analysis: 'pending', animated: 'false', qq: 'idle', limit: 2, offset: 2 })
+  assert.equal(r.total, 5)
+  assert.equal(r.items.length, 2)
+  assert.equal(store.list({ ...groupAdmin, animated: 'true' }).items[0].id, gif.id)
+  f.cfg.shareGroups = [{ id: 's', chats: ['group:1', 'group:2'], categories: ['image'] }]
+  assert.equal(store.approve(gif.id, { ...admin, chatId: 'group:2', reviewedOriginal: true }).code, 'WRONG_SCOPE')
+  assert.equal(store.rename(gif.id, 'cross', [], { ...admin, chatId: 'group:2' }).code, 'WRONG_SCOPE')
+})
+
+test('QQ 导入缺少 ID 显示已存在，禁止重复收藏；旧库回读兼容，人工绑定才允许改备注', async (t) => {
+  const f = fixture(t, { caption: false })
+  const calls = []
+  const store = f.create({ fetch: async () => PNG, onebot: { call: async (action) => {
+    calls.push(action)
+    if (action === 'fetch_custom_face') return [{ url: 'https://example.invalid/sticker.png' }]
+    return null
+  } } })
+  await store.importFromQQ(groupAdmin); await store.drain()
+  const it = store.list(groupAdmin).items[0]
+  assert.equal(it.qq.state, 'unidentified')
+  store.approve(it.id, groupAdmin)
+  assert.equal(store.queueSync(it.id, groupAdmin).code, 'QQ_ID_REQUIRED')
+  // 真实早上库没有 sticker_qq 记录：读旧来源也必须保守识别已有收藏。
+  f.storage.db.run('DELETE FROM sticker_qq')
+  assert.equal(store.get(it.id, admin).qq.state, 'unidentified')
+  assert.equal(store.queueSync(it.id, groupAdmin).code, 'QQ_ID_REQUIRED')
+  assert.equal(store.bindQQ(it.id, { ...groupAdmin, emojiId: 'existing' }).code, 'CONFIRMATION_REQUIRED')
+  assert.equal(store.bindQQ(it.id, { ...admin, chatId: 'group:2', emojiId: 'existing', confirmedExisting: true }).ok, false)
+  assert.equal(store.bindQQ(it.id, { ...groupAdmin, emojiId: 'existing', confirmedExisting: true }).ok, true)
+  store.rename(it.id, '新名字', [], groupAdmin)
+  assert.equal(store.queueSync(it.id, groupAdmin).ok, true)
+  await store.drain()
+  assert.deepEqual(calls, ['fetch_custom_face', 'modify_custom_face'])
+})
+
+test('QQ 备注明确失败后再次同步仍修改已有 ID，不能重新 add', async (t) => {
+  const f = fixture(t, { caption: false })
+  const calls = []
+  const store = f.create({ onebot: { call: async (action) => {
+    calls.push(action)
+    if (action === 'add_custom_face') return { emoji_id: 'remote' }
+    throw Object.assign(new Error('rejected'), { outcome: 'rejected' })
+  } } })
+  const it = (await store.addFromBuffer(PNG, { chatId: 'group:1' })).item
+  store.approve(it.id, groupAdmin); await store.drain()
+  store.rename(it.id, 'rename', [], groupAdmin)
+  store.queueSync(it.id, groupAdmin); await store.drain()
+  store.queueSync(it.id, groupAdmin); await store.drain()
+  assert.deepEqual(calls, ['add_custom_face', 'modify_custom_face', 'modify_custom_face'])
+})
+
+const sampledFrames = () => ({ ok: true, state: 'sampled', coverage: 'partial',
+  frames: [0, 100].map((atMs, frameIndex) => ({ bytes: PNG, mime: 'image/png', width: 1, height: 1, atMs, frameIndex, selection: 'sampled', coverage: 'partial' })),
+  sampling: { selection: 'sampled', coverage: 'partial', complete: false, sourceFrames: 2, sampledFrames: 2, durationMs: 200 } })
+
+test('GIF 批量重试自动本地取样，保存部分帧证据；模型approve也不能替代完整动画人工审核', async (t) => {
+  const f = fixture(t, { caption: false, autoReview: true })
+  let samples = 0
+  const seen = []
+  const store = f.create({ sampleFrames: async input => {
+    samples++; assert.deepEqual(input.bytes, GIF); assert.equal(input.mime, 'image/gif'); assert.ok(input.signal instanceof AbortSignal)
+    return sampledFrames()
+  }, analyze: async input => { seen.push(input); return answer() } })
+  const it = (await store.addFromBuffer(GIF, { chatId: 'group:1', toQQ: false })).item
+  f.cfg.stickers.caption = true
+  const r = store.batch('analysis_retry', [entry(it)], groupAdmin)
+  assert.equal(r.succeeded, 1)
+  await store.drain()
+  let current = store.get(it.id, admin)
+  assert.equal(current.state, 'pending')
+  assert.equal(current.analysis.state, 'done')
+  assert.equal(current.analysis.evidence.coverage, 'sampled_partial')
+  assert.equal(current.analysis.evidence.decision, 'pending')
+  assert.equal(current.analysis.evidence.modelDecision, 'approve')
+  assert.equal(current.analysis.evidence.sampling.complete, false)
+  assert.ok(current.frames.every(f => f.selection === 'sampled' && f.coverage === 'partial' && f.sourceAssetId === it.assetId))
+  assert.equal(seen[0].images.length, 2)
+  assert.equal(seen[0].coverage, 'sampled_partial')
+  assert.equal(seen[0].operationId, it.id)
+  assert.equal(seen[0].callId, r.results[0].taskId + ':1')
+  assert.equal(seen[0].scope.account, '100')
+  assert.equal(seen[0].chatId, 'group:1')
+  assert.deepEqual(store.preview(it.id, groupAdmin).bytes, GIF)
+  assert.deepEqual(store.preview(it.id, { ...groupAdmin, frame: 0 }).bytes, PNG)
+  assert.equal(store.approve(it.id, groupAdmin).code, 'REVIEW_ORIGINAL')
+  assert.equal(store.approve(it.id, { ...groupAdmin, reviewedOriginal: true }).ok, true)
+  assert.equal(store.selectFrames(it.id, [{ bytes: PNG, atMs: 50 }], groupAdmin).ok, true)
+  await store.drain()
+  current = store.get(it.id, admin)
+  assert.equal(current.state, 'approved')
+  assert.equal(current.analysis.evidence.coverage, 'manual_partial')
+  assert.equal(current.frames[0].selection, 'manual')
+  assert.equal(samples, 1, '人工帧优先，不再次自动取样')
+})
+
+test('自动取样后的付费识别unknown不能经新一轮本地取样绕过重试屏障', async (t) => {
+  const f = fixture(t)
+  let samples = 0, paid = 0
+  const store = f.create({ sampleFrames: async () => { samples++; return sampledFrames() }, analyze: async () => { paid++; throw new Error('remote outcome unknown') } })
+  const it = (await store.addFromBuffer(GIF, { chatId: 'group:1', toQQ: false })).item
+  await store.drain()
+  assert.equal(store.get(it.id, admin).analysis.state, 'unknown')
+  assert.equal(store.batch('analysis_retry', [entry(store.get(it.id, admin))], groupAdmin).results[0].code, 'ANALYSIS_UNKNOWN')
+  assert.equal(store.selectFrames(it.id, [{ bytes: PNG, atMs: 0 }], groupAdmin).code, 'ANALYSIS_BUSY')
+  await store.drain()
+  assert.deepEqual([samples, paid], [1, 1])
+})
+
+test('自动取样期间关闭或编辑素材会在付费识别前拦截，不落迟到帧', async (t) => {
+  for (const change of ['disable', 'edit']) {
+    const f = fixture(t), entered = gate(), unblock = gate()
+    let paid = 0
+    const store = f.create({ sampleFrames: async () => { entered.release(); await unblock.promise; return sampledFrames() }, analyze: async () => { paid++; return answer() } })
+    const it = (await store.addFromBuffer(GIF, { chatId: 'group:1', toQQ: false })).item
+    const work = store.tick(); await entered.promise
+    if (change === 'disable') f.cfg.stickers.enabled = false
+    else store.edit(it.id, { name: '人工修改' }, groupAdmin)
+    unblock.release(); await work
+    assert.equal(paid, 0)
+    assert.equal(store.get(it.id, admin).frames.length, 0)
+    assert.equal(store.queueStatus(groupAdmin).items[0].state, 'canceled')
+  }
+})
+
+test('平台已标识表情放宽至5MB/2048/4M像素，横图不套方形规则；普通照片仍不自动收藏', async (t) => {
+  const f = fixture(t, { caption: false })
+  const wide = Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)])
+  wide.writeUInt32BE(900, 16); wide.writeUInt32BE(320, 20)
+  let limit
+  const store = f.create({ download: async (_s, _o, options) => { limit = options.maxBytes; return wide } })
+  const seg = segment(wide)
+  assert.equal((await store.collect(seg, f.incoming(seg))).ok, true)
+  await store.drain()
+  assert.equal(limit, 5 * 1024 * 1024)
+  assert.equal(store.list(groupAdmin).items[0].width, 900)
+  assert.equal(store.list(groupAdmin).items[0].height, 320)
+  assert.equal((await store.collect({ type: 'image', data: { file: seg.data.file } }, 'group:1')).code, 'NOT_STICKER')
+  const large = Buffer.from(PNG); large.writeUInt32BE(2049, 16)
+  const bounded = f.create({ download: async () => large })
+  await bounded.collect(segment(large), f.incoming(segment(large))); await bounded.drain()
+  assert.equal(store.list(groupAdmin).total, 1)
+  assert.match(store.queueStatus(groupAdmin).items.find(t => t.state === 'failed').error, /2048/)
+})
+
+test('真实modelAnalyzer调用账本有账号/聊天/素材operationId/任务callId，日志不携带图像或提示词', async (t) => {
+  const f = fixture(t)
+  f.cfg.model = { provider: 'sticker-mock-provider', model: 'sticker-mock-model' }
+  const events = []
+  const dsh = { get: () => null, attachments: { admitPromptContent: async content => content }, llm: {
+    resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }),
+    async *stream() { yield { type: 'text-delta', text: JSON.stringify(answer()) }; yield { type: 'finish', reason: 'stop' } },
+  } }
+  t.after(observeModelUsage(dsh, e => events.push(e)))
+  const store = f.create({ dsh, analyze: undefined })
+  const seg = segment(); seg.data.summary = 'PRIVATE-IMAGE-HINT'
+  const source = f.incoming(seg)
+  await store.collect(seg, source); await store.drain()
+  const it = store.list(groupAdmin).items[0]
+  assert.equal(it.analysis.state, 'done')
+  const task = store.queueStatus({ ...groupAdmin, kind: 'analyze' }).items[0]
+  assert.equal(events.length, 1)
+  assert.equal(events[0].operationId, it.id)
+  assert.equal(events[0].id, task.id + ':1')
+  assert.equal(events[0].stage, 'sticker_analysis')
+  assert.deepEqual(events[0].context, { account: '100', chatId: 'group:1', requestId: null, role: 'vision' })
+  assert.deepEqual(events[0].sourceMessageIds, [source.messageId])
+  assert.equal(JSON.stringify(events).includes('PRIVATE-IMAGE-HINT'), false)
+  assert.equal(JSON.stringify(events).includes(PNG.toString('base64')), false)
+})

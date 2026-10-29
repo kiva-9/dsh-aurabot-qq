@@ -6,6 +6,7 @@ import { createStickerRepository, fail, hash, newStickerId } from './repository.
 import { matchSticker, pickForReply, allowedForContext } from './selection.js'
 import { modelAnalyzer, parseAnalysis } from './analysis.js'
 import { quarantineLegacy } from './legacy.js'
+import { sampleImageFrames } from '../runtime/image-frames.js'
 
 const clamp = (v, fallback, min, max) => Math.max(min, Math.min(max, Number.isFinite(Number(v)) ? Math.floor(Number(v)) : fallback))
 const errorResult = (e) => ({ ok: false, code: e.code || 'STICKER_ERROR', reason: e.message, message: e.message })
@@ -20,7 +21,7 @@ const context = (o) => typeof o === 'string' ? { chatId: o } : {
 
 /** SQLite 是唯一状态源。注入 storage 与依赖，测试不访问用户 data 目录。 */
 export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebot, log, now = Date.now,
-  getPolicy, download = segmentBytes, fetch = fetchImage, analyze, autoStart = true, legacyDir } = {}) {
+  getPolicy, download = segmentBytes, fetch = fetchImage, analyze, sampleFrames = sampleImageFrames, autoStart = true, legacyDir } = {}) {
   const cfg = () => getConfig().stickers || {}
   const account = () => String(getConfig().botQQ || '')
   const policy = () => ({ shareGroups: normalizeShareGroups((getPolicy?.() || getConfig().mediaPolicy || getConfig().memory || {}).shareGroups || getConfig().shareGroups || []) })
@@ -45,6 +46,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
   const rawFind = (key, o) => {
     const c = context(o)
     const a = String(c.accountId || account())
+    if (a !== account()) return null
     const matches = repo.find(a, String(key))
     if (c.admin && !c.chatId) return matches.find((it) => it.id === key) || (matches.length === 1 ? matches[0] : null)
     let viewer
@@ -55,7 +57,18 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     admin(o)
     const it = rawFind(key, o)
     if (!it) fail('NOT_FOUND', '没有该范围内的表情，跨聊天同哈希请使用 id')
+    // image 共享只授予使用权，管理仍需素材所属聊天的授权。
+    if (context(o).chatId && it.scope.chat !== context(o).chatId) fail('WRONG_SCOPE', '不能从当前聊天管理共享来源的素材')
+    if (o?.expectedRevision !== undefined && it.revision !== o.expectedRevision) fail('STALE_REVISION', '表情已被修改，请刷新后重新选择')
     return it
+  }
+  function managedTask(id, options = {}) {
+    admin(options)
+    const t = repo.task(id), c = context(options)
+    if (!t || t.accountId !== account() || (c.accountId && c.accountId !== account()) || (c.chatId && c.chatId !== t.chatId)) fail('NOT_FOUND', '没有当前账号/聊天范围内的任务')
+    if ((options.expectedState !== undefined && options.expectedState !== t.state) ||
+        (options.expectedAttempts !== undefined && options.expectedAttempts !== t.attempts)) fail('STALE_TASK', '任务状态已改变，请刷新后重新选择')
+    return t
   }
   const assetOf = (it) => {
     const a = storage.assets.get(it.assetId)
@@ -79,6 +92,9 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     else if (status !== 'all' || !c.admin) items = items.filter((it) => it.state !== 'deleted' && (c.admin || it.state === 'approved'))
     if (!c.admin) items = items.filter((it) => it.state === 'approved')
     if (c.query) items = items.filter((it) => [it.name, it.description, it.ocr, ...it.tags].join(' ').toLowerCase().includes(String(c.query).toLowerCase()))
+    if (c.analysis) items = items.filter((it) => it.analysis.state === c.analysis)
+    if (c.animated === 'true' || c.animated === 'false') items = items.filter((it) => it.animated === (c.animated === 'true'))
+    if (c.qq) items = items.filter((it) => repo.qq(it.scope.account, it.sha256).state === c.qq)
     return paginate(items.map((it) => decorate(it, viewer || it.scope)), c)
   }
   function paginate(items, c) {
@@ -134,12 +150,16 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (!asset || asset.state !== 'stored') return null
     try { return { bytes: readFileSync(storage.assets.pathOf(asset)), mime: asset.mime } } catch { return null }
   }
-  function inspect(buf, automatic = false) {
-    if (!Buffer.isBuffer(buf) || !buf.length || buf.length > (automatic ? 1.5 : 5) * 1024 * 1024) fail('INVALID_IMAGE', '图片为空或超过体积上限')
+  function inspect(buf, automatic = false, markedSticker = false) {
+    const maxBytes = automatic && !markedSticker ? 1.5 : 5
+    if (!Buffer.isBuffer(buf) || !buf.length || buf.length > maxBytes * 1024 * 1024) fail('INVALID_IMAGE', `图片为空或超过 ${maxBytes} MB 体积上限`)
     const mime = mimeOf(buf)
     const size = imageSize(buf)
     if (!['image/png', 'image/gif', 'image/jpeg', 'image/webp', 'image/bmp'].includes(mime)) fail('INVALID_IMAGE', '不是支持的图片格式')
-    if (automatic && !stickerSizeOk({ ...size, bytes: buf.length })) fail('INVALID_IMAGE', '尺寸不像表情')
+    // 平台已明确标记的表情无需再猜是否方形；仍限定画布/像素/文件大小。
+    if (automatic && markedSticker) {
+      if (!(size.width > 0 && size.height > 0) || size.width > 2048 || size.height > 2048 || size.width * size.height > 4 * 1024 * 1024) fail('INVALID_IMAGE', '平台表情需有有效尺寸，边长不超过 2048、像素不超过 4M')
+    } else if (automatic && !stickerSizeOk({ ...size, bytes: buf.length })) fail('INVALID_IMAGE', '普通图片候选尺寸不像表情')
     // 动态 WebP/APNG 同样不能由静态首帧推断整图。
     const animated = mime === 'image/gif' || (mime === 'image/webp' && buf.includes(Buffer.from('ANIM'))) || (mime === 'image/png' && buf.includes(Buffer.from('acTL')))
     return { mime, ...size, animated }
@@ -163,13 +183,15 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (!m || m.recalledAt || m.account !== source.scope.account || m.chatId !== source.scope.chat || !seg || hash(JSON.stringify(seg)) !== source.segmentHash) fail('INVALID_SOURCE', '来源已撤回、修改或改变范围')
   }
   function analysisTask(it) {
+    const unknown = repo.tasks(it.scope.account, { itemId: it.id, kind: 'analyze', state: 'unknown', limit: 1 })[0]
+    if (unknown) fail('ANALYSIS_UNKNOWN', '上次识别结果未知，可能已计费；请核对任务，不能直接重新识别')
     return repo.enqueue(it.scope, 'analyze', `${it.id}:${it.revision}`, { revision: it.revision,
       policyVersion: String(cfg().policyVersion || '1') }, it.id)
   }
   function scheduleAnalysis(it) {
     if (cfg().caption === false) return null
     try { return analysisTask(it) } catch (e) {
-      repo.update(it.id, (current) => { current.analysis = { ...current.analysis, state: 'failed', error: e.message } })
+      repo.update(it.id, (current) => { current.analysis = { ...current.analysis, state: e.code === 'ANALYSIS_UNKNOWN' ? 'unknown' : 'failed', error: e.message } })
       return null
     }
   }
@@ -180,7 +202,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       const options = { ...context(o), ...extra }
       const scope = scopeOf(options)
       if ((scope.chat.startsWith('group:') && cfg().fromGroups === false) || (scope.chat.startsWith('private:') && cfg().fromPrivate === false)) fail('DISABLED', '这个来源的自动收藏已关闭')
-      if (JSON.stringify(seg).length > 2.1 * 1024 * 1024) fail('INVALID_IMAGE', '媒体段过大')
+      if (JSON.stringify(seg).length > 7 * 1024 * 1024) fail('INVALID_IMAGE', '媒体段过大')
       const source = sourceFor(seg, scope, options)
       const job = repo.db.tx(() => {
         const t = repo.enqueue(scope, 'collect', source.key, { source, automatic: true })
@@ -207,14 +229,15 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       if (!['add', 'rename', 'delete'].includes(action)) fail('INVALID_ACTION', '同步动作无效')
       if (action !== 'delete' && it.state !== 'approved') fail('NOT_APPROVED', '未批准的表情不能同步收藏')
       const q = repo.qq(it.scope.account, it.sha256)
+      if (q.state === 'unidentified') fail('QQ_ID_REQUIRED', 'QQ 收藏已导入但缺少 ID；请核对并绑定已有收藏，不能直接重复收藏')
       if (['queued', 'running', 'unknown'].includes(q.state)) {
         if (action === 'delete') repo.saveQQ(it.scope.account, it.sha256, { ...q, desired: 'absent' })
         return { ok: q.state !== 'unknown', state: q.state, taskId: q.taskId, reason: q.state === 'unknown' ? '上次同步结果未知，须先在 QQ 核对' : '已有同步任务' }
       }
       if (action === 'delete' && !q.emojiId) return { ok: true, state: q.state, reason: '没有已确认的 QQ 收藏 ID' }
       if (action === 'rename' && !q.emojiId) fail('NO_QQ_ID', '没有已确认的 QQ 收藏 ID，不能修改 QQ 备注')
-      if (action === 'add' && q.emojiId && q.state === 'synced') {
-        if (q.name === it.name) return { ok: true, state: 'synced', taskId: q.taskId }
+      if (action === 'add' && q.emojiId) {
+        if (q.name === it.name && q.state === 'synced') return { ok: true, state: 'synced', taskId: q.taskId }
         action = 'rename'
       }
       const job = repo.enqueue(it.scope, 'sync', `${it.sha256}:${action}:${newStickerId('req')}`, {
@@ -254,6 +277,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       if (it.state === 'deleted') fail('TOMBSTONED', '已删除，不能恢复')
       if (state === 'approved') {
         if (!assetOf(it)) fail('UNAVAILABLE', '原文件不可用，不能批准')
+        validateSource(it.source)
         if (it.animated && options.reviewedOriginal !== true) fail('REVIEW_ORIGINAL', '动画需查看原文件并明确确认，不能只看关键帧批准')
       }
       const saved = repo.update(it.id, (current) => {
@@ -266,7 +290,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       return { ok: true, item: decorate(saved), sync }
     })
   }
-  async function remove(key, options = {}) {
+  function remove(key, options = {}) {
     return safe(() => {
       const it = managed(key, options)
       const saved = it.state === 'deleted' ? it : repo.update(it.id, (current) => {
@@ -282,9 +306,10 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     })
   }
   function retryAnalysis(key, options = {}) {
-    return safe(() => {
+    return safe(() => repo.db.tx(() => {
       const it = managed(key, options)
       if (it.state === 'deleted') fail('TOMBSTONED', '已删除')
+      if (it.analysis.state === 'unknown' || repo.tasks(it.scope.account, { itemId: it.id, kind: 'analyze', state: 'unknown', limit: 1 }).length) fail('ANALYSIS_UNKNOWN', '上次识别结果未知，可能已计费；请先核对，不能直接重试')
       const active = ['queued', 'running'].map((state) => repo.tasks(it.scope.account, { itemId: it.id, kind: 'analyze', state, limit: 1 })[0]).find(Boolean)
       if (active) return { ok: true, taskId: active.id, state: active.state }
       const task = repo.db.tx(() => {
@@ -293,12 +318,13 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       })
       kick()
       return { ok: true, taskId: task.id, state: task.state }
-    })
+    }))
   }
   function selectFrames(key, frames, options = {}) {
     return safe(() => {
       const it = managed(key, options)
       if (it.state === 'deleted') fail('TOMBSTONED', '已删除')
+      if (['running', 'unknown'].some((state) => repo.tasks(it.scope.account, { itemId: it.id, kind: 'analyze', state, limit: 1 }).length)) fail('ANALYSIS_BUSY', '识别仍在执行或结果未知，请先核对任务再更换关键帧')
       if (!it.animated || !Array.isArray(frames) || !frames.length || frames.length > 6) fail('INVALID_FRAMES', '动画需显式选择1~6张静态关键帧')
       const selected = frames.map((f) => {
         const buf = Buffer.isBuffer(f.bytes) ? f.bytes : Buffer.from(String(f.data || '').replace(/^data:[^,]+,/, ''), 'base64')
@@ -322,13 +348,16 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
 
   async function processCollect(t) {
     const source = t.input.source
+    if (cfg().collect === false || (source.scope.chat.startsWith('group:') ? cfg().fromGroups : cfg().fromPrivate) === false) fail('DISABLED', '当前来源的自动收藏已关闭')
     validateSource(source)
-    const buf = await download(source.segment, onebot, { maxBytes: 1.5 * 1024 * 1024, timeoutMs: 20000 })
+    const markedSticker = isStickerSegment(source.segment)
+    const buf = await download(source.segment, onebot, { maxBytes: (markedSticker ? 5 : 1.5) * 1024 * 1024, timeoutMs: 20000 })
     if (stopped) fail('STOPPED', '模块已停止')
+    if (cfg().enabled === false || cfg().collect === false || (source.scope.chat.startsWith('group:') ? cfg().fromGroups : cfg().fromPrivate) === false) fail('DISABLED', '下载期间自动收藏已关闭')
     validateSource(source)
     repo.db.tx(() => {
       if (!repo.owns(t)) return
-      const result = repo.ingest(buf, inspect(buf, true), source.scope, { automatic: true, source, from: source.scope.chat, toQQ: true })
+      const result = repo.ingest(buf, inspect(buf, true, markedSticker), source.scope, { automatic: true, source, from: source.scope.chat, toQQ: true })
       repo.finish(t, 'done', { output: { itemId: result.item.id, existed: result.existed, localSaved: true, qqSynced: false } })
       if (!result.existed) scheduleAnalysis(result.item)
     })
@@ -336,13 +365,8 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
   async function processAnalysis(t) {
     const it = repo.get(t.itemId)
     if (!it || it.state === 'deleted' || it.revision !== t.input.revision) return repo.finish(t, 'canceled', { error: '素材已更新或删除' })
+    if (repo.tasks(t.accountId, { itemId: t.itemId, kind: 'analyze', state: 'unknown', limit: 1 }).length) return repo.finish(t, 'canceled', { error: '较早识别结果未知，禁止再次调用模型' })
     validateSource(it.source)
-    if (it.animated && !it.frames.length) fail('NEEDS_FRAMES', '动画保留待审：请查看原文件并选择关键帧，不能只审核首帧')
-    const inputAssets = it.animated ? it.frames.map((f) => storage.assets.get(f.assetId)) : [assetOf(it)]
-    const images = inputAssets.map((a) => {
-      if (!a || a.state !== 'stored') fail('UNAVAILABLE', '识别用图片不可用')
-      return { data: readFileSync(storage.assets.pathOf(a)).toString('base64'), mediaType: a.mime }
-    })
     const ctrl = new AbortController()
     controllers.add(ctrl)
     const timeout = setTimeout(() => {
@@ -351,19 +375,55 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     }, clamp(cfg().analysisTimeoutMs, 60000, 10, 180000))
     timeout.unref?.()
     try {
-      const result = parseAnalysis(await analyzer({ images, frames: it.frames, hint: it.source?.hint || '', animated: it.animated,
-        policyVersion: t.input.policyVersion, signal: ctrl.signal }), t.input.policyVersion)
+      let sampled = null, frames = it.frames.filter((f) => f.selection === 'manual'), images
+      const readImage = a => {
+        if (!a || a.state !== 'stored') fail('UNAVAILABLE', '识别用图片不可用')
+        return { data: readFileSync(storage.assets.pathOf(a)).toString('base64'), mediaType: a.mime }
+      }
+      if (it.animated && !frames.length) {
+        const original = assetOf(it)
+        if (!original) fail('UNAVAILABLE', '动画原文件不可用')
+        sampled = await sampleFrames({ bytes: readFileSync(storage.assets.pathOf(original)), mime: it.mime, signal: ctrl.signal })
+        if (!sampled.ok) fail('NEEDS_FRAMES', `${sampled.message || '本地取帧失败'}；可手工选帧或查看完整动画后人工审核`)
+        if (!Array.isArray(sampled.frames) || !sampled.frames.length || sampled.frames.length > 6 || sampled.coverage !== 'partial') fail('NEEDS_FRAMES', '自动取样没有返回有界的部分帧证据')
+        images = sampled.frames.map(f => {
+          const info = inspect(f.bytes)
+          if (info.mime !== 'image/png' || info.animated || !(info.width > 0 && info.height > 0) || info.width > 384 || info.height > 384 || f.bytes.length > 1024 * 1024 || !Number.isFinite(f.atMs) || f.atMs < 0) fail('NEEDS_FRAMES', '自动取样帧无效')
+          return { data: f.bytes.toString('base64'), mediaType: 'image/png' }
+        })
+        frames = sampled.frames.map(({ bytes, mime, ...f }) => ({ ...f, sourceAssetId: it.assetId, selection: 'sampled', coverage: 'partial' }))
+      } else images = (it.animated ? frames.map(f => storage.assets.get(f.assetId)) : [assetOf(it)]).map(readImage)
       ctrl.signal.throwIfAborted()
+      validateSource(it.source)
+      // 取样可能花数秒。调用付费模型前再次校验版本、开关和所有权。
+      if (!repo.owns(t) || stopped || cfg().enabled === false || cfg().caption === false || repo.get(it.id)?.revision !== t.input.revision) {
+        repo.finish(t, 'canceled', { error: '取帧期间素材或设置已改变，未调用识别模型' }); return
+      }
+      const coverage = it.animated ? (sampled ? 'sampled_partial' : 'manual_partial') : 'still_image'
+      t.analysisOutcome = 'unknown'
+      const response = await analyzer({ images, frames, coverage, hint: it.source?.hint || '', animated: it.animated,
+        policyVersion: t.input.policyVersion, signal: ctrl.signal, scope: it.scope, chatId: it.scope.chat,
+        operationId: it.id, callId: `${t.id}:${t.attempts}`, sourceMessageIds: it.source?.messageId ? [it.source.messageId] : [] })
+      ctrl.signal.throwIfAborted()
+      t.analysisOutcome = 'completed'
+      const result = parseAnalysis(response, t.input.policyVersion)
+      if (it.animated) {
+        result.modelDecision = result.decision
+        result.decision = 'pending'
+        result.reason = '动画只提供部分帧证据，须人工查看完整原图。' + result.reason
+      }
       validateSource(it.source)
       repo.db.tx(() => {
         const current = repo.get(it.id)
         if (!repo.owns(t)) return
-        if (stopped || current.state === 'deleted' || current.revision !== t.input.revision || String(cfg().policyVersion || '1') !== t.input.policyVersion) {
+        if (stopped || cfg().enabled === false || cfg().caption === false || current.state === 'deleted' || current.revision !== t.input.revision || String(cfg().policyVersion || '1') !== t.input.policyVersion) {
           repo.finish(t, 'canceled', { error: '素材/规则已改变，忽略迟到识别结果' }); return
         }
         const saved = repo.update(it.id, (item) => {
+          if (sampled) item.frames = frames.map((f, i) => ({ ...f, assetId: storage.assets.put(sampled.frames[i].bytes,
+            { mime: 'image/png', width: f.width, height: f.height, sourceKind: 'generated' }).id }))
           item.analysis = { state: 'done', error: null, evidence: { ...result, assetId: it.assetId,
-            frames: it.frames, coverage: it.animated ? 'manual_partial' : 'still_image', at: now() } }
+            frames: sampled ? item.frames : frames, coverage, sampling: sampled?.sampling || null, at: now() } }
           for (const key of ['name', 'tags', 'description', 'ocr', 'emotions', 'suitable', 'unsuitable']) {
             if (!item.editedFields.includes(key)) item[key] = result[key]
           }
@@ -455,15 +515,16 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       // sync 抛到这里可能是回执落库失败，保持 unknown；不误报明确未发送。
       repo.db.tx(() => {
         if (!repo.owns(t)) return
-        const state = t.kind === 'sync' ? 'unknown' : 'failed'
-        repo.finish(t, state, { error: e?.message || String(e), outcome: t.kind === 'sync' ? 'unknown' : null })
+        const uncertainAnalysis = t.kind === 'analyze' && t.analysisOutcome === 'unknown' && !['NO_VISION', 'MODEL_UNAVAILABLE'].includes(e.code) && !['not_sent', 'rejected'].includes(e.outcome)
+        const state = t.kind === 'sync' || uncertainAnalysis ? 'unknown' : 'failed'
+        repo.finish(t, state, { error: e?.message || String(e), outcome: state === 'unknown' ? 'unknown' : t.analysisOutcome || null })
         if (t.kind === 'sync') {
           const q = repo.qq(t.accountId, t.input.sha256)
           if (q.taskId === t.id) repo.saveQQ(t.accountId, t.input.sha256, { ...q, state: 'unknown', error: e.message })
         }
         const it = t.itemId && repo.get(t.itemId)
         if (t.kind === 'analyze' && it && it.state !== 'deleted' && it.revision === t.input.revision) repo.update(it.id, (i) => {
-          i.analysis = { ...i.analysis, state: e.code === 'NEEDS_FRAMES' ? 'needs_frames' : 'failed', error: e.message }
+          i.analysis = { ...i.analysis, state: e.code === 'NEEDS_FRAMES' ? 'needs_frames' : state, error: e.message }
         })
       })
       log?.warn?.('表情后台任务失败：', e?.message || String(e))
@@ -473,7 +534,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (stopped || cfg().enabled === false || !account()) return 0
     const started = []
     while (running.size < limits().concurrency) {
-      const t = repo.claim(account(), { sync: !getConfig().dryRun })
+      const t = repo.claim(account(), { sync: !getConfig().dryRun, analyze: cfg().caption !== false, collect: cfg().collect !== false })
       if (!t) break
       const p = Promise.resolve().then(() => execute(t)).finally(() => { repo.forget(t); running.delete(t.id) })
       running.set(t.id, p)
@@ -497,16 +558,23 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
   const recover = () => repo.recover(account())
   function queueStatus(options = {}) {
     admin(options)
+    if (options.accountId && options.accountId !== account()) fail('WRONG_ACCOUNT', '账号范围与当前机器人不匹配')
     const page = repo.taskPage(account(), { ...options, limit: clamp(options.limit, 100, 1, 500), offset: clamp(options.offset, 0, 0, 1000000) })
     return { ...page, items: page.items.map(({ owner, input, ...t }) => ({ ...t, action: input.action,
-      blockedReason: t.kind === 'sync' && t.state === 'queued' && getConfig().dryRun ? 'dry_run' : null })), running: running.size, limits: limits() }
+      blockedReason: t.state !== 'queued' ? null : cfg().enabled === false ? '表情模块已关闭' :
+        ['sync', 'import'].includes(t.kind) && getConfig().dryRun ? '试运行：QQ 任务已暂停' :
+          t.kind === 'analyze' && cfg().caption === false ? '模型识别已关闭' : t.kind === 'collect' && cfg().collect === false ? '自动收藏已关闭' : null })),
+      running: running.size, limits: limits(), runtime: { enabled: cfg().enabled !== false, caption: cfg().caption !== false, collect: cfg().collect !== false, dryRun: Boolean(getConfig().dryRun), autoChance: cfg().autoChance, autoReview: cfg().autoReview === true } }
   }
   function retryTask(taskId, options = {}) {
-    return safe(() => {
-      admin(options)
-      const t = repo.task(taskId)
-      if (!t || t.accountId !== account()) fail('NOT_FOUND', '没有这个任务')
-      if (t.kind === 'analyze') return retryAnalysis(t.itemId, options)
+    return safe(() => repo.db.tx(() => {
+      const t = managedTask(taskId, options)
+      if (t.state !== 'failed') fail('NOT_RETRYABLE', '只可重试明确失败；结果未知须先核对')
+      if (t.kind === 'analyze') {
+        const r = retryAnalysis(t.itemId, options)
+        if (r.ok) repo.db.run("UPDATE sticker_tasks SET state='canceled',error='已由新的识别任务替代',output_json=?,updated_at=? WHERE id=?", JSON.stringify({ replacementTaskId: r.taskId }), now(), t.id)
+        return r
+      }
       const retried = repo.db.tx(() => {
         const q = t.kind === 'sync' && repo.qq(t.accountId, t.input.sha256)
         if (q && q.taskId !== t.id) fail('STALE_TASK', '同步任务已被替代')
@@ -516,24 +584,88 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       })
       kick()
       return { ok: true, taskId: retried.id, state: retried.state }
-    })
+    }))
   }
   function reconcileSync(taskId, options = {}) {
     return safe(() => repo.db.tx(() => {
-      admin(options)
-      const t = repo.task(taskId)
-      if (!t || t.accountId !== account() || t.kind !== 'sync' || t.state !== 'unknown') fail('NOT_RECONCILABLE', '只可核对结果未知的同步')
+      const t = managedTask(taskId, options)
+      if (t.kind !== 'sync' || t.state !== 'unknown') fail('NOT_RECONCILABLE', '只可核对结果未知的同步')
       const q = repo.qq(t.accountId, t.input.sha256)
       if (q.taskId !== t.id) fail('STALE_TASK', '同步任务已替代')
+      if (options.confirmedNotApplied === true && options.confirmedApplied === true) fail('INVALID_INPUT', '不能同时确认已执行和未执行')
       if (options.confirmedNotApplied === true) {
         repo.db.run("UPDATE sticker_tasks SET state='failed',outcome='not_sent',error='管理员核对未执行',updated_at=? WHERE id=?", now(), t.id)
         repo.saveQQ(t.accountId, t.input.sha256, { ...q, state: 'failed', error: '管理员核对未执行' })
       } else if (options.confirmedApplied === true && (t.input.action === 'delete' || String(options.emojiId || q.emojiId).trim())) {
         repo.db.run("UPDATE sticker_tasks SET state='done',error=NULL,updated_at=? WHERE id=?", now(), t.id)
         repo.saveQQ(t.accountId, t.input.sha256, { ...q, state: t.input.action === 'delete' ? 'removed' : 'synced', emojiId: t.input.action === 'delete' ? '' : String(options.emojiId || q.emojiId), error: null, reconciled: true })
+        if (q.desired === 'absent' && t.input.action !== 'delete') {
+          queueQQ(repo.get(t.itemId), 'delete')
+          kick()
+        }
       } else fail('CONFIRMATION_REQUIRED', '需要明确核对结果；已收藏需提供 emojiId')
       return { ok: true, sync: repo.qq(t.accountId, t.input.sha256) }
     }))
+  }
+  function reconcileAnalysis(taskId, options = {}) {
+    return safe(() => repo.db.tx(() => {
+      const t = managedTask(taskId, options)
+      if (t.kind !== 'analyze' || t.state !== 'unknown') fail('NOT_RECONCILABLE', '只可核对结果未知的识别')
+      if (options.confirmedNotApplied !== true || typeof options.reason !== 'string' || !options.reason.trim()) fail('CONFIRMATION_REQUIRED', '需逐项核对服务记录，确认未执行并填写依据；无法确认时请人工标注')
+      repo.db.run("UPDATE sticker_tasks SET state='failed',outcome='not_sent',error=?,updated_at=? WHERE id=?", '管理员核对未执行：' + options.reason.slice(0, 1000), now(), t.id)
+      const it = repo.get(t.itemId)
+      if (it && it.state !== 'deleted' && !repo.tasks(t.accountId, { itemId: it.id, kind: 'analyze', state: 'unknown', limit: 1 }).length) repo.update(it.id, (i) => {
+        i.analysis = { ...i.analysis, state: 'failed', error: '管理员已核对未执行，可手动重试' }
+      })
+      return { ok: true, taskId, message: '核对已登记；尚未重试识别' }
+    }))
+  }
+  function bindQQ(key, options = {}) {
+    return safe(() => repo.db.tx(() => {
+      const it = managed(key, options), q = repo.qq(it.scope.account, it.sha256)
+      if (q.state !== 'unidentified') fail('NOT_BINDABLE', '仅可绑定已导入但缺少 ID 的 QQ 收藏；未知任务请走任务核对')
+      if (options.confirmedExisting !== true || typeof options.emojiId !== 'string' || !options.emojiId.trim() || options.emojiId.length > 200) fail('CONFIRMATION_REQUIRED', '请核对这张素材对应的 QQ 收藏 ID')
+      repo.saveQQ(it.scope.account, it.sha256, { ...q, state: 'synced', emojiId: options.emojiId.trim(), source: 'qq_import',
+        name: it.name, error: null, reconciled: true, at: now() })
+      return { ok: true, item: decorate(it), message: '已绑定核对过的 QQ 收藏 ID；没有重复收藏' }
+    }))
+  }
+  // 只接受用户看过的显式 ID 快照；不在服务端扩大成整个库或新的筛选结果。
+  function batch(action, entries, options = {}) {
+    return safe(() => {
+      admin(options)
+      const scope = scopeOf(options)
+      const actions = { approve: (id, o) => review(id, 'approved', o), reject: (id, o) => review(id, 'rejected', o),
+        disable: (id, o) => review(id, 'disabled', o), delete: (id, o) => remove(id, { ...o, fromQQ: false }),
+        analysis_retry: retryAnalysis, task_retry: retryTask }
+      if (!actions[action]) fail('INVALID_ACTION', '未知批量动作')
+      if (!Array.isArray(entries) || !entries.length || entries.length > 200) fail('INVALID_BATCH', '每批须明确选择 1~200 项')
+      if (action === 'task_retry' && !['collect', 'analyze', 'sync', 'import'].includes(options.kind)) fail('INVALID_BATCH', '请明确选择识别、收藏下载、QQ 同步或 QQ 导入任务')
+      const seen = new Set()
+      const results = entries.map((entry) => {
+        const id = entry?.id
+        const result = safe(() => repo.db.tx(() => {
+          if (typeof id !== 'string' || !id || seen.has(id)) fail('INVALID_BATCH_ITEM', '缺少 ID 或同一批内重复选择')
+          seen.add(id)
+          const o = { admin: true, accountId: scope.account, chatId: scope.chat, actorId: options.actorId,
+            expectedRevision: entry.expectedRevision, reviewedOriginal: entry.reviewedOriginal === true, reason: options.reason }
+          if (action === 'task_retry') {
+            if (!Number.isInteger(entry.expectedAttempts) || entry.expectedState !== 'failed') fail('INVALID_BATCH_ITEM', '需提供所选失败任务的状态和尝试次数')
+            Object.assign(o, { expectedState: entry.expectedState, expectedAttempts: entry.expectedAttempts })
+            if (managedTask(id, o).kind !== options.kind) fail('WRONG_TASK_KIND', '不能混用识别重试和 QQ 同步重试')
+          } else {
+            if (!Number.isInteger(entry.expectedRevision)) fail('INVALID_BATCH_ITEM', '需提供所选素材的版本')
+            managed(id, o)
+          }
+          return actions[action](id, o)
+        }))
+        return { id, ok: result.ok, code: result.code, message: result.message || result.reason,
+          state: result.state || result.item?.state, taskId: result.taskId, revision: result.item?.revision, tombstone: result.tombstone, sync: result.sync }
+      })
+      const succeeded = results.filter((r) => r.ok).length
+      return { ok: true, action, total: results.length, succeeded, failed: results.length - succeeded,
+        partial: succeeded > 0 && succeeded < results.length, syncFailed: results.filter((r) => r.sync?.ok === false).length, results }
+    })
   }
   async function importFromQQ(options = {}) {
     return safe(() => {
@@ -545,21 +677,28 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     })
   }
   async function processImport(t) {
+    if (stopped || cfg().enabled === false || getConfig().dryRun) fail('DISABLED', '当前设置不允许 QQ 导入')
     const response = await onebot.call('fetch_custom_face', { count: t.input.limit }, { timeoutMs: 30000 })
+    if (stopped || cfg().enabled === false || getConfig().dryRun) fail('DISABLED', 'QQ 导入期间模块已暂停')
     const entries = (Array.isArray(response) ? response : response?.data)
     if (!Array.isArray(entries)) fail('INVALID_RESPONSE', 'QQ 收藏列表格式无效')
     let added = 0, existed = 0, failed = 0
     for (const entry of entries.slice(0, t.input.limit)) {
-      if (stopped) break
+      if (stopped || cfg().enabled === false || getConfig().dryRun) fail('DISABLED', 'QQ 导入期间模块已暂停')
       try {
         const url = typeof entry === 'string' ? entry : entry?.url
         if (!/^https?:\/\//i.test(String(url))) fail('INVALID_SOURCE', 'QQ 收藏没有有效 URL')
         const buf = await fetch(url, { maxBytes: 5 * 1024 * 1024, allowLocal: false })
+        if (stopped || cfg().enabled === false || getConfig().dryRun) fail('DISABLED', 'QQ 导入期间模块已暂停')
         const result = repo.ingest(buf, inspect(buf), t.input.scope, { from: 'qq', toQQ: false, tags: [] })
         if (result.existed) existed++
         else { added++; scheduleAnalysis(result.item) }
         // fetch_custom_face 证明属于 QQ 收藏；无 emoji ID 时不假造可操作的同步身份。
-        if (entry?.emoji_id) repo.saveQQ(t.accountId, result.item.sha256, { state: 'synced', emojiId: String(entry.emoji_id), name: '', taskId: null, error: null, source: 'qq_import' })
+        const q = repo.qq(t.accountId, result.item.sha256)
+        if (!['queued', 'running', 'unknown'].includes(q.state)) {
+          if (entry?.emoji_id) repo.saveQQ(t.accountId, result.item.sha256, { ...q, state: 'synced', emojiId: String(entry.emoji_id), name: result.item.name, error: null, source: 'qq_import' })
+          else if (!q.emojiId) repo.saveQQ(t.accountId, result.item.sha256, { ...q, state: 'unidentified', source: 'qq_import', error: 'QQ 收藏已导入但没有收藏 ID，请核对并绑定' })
+        }
       } catch { failed++ }
     }
     repo.finish(t, 'done', { output: { added, existed, failed, total: entries.length } })
@@ -610,7 +749,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     markUsed: (key, o) => safe(() => { const it = rawFind(key, o); if (!it || !segmentFor(it, o)) return false; repo.used(scopeOf(o), it.sha256); return true }),
     edit, rename: (id, name, tags, o) => edit(id, { ...(name === undefined ? {} : { name }), ...(tags === undefined ? {} : { tags }) }, o),
     approve: (id, o) => review(id, 'approved', o), reject: (id, o) => review(id, 'rejected', o), disable: (id, o) => review(id, 'disabled', o), remove,
-    selectFrames, retryAnalysis, queueSync, sync: queueSync, queueStatus, retryTask, reconcileSync, importFromQQ, importLegacy, assignLegacy, deleteLegacy, legacyReport,
+    selectFrames, retryAnalysis, queueSync, sync: queueSync, queueStatus, retryTask, reconcileSync, reconcileAnalysis, bindQQ, batch, importFromQQ, importLegacy, assignLegacy, deleteLegacy, legacyReport,
     trim: () => ({ ok: true, removed: 0, message: '达到上限后停止接收，不自动删除已审核素材' }),
     tick, drain, start, stop, recover }
 }

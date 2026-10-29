@@ -19,6 +19,12 @@ const finite = value => typeof value === 'number' && Number.isFinite(value)
 const bounded = (value, max, fallback = max) => Number.isFinite(Number(value)) ? Math.max(1, Math.min(max, Math.floor(Number(value)))) : fallback
 const smallString = value => typeof value === 'string' && value.length <= 512 ? value : null
 const parse = value => { try { return JSON.parse(value) } catch { return null } }
+// Song jobs predate accountId and persist the same ownership in scope.account.
+// Conflicting fields are not silently coalesced into a valid account.
+const jobAccount = column => `(CASE WHEN json_valid(${column}) THEN CASE
+  WHEN json_extract(${column},'$.accountId') IS NOT NULL AND json_extract(${column},'$.scope.account') IS NOT NULL
+    AND CAST(json_extract(${column},'$.accountId') AS TEXT)<>CAST(json_extract(${column},'$.scope.account') AS TEXT) THEN NULL
+  ELSE CAST(COALESCE(json_extract(${column},'$.accountId'),json_extract(${column},'$.scope.account')) AS TEXT) END END)`
 const outcome = value => value && typeof value.reply === 'boolean' ? {
   reply: value.reply, mode: smallString(value.mode), reason: smallString(value.reason),
 } : null
@@ -31,7 +37,7 @@ function replayInput(raw = {}) {
   if (Array.isArray(p.wakeWords) && p.wakeWords.length <= 64 && p.wakeWords.every(v => typeof v === 'string' && v.length <= 100)) policy.wakeWords = p.wakeWords.slice()
   if (Array.isArray(p.quietHours) && p.quietHours.length === 2 && p.quietHours.every(finite)) policy.quietHours = p.quietHours.slice()
   for (const key of numericInput) if (finite(raw?.[key])) input[key] = raw[key]
-  for (const key of ['mentioned', 'repliedToBot']) if (typeof raw?.[key] === 'boolean') input[key] = raw[key]
+  for (const key of ['mentioned', 'repliedToBot', 'continuedRequest']) if (typeof raw?.[key] === 'boolean') input[key] = raw[key]
   for (const key of timeArrays) if (Array.isArray(raw?.[key]) && raw[key].length <= DIAGNOSTICS_LIMITS.array && raw[key].every(finite)) input[key] = raw[key].slice()
   if (policy.wakeWords && typeof raw?.text === 'string' && raw.text.length <= 12000) input.wakeWordMatch = policy.wakeWords.find(w => w && raw.text.includes(w)) || null
   else if (raw?.wakeWordMatch === null || (policy.wakeWords?.includes(raw?.wakeWordMatch) && raw.wakeWordMatch)) input.wakeWordMatch = raw.wakeWordMatch
@@ -75,7 +81,7 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
     const id=newId('diag'),at=now(),source=payload?.replay
     const replay = decisionKinds.has(kind) ? { schemaVersion:1,appVersion:version||null,engineVersion:GROUP_POLICY_REPLAY_VERSION,
       policyVersion:smallString(source?.policyVersion),policyRevision:Number.isSafeInteger(payload?.policyRevision)?payload.policyRevision:null,
-      input:replayInput(source?.input || {policy:payload?.policy,mentioned:payload?.mentioned}),
+      input:replayInput(source?.input || {policy:payload?.policy,mentioned:payload?.mentioned,repliedToBot:payload?.repliedToBot,continuedRequest:payload?.continuedRequest}),
       random:finite(source?.random)?source.random:null,baseDecision:outcome(source?.baseDecision),
     } : undefined
     if(replay)replay.inputRedacted=JSON.stringify(safe(replay.input))!==JSON.stringify(replay.input)
@@ -92,28 +98,26 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
       .map(r=>({id:r.id,chatId:r.chat_id,actorId:r.actor_id,state:r.state,traceId:r.trace_id,epoch:r.epoch,createdAt:r.created_at,updatedAt:r.updated_at}))
   }
   function timeline(requestId) {
-    const request=db.get(`SELECT r.* FROM requests r WHERE r.id=? AND EXISTS (SELECT 1 FROM json_each(r.source_message_ids_json) s JOIN messages m ON m.id=s.value WHERE m.account_id=?)`,requestId,current())
-    if(!request)throw new Error('当前账号没有这条请求')
-    const messages=JSON.parse(request.source_message_ids_json).map(id=>storage.messages.get(id)).filter(m=>m&&m.account===current())
+    const e=evidence(ownedRequest(String(requestId),current()),current()),request=e.request
+    const messages=e.messages.map(m=>storage.messages.get(m.id)).filter(Boolean)
     const events=messages.map(m=>({kind:'收到消息',at:m.receivedAt,id:m.id,state:'received',info:{actorId:m.authorId,platformMessageId:m.platformMsgId,recvSeq:m.recvSeq}}))
     for(const m of messages) for(const a of storage.occurrences.ofMessage(m.id))events.push({kind:'媒体输入',at:a.updatedAt,id:a.id,state:a.state,info:{assetId:a.assetId,error:a.error}})
     events.push({kind:'请求登记',at:request.created_at,id:request.id,state:request.state,info:{epoch:request.epoch}})
-    for(const job of db.all('SELECT * FROM jobs WHERE request_id=?',requestId)) {
+    for(const job of e.invalidScope?[]:e.jobs.rows) {
       events.push({kind:'后台任务',at:job.updated_at,id:job.id,state:job.state,info:{kind:job.kind,error:job.error,attempts:job.attempts}})
       for(const attempt of db.all('SELECT * FROM job_attempts WHERE job_id=? ORDER BY n',job.id))events.push({kind:'提供方调用',at:attempt.finished_at||attempt.started_at,id:attempt.id,state:attempt.state,info:{attempt:attempt.n,billing:attempt.billing,errorKind:attempt.error_kind,error:attempt.error,durationMs:attempt.finished_at?attempt.finished_at-attempt.started_at:null}})
     }
-    for(const row of db.all('SELECT id,batch_id,seq,state,platform_msg_id,attempts,last_error,created_at,updated_at FROM outbox WHERE request_id=? ORDER BY created_at,seq',requestId))events.push({kind:'QQ回执',at:row.updated_at,id:row.id,state:row.state,info:{batchId:row.batch_id,seq:row.seq,messageId:row.platform_msg_id,attempts:row.attempts,error:row.last_error}})
-    const traces=[...new Set([request.trace_id,...messages.map(m=>m.traceId)].filter(Boolean))]
-    for(const trace of traces)for(const row of db.all('SELECT * FROM diagnostic_events WHERE account_id=? AND trace_id=? ORDER BY at',current(),trace))events.push({kind:row.kind,at:row.at,id:row.id,state:'recorded',info:decode(row)})
-    return safe({request:{id:request.id,chatId:request.chat_id,actorId:request.actor_id,epoch:request.epoch},events:events.sort((a,b)=>a.at-b.at)})
+    for(const row of e.invalidScope?[]:e.deliveries.rows)events.push({kind:'QQ回执',at:row.updated_at,id:row.id,state:row.state,info:{batchId:row.batch_id,seq:row.seq,messageId:row.platform_msg_id,attempts:row.attempts,error:row.last_error,shared:row.request_id!==request.id}})
+    for(const row of e.events.rows)events.push({kind:row.kind,at:row.at,id:row.id,state:'recorded',info:parse(row.payload_json)})
+    return safe({request:{id:request.id,chatId:request.chat_id,actorId:request.actor_id,epoch:request.epoch},events:events.sort((a,b)=>a.at-b.at),latency:metric(e,current())})
   }
   function summary() {
     const account=current()
     const counts=(table,where,args=[])=>db.all(`SELECT state,COUNT(*) n FROM ${table} ${where} GROUP BY state`,...args)
-    const ownedJob="WHERE json_extract(input_json,'$.accountId')=?"
+    const ownedJob=`WHERE ${jobAccount('input_json')}=?`
     return safe({version,account,schemaVersion:db.get('PRAGMA user_version').user_version,
       jobs:counts('jobs',ownedJob,[account]),
-      billing:db.all(`SELECT a.billing,COUNT(*) n FROM job_attempts a JOIN jobs j ON j.id=a.job_id WHERE json_extract(j.input_json,'$.accountId')=? GROUP BY a.billing`,account),
+      billing:db.all(`SELECT a.billing,COUNT(*) n FROM job_attempts a JOIN jobs j ON j.id=a.job_id WHERE ${jobAccount('j.input_json')}=? GROUP BY a.billing`,account),
       billingNote:'记录调用次数及可能计费状态；未配置供应商单价，不能据此推算金额。',
       queue:{pendingMedia:db.get("SELECT COUNT(*) n FROM asset_occurrences WHERE state='pending' AND json_extract(scope_json,'$.account')=?",account).n,
         pendingMemory:tableExists('memory_checkpoints')?db.get("SELECT COUNT(*) n FROM memory_checkpoints WHERE json_extract(scope,'$.account')=? AND watermark>recv_seq",account).n:0},
@@ -141,11 +145,42 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
   const payloadColumn=`CASE WHEN length(CAST(payload_json AS BLOB))<=${DIAGNOSTICS_LIMITS.payloadBytes} THEN payload_json ELSE NULL END AS payload_json`
   const eventColumns=`id,account_id,chat_id,trace_id,request_id,kind,at,${payloadColumn}`
   const cut=(rows,max)=>({rows:rows.slice(0,max),truncated:rows.length>max})
+  const idsValid=(ids,max)=>Array.isArray(ids)&&ids.length<=max&&ids.every(id=>typeof id==='string'&&id.length>0&&id.length<=512)&&new Set(ids).size===ids.length
+
+  // Called by the dispatch/delivery owner with actual persisted IDs. It records
+  // membership, never manufactures a decision or QQ confirmation timestamp.
+  function linkRequestBatch({account=current(),chatId,epoch,requestIds,batchIds=[],decisionEventIds=[]}) {
+    if(String(account)!==current()||!idsValid(requestIds,DIAGNOSTICS_LIMITS.sources)||!requestIds.length||
+      !idsValid(batchIds,DIAGNOSTICS_LIMITS.deliveries)||!idsValid(decisionEventIds,DIAGNOSTICS_LIMITS.events))throw new Error('批次关联参数无效')
+    const payload={schemaVersion:1,epoch,requestIds,batchIds,decisionEventIds}
+    if(Buffer.byteLength(JSON.stringify(payload))>DIAGNOSTICS_LIMITS.payloadBytes)throw new Error('批次关联参数超过存储上限')
+    const request=ownedRequest(requestIds[0],current()).request
+    if(request.chat_id!==chatId||request.epoch!==epoch||!validLink(payload,request,current()))throw new Error('批次成员、事件或回执范围不一致')
+    return record({account:current(),chatId,kind:'request_batch',payload})
+  }
+  function validLink(p,r,account) {
+    if(p?.schemaVersion!==1||p.epoch!==r.epoch||!idsValid(p.requestIds,DIAGNOSTICS_LIMITS.sources)||!p.requestIds.includes(r.id)||
+      !idsValid(p.batchIds,DIAGNOSTICS_LIMITS.deliveries)||!idsValid(p.decisionEventIds,DIAGNOSTICS_LIMITS.events))return false
+    try {
+      if(p.requestIds.some(id=>{const q=ownedRequest(id,account).request;return q.chat_id!==r.chat_id||q.epoch!==r.epoch}))return false
+      for(const id of p.decisionEventIds) {
+        const event=db.get('SELECT account_id,chat_id,request_id,kind FROM diagnostic_events WHERE id=?',id)
+        if(!event||event.account_id!==account||event.chat_id!==r.chat_id||!decisionKinds.has(event.kind)||
+          (event.request_id&&!p.requestIds.includes(event.request_id)))return false
+      }
+      for(const batch of p.batchIds) {
+        const rows=db.all('SELECT chat_id,epoch,request_id FROM outbox WHERE batch_id=? LIMIT ?',batch,DIAGNOSTICS_LIMITS.deliveries+1)
+        if(!rows.length||rows.length>DIAGNOSTICS_LIMITS.deliveries||rows.some(d=>d.chat_id!==r.chat_id||d.epoch!==r.epoch||(d.request_id&&!p.requestIds.includes(d.request_id))))return false
+      }
+      return true
+    } catch { return false }
+  }
   function eventRows({request,messages},account,n=DIAGNOSTICS_LIMITS.events) {
     const traces=[...new Set([request.trace_id,...messages.map(m=>m.trace_id)].filter(Boolean))]
     return cut(db.all(`SELECT ${eventColumns} FROM diagnostic_events WHERE account_id=? AND chat_id=? AND
-      (request_id=?${traces.length?` OR (request_id IS NULL AND trace_id IN (${traces.map(()=>'?').join(',')}))`:''})
-      ORDER BY at,id LIMIT ?`,account,request.chat_id,request.id,...traces,n+1),n)
+      (request_id=?${traces.length?` OR (request_id IS NULL AND trace_id IN (${traces.map(()=>'?').join(',')}))`:''}
+        OR (kind='request_batch' AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.requestIds') ELSE '[]' END) WHERE value=?)))
+      ORDER BY at,id LIMIT ?`,account,request.chat_id,request.id,...traces,request.id,n+1),n)
   }
   function plannerRows(account,chatId,requestId) {
     // Only persisted data is read. Do not instantiate a planner: its authorize /
@@ -171,13 +206,37 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
   }
   function evidence(owned,account,n=DIAGNOSTICS_LIMITS.events) {
     const {request:r}=owned,events=eventRows(owned,account,n)
-    const deliveries=cut(db.all('SELECT id,batch_id,seq,chat_id,epoch,state,platform_msg_id,updated_at FROM outbox WHERE request_id=? ORDER BY updated_at,id LIMIT ?',r.id,DIAGNOSTICS_LIMITS.deliveries+1),DIAGNOSTICS_LIMITS.deliveries)
-    const jobs=cut(db.all(`SELECT id,chat_id,epoch,state,updated_at,
-      CASE WHEN json_valid(input_json) THEN json_extract(input_json,'$.accountId') END AS account_id,
-      CASE WHEN json_valid(output_json) THEN json_extract(output_json,'$.deliveryBatchId') END AS delivery_batch_id
+    const jobs=cut(db.all(`SELECT id,kind,chat_id,epoch,state,updated_at,error,attempts,
+      ${jobAccount('input_json')} AS account_id,
+      CASE WHEN json_valid(input_json) THEN json_extract(input_json,'$.scope.chat') END AS scope_chat,
+      CASE WHEN json_valid(output_json) THEN COALESCE(json_extract(output_json,'$.deliveryBatchId'),json_extract(output_json,'$.delivery.batchId'),json_extract(output_json,'$.receipt.batchId')) END AS delivery_batch_id,
+      CASE WHEN json_valid(output_json) THEN json_extract(output_json,'$.title') END AS title,
+      CASE WHEN json_valid(output_json) THEN json_extract(output_json,'$.match.status') END AS content_match,
+      CASE WHEN json_valid(output_json) THEN json_extract(output_json,'$.stage') END AS stage
       FROM jobs WHERE request_id=? ORDER BY updated_at,id LIMIT ?`,r.id,DIAGNOSTICS_LIMITS.jobs+1),DIAGNOSTICS_LIMITS.jobs)
+    let invalidScope=jobs.rows.some(j=>j.chat_id!==r.chat_id||j.epoch!==r.epoch||j.account_id!==account||(j.scope_chat&&j.scope_chat!==r.chat_id))
+    const batchMembers=new Map(),decisionIds=new Set()
+    for(const row of events.rows.filter(row=>row.kind==='request_batch')) {
+      const p=parse(row.payload_json)
+      if(!validLink(p,r,account)){invalidScope=true;continue}
+      for(const batch of p.batchIds)batchMembers.set(batch,new Set([...(batchMembers.get(batch)||[]),...p.requestIds]))
+      for(const id of p.decisionEventIds)decisionIds.add(id)
+    }
+    // Background outbox records can lack request_id. Only an explicit job batch
+    // reference or a validated shared-batch link can recover that relationship.
+    const allBatches=[...new Set([...batchMembers.keys(),...jobs.rows.filter(j=>j.account_id===account&&j.chat_id===r.chat_id&&j.epoch===r.epoch).map(j=>smallString(j.delivery_batch_id)).filter(Boolean)])]
+    const batches=allBatches.slice(0,DIAGNOSTICS_LIMITS.deliveries)
+    if(allBatches.length>batches.length||decisionIds.size>n)events.truncated=true
+    const deliveries=cut(db.all(`SELECT id,batch_id,seq,chat_id,request_id,epoch,state,platform_msg_id,updated_at,attempts,last_error FROM outbox
+      WHERE request_id=?${batches.length?` OR batch_id IN (${batches.map(()=>'?').join(',')})`:''} ORDER BY updated_at,id LIMIT ?`,r.id,...batches,DIAGNOSTICS_LIMITS.deliveries+1),DIAGNOSTICS_LIMITS.deliveries)
+    invalidScope ||= deliveries.rows.some(d=>d.chat_id!==r.chat_id||d.epoch!==r.epoch||(d.request_id&&d.request_id!==r.id&&!batchMembers.get(d.batch_id)?.has(d.request_id)))
+    if(decisionIds.size) {
+      const combined=new Map(events.rows.map(e=>[e.id,e]))
+      for(const id of [...decisionIds].slice(0,n)) {const row=db.get(`SELECT ${eventColumns} FROM diagnostic_events WHERE id=?`,id);if(row)combined.set(row.id,row)}
+      const result=cut([...combined.values()].sort((a,b)=>a.at-b.at||a.id.localeCompare(b.id)),n)
+      events.rows=result.rows;events.truncated ||= result.truncated
+    }
     const planner=plannerRows(account,r.chat_id,r.id)
-    const invalidScope=deliveries.rows.some(d=>d.chat_id!==r.chat_id||d.epoch!==r.epoch)||jobs.rows.some(j=>j.chat_id!==r.chat_id||j.epoch!==r.epoch||j.account_id!==account)
     return {...owned,events,deliveries,jobs,invalidScope,planner:{...planner,actions:planner.actions.filter(a=>a.requestId===r.id&&a.epoch===r.epoch)}}
   }
   function eventView(row) {
@@ -185,24 +244,26 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
     return {id:row.id,kind:row.kind,at:row.at,requestId:row.request_id,
       recorded:{decision:outcome(p?.decision),policyRevision:Number.isSafeInteger(s?.policyRevision)?s.policyRevision:null,
         policyVersion:smallString(s?.policyVersion),engineVersion:smallString(s?.engineVersion),appVersion:smallString(s?.appVersion),
-        facts:s?replayInput(s.input):replayInput({policy:p?.policy,mentioned:p?.mentioned}),random:finite(s?.random)?s.random:null},
+        facts:s?replayInput(s.input):replayInput({policy:p?.policy,mentioned:p?.mentioned,repliedToBot:p?.repliedToBot,continuedRequest:p?.continuedRequest}),random:finite(s?.random)?s.random:null},
       recomputation:decisionKinds.has(row.kind)?recompute(s):{status:'not-applicable'},
       unknown:[...(!p?['payload_missing_corrupt_or_oversize']:[]),...(p?.diagnosticIssue?[p.diagnosticIssue]:[]),
         ...(!s?.policyVersion?['historical_policy_version']:[]),'unrecorded_hooks_and_participation_inputs','external_model_tool_and_QQ_outcomes_cannot_be_reexecuted']}
   }
   function metric(e,account) {
-    const r=e.request,receivedAt=Math.min(...e.messages.map(m=>m.received_at)),issues=[]
+    const r=e.request,sourceTimes=e.messages.map(m=>m.received_at),receivedAt=sourceTimes.every(at=>finite(at)&&at>=0)?Math.min(...sourceTimes):null,issues=[]
     const decisionTimes=[...e.events.rows.filter(row=>decisionKinds.has(row.kind)).map(row=>row.at),...e.planner.actions.map(a=>a.at)]
-    const confirmed=e.deliveries.rows.filter(row=>row.chat_id===r.chat_id&&row.epoch===r.epoch&&row.state==='delivered'&&String(row.platform_msg_id??'').trim())
+    const confirmed=e.deliveries.rows.filter(row=>row.chat_id===r.chat_id&&row.epoch===r.epoch&&row.state==='delivered'&&!['','0'].includes(String(row.platform_msg_id??'').trim()))
     const times={receivedAt,firstDecisionAt:null,firstConfirmedReplyAt:null,finalDeliveryAt:null}
     const setTime=(key,values)=>{
+      if(receivedAt===null){issues.push(`${key}:missing_received_at`);return}
       if(values.some(at=>!finite(at)||at<receivedAt)){issues.push(`${key}:clock_order`);return}
       if(values.length)times[key]=key==='finalDeliveryAt'?Math.max(...values):Math.min(...values)
     }
     if(e.events.truncated||e.planner.truncated)issues.push('firstDecisionAt:read_limit')
+    else if(e.invalidScope)issues.push('firstDecisionAt:incomplete_evidence')
     else if(decisionTimes.length)setTime('firstDecisionAt',decisionTimes)
     else issues.push('firstDecisionAt:not_recorded_or_not_linked')
-    if(e.deliveries.truncated||e.invalidScope)issues.push('firstConfirmedReplyAt:incomplete_evidence')
+    if(e.deliveries.truncated||e.jobs.truncated||e.events.truncated||e.invalidScope)issues.push('firstConfirmedReplyAt:incomplete_evidence')
     else if(confirmed.length)setTime('firstConfirmedReplyAt',confirmed.map(d=>d.updated_at))
     else issues.push('firstConfirmedReplyAt:no_confirmed_receipt')
     const finished=['answered','completed','delivered','closed','ended'].includes(r.state)
@@ -211,13 +272,15 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
     if(e.jobs.rows.some(j=>j.state!=='delivered'))issues.push('finalDeliveryAt:job_not_delivered')
     if(!jobReceiptsComplete)issues.push('finalDeliveryAt:job_receipt_missing')
     if(!e.deliveries.rows.length||confirmed.length!==e.deliveries.rows.length)issues.push('finalDeliveryAt:unconfirmed_segments')
-    if(e.deliveries.truncated||e.jobs.truncated||e.invalidScope)issues.push('finalDeliveryAt:incomplete_evidence')
-    if(finished&&e.deliveries.rows.length&&confirmed.length===e.deliveries.rows.length&&jobReceiptsComplete&&!e.deliveries.truncated&&!e.jobs.truncated&&!e.invalidScope)setTime('finalDeliveryAt',confirmed.map(d=>d.updated_at))
+    if(e.deliveries.truncated||e.jobs.truncated||e.events.truncated||e.invalidScope)issues.push('finalDeliveryAt:incomplete_evidence')
+    if(finished&&e.deliveries.rows.length&&confirmed.length===e.deliveries.rows.length&&jobReceiptsComplete&&!e.deliveries.truncated&&!e.jobs.truncated&&!e.events.truncated&&!e.invalidScope)setTime('finalDeliveryAt',confirmed.map(d=>d.updated_at))
     return {requestId:r.id,account,chatId:r.chat_id,state:r.state,policyRevision:r.policy_revision,epoch:r.epoch,times,
       latencyMs:{firstDecision:times.firstDecisionAt===null?null:times.firstDecisionAt-receivedAt,
         firstConfirmedReply:times.firstConfirmedReplyAt===null?null:times.firstConfirmedReplyAt-receivedAt,
         finalDelivery:times.finalDeliveryAt===null?null:times.finalDeliveryAt-receivedAt},
-      counts:{sources:e.messages.length,confirmedReceipts:confirmed.length,deliverySegments:e.deliveries.rows.length,jobs:e.jobs.rows.length},
+      counts:{sources:e.messages.length,confirmedReceipts:confirmed.length,deliverySegments:e.deliveries.rows.length,jobs:e.jobs.rows.length,
+        sharedReceipts:confirmed.filter(d=>d.request_id&&d.request_id!==r.id).length},
+      receiptIds:e.invalidScope?[]:confirmed.map(d=>d.id),
       truncated:{events:e.events.truncated,planner:e.planner.truncated,deliveries:e.deliveries.truncated,jobs:e.jobs.truncated},issues}
   }
 
@@ -244,7 +307,8 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
         messages:e.messages.map(m=>({id:m.id,receivedAt:m.received_at,recvSeq:m.recv_seq})),
         decisions:e.planner.actions.map(({requestId,epoch,...a})=>a),
         deliveries:e.invalidScope?[]:e.deliveries.rows.map(d=>({id:d.id,batchId:d.batch_id,seq:d.seq,state:d.state,messageId:d.platform_msg_id,updatedAt:d.updated_at})),
-        jobs:e.invalidScope?[]:e.jobs.rows.map(j=>({id:j.id,state:j.state,deliveryBatchId:j.delivery_batch_id,updatedAt:j.updated_at}))},
+        jobs:e.invalidScope?[]:e.jobs.rows.map(j=>({id:j.id,state:j.state,stage:j.state==='delivered'?'delivered':j.stage||j.state,
+          title:j.title||null,contentMatch:j.content_match||'unverified',deliveryBatchId:j.delivery_batch_id,updatedAt:j.updated_at}))},
       latency:metric(e,account),truncated:e.events.truncated||e.planner.truncated||e.deliveries.truncated||e.jobs.truncated,
       unknown:['unrecorded_historical_state_transitions','live_config_and_memory_are_not_historical_facts',...(e.invalidScope?['ledger_scope_mismatch']:[])]})
   }
@@ -280,8 +344,10 @@ export function createDiagnostics({storage,getConfig,modules,hub,version,now=()=
       metrics[key]={sampleCount:values.length,missingCount:items.length-values.length,p50Ms:percentile(.5),p95Ms:percentile(.95)}
     }
     return {schemaVersion:1,account,window:{chatId:chatId||null,from:from??null,to:to??null,limit:max,order:'request.createdAt DESC, id DESC',truncated:rows.length>max},
-      percentileMethod:'nearest-rank',timeBasis:'local_received_at_to_persisted_event_or_QQ_receipt',requestCount:items.length,excluded,metrics,items}
+      percentileMethod:'nearest-rank',timeBasis:'local_received_at_to_persisted_event_or_QQ_receipt',requestCount:items.length,excluded,
+      uniqueConfirmedReceipts:new Set(items.flatMap(i=>i.receiptIds)).size,
+      sampleSemantics:'request_latency; shared receipts count once per covered request, uniqueConfirmedReceipts counts transport rows once',metrics,items}
   }
-  return {record,summary,requests,timeline,decisions,replay,requestLatency,latencies,
+  return {record,linkRequestBatch,summary,requests,timeline,decisions,replay,requestLatency,latencies,
     export:()=>({schemaVersion:1,createdAt:Date.now(),summary:summary(),config:publicConfig(getConfig()),requests:requests({limit:40}),decisions:decisions({limit:40})}),dispose:()=>{stopped=true;histogram.disable()}}
 }

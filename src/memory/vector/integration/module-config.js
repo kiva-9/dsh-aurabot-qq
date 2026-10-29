@@ -7,7 +7,7 @@ export const RETRIEVAL_DEFAULTS = Object.freeze({
   index: Object.freeze({ backend: 'local', cacheBytes: 8388608, pageSize: 256, maxPending: 32, timeoutMs: 15000, collectionPrefix: 'aurabot' }),
   roles: Object.freeze({}),
   queue: Object.freeze({ batchSize: 32, maxPending: 256, maxAttempts: 3 }),
-  retrieval: Object.freeze({ maxCandidates: 5000, lexicalLimit: 80, vectorLimit: 80, rrfK: 60, limit: 10 }),
+  retrieval: Object.freeze({ maxCandidates: 5000, lexicalLimit: 80, vectorLimit: 80, rrfK: 60, limit: 10, contextTimeoutMs: 800 }),
   sync: Object.freeze({ intervalMs: 60000, pageSize: 128, maxJobsPerTick: 8, scopesPerTick: 8 }),
   images: Object.freeze({ maxBytes: 6 * 1024 * 1024 }),
   reranker: RERANKER_DEFAULTS,

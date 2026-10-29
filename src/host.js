@@ -281,6 +281,7 @@ export function apply(ctx) {
     prepareContext: (args) => mods.prepareContext(args),
     getPlanner: () => use('tasks')?.planner || null,
     onDiagnostic: (event) => diagnostics.record(event),
+    onRequestBatch: (event) => diagnostics.linkRequestBatch(event),
     onUsage: (event) => usage.record(event),
     onActivity: (a) => mods.emit('activity', a),
     // 群聊话题和她的记忆有多相关（插话判断用）

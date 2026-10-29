@@ -70,6 +70,7 @@ export async function searchSongs(keyword, { cookie, limit = 5 } = {}) {
     id: s.id,
     name: s.name,
     alias: (s.alia || []).join(" "),
+    aliases: s.alia || [],
     artists: (s.ar || []).map((a) => a.name).join(' / '),
     durationSec: Math.round((s.dt || 0) / 1000),
     vip: s.fee === 1 || s.fee === 4,
@@ -81,6 +82,15 @@ export async function songUrl(id, { cookie } = {}) {
   const j = await post('/song/enhance/player/url/v1', { ids: `[${id}]`, level: 'exhigh', encodeType: 'mp3' }, cookie)
   const d = (j.data || [])[0] || {}
   return { url: d.url || '', trial: Boolean(d.freeTrialInfo), type: d.type || 'mp3' }
+}
+
+/** A selected ID still needs authoritative metadata; the supplied query is not its title. */
+export async function songDetail(id, { cookie } = {}) {
+  if (!/^\d+$/.test(String(id))) throw new Error('歌曲 ID 无效')
+  const j = await post('/v3/song/detail', { c: JSON.stringify([{ id: Number(id) }]), ids: `[${id}]` }, cookie)
+  const s = (j.songs || []).find(s => String(s.id) === String(id))
+  if (!s) throw new Error('没有查到该歌曲 ID 的实际信息')
+  return { id: s.id, name: s.name, artists: (s.ar || s.artists || []).map(a => a.name).join(' / '), aliases: s.alia || [] }
 }
 
 /** 查登录状态：Cookie 有没有用。 */

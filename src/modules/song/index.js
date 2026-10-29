@@ -22,6 +22,7 @@ export default {
       getConfig: api.config,
       log: api.log,
       sendVoiceFile: (chatId, file, note, options) => hub.sendVoiceFile(chatId, file, note, options),
+      onResult: (result) => api.emit('song/result', result),
       onSung: (title, chatId, evidence) => {
         const cfg = api.config()
         // 唱过的歌记成她的经历：私聊记到对方头上
@@ -63,18 +64,22 @@ export default {
     // 面板里打开了才给她（没开就别让她答应唱歌）
     api.tool(({ chat, sessionId }) => (api.config().song.enabled && chat.kind !== 'system' ? defineTool({
       name: 'qq_song_cover',
-      description: '用你自己的声音翻唱一首歌，做好后自动以语音条发到当前聊天（要两三分钟，调用后先简单回一句「等我一下」就好）。song 写歌名，最好带上歌手，比如「小幸运 田馥甄」。pitch 是变调半音：你是女声，原唱是男声时一般 +12，原唱是女声时 0。',
-      properties: { song: str('歌名（可以带歌手）'), pitch: int('变调半音：原唱男声 +12，女声 0') },
+      description: '登记翻唱任务，匹配歌名和歌手后制作并发送。登记不代表匹配或完成；用 qq_song_status 查真实 title、match、stage、delivered，再据实描述。纠错必须传原 job_id 为 corrects_job_id，不得重复声称已唱对。',
+      properties: { song: str('原始点歌关键词'), track: str('明确歌名，不含歌手'), artist: str('用户要求的歌手，不要猜测'),
+        corrects_job_id: str('用户否定的原翻唱任务 ID；纠错时必填'), pitch: int('变调半音：原唱男声 +12，女声 0') },
       required: ['song'],
-      execute: async ({ song: name, pitch }) => {
+      execute: async ({ song: name, track, artist, corrects_job_id, pitch }) => {
         const who = turn(chat, sessionId)
         if (api.config().song.ownerOnly && who.actorId !== String(api.config().ownerQQ)) return { ok: false, message: '只有主人能点歌' }
-        return song.request({ song: name, pitch, ...who })
+        return song.request({ song: name, track, artist, correctsJobId: corrects_job_id, pitch, ...who })
       },
     }) : []))
     api.tool(({ chat, sessionId }) => chat.kind === 'system' ? [] : [defineTool({
       name: 'qq_cancel_song', description: '取消当前请求者自己的翻唱任务，已经产生的结果会保留，迟到结果不再发送。',
       properties: { job_id: str('翻唱任务 ID') }, required: ['job_id'], execute: ({ job_id }) => song.cancel(job_id, turn(chat, sessionId)),
+    }), defineTool({
+      name: 'qq_song_status', description: '查询自己的翻唱任务，返回实际曲目 title、匹配依据 match、阶段 stage 和真实发送回执状态 delivered。不得把请求名当成结果名。',
+      properties: { job_id: str('翻唱任务 ID') }, required: ['job_id'], execute: ({ job_id }) => song.result(job_id, turn(chat, sessionId)),
     })])
     api.command?.({ name: 'sing', aliases: ['唱'], desc: '翻唱一首歌', run(arg, msg) {
       const source = storage.messages.byPlatformId(msg.chatId, msg.messageId)
@@ -111,10 +116,11 @@ export default {
     // 面板里试唱：发到主人私聊
     api.route('/song/request', async (req) => {
       const b = await http.body(req)
-      return song.request({ song: b.song, songId: b.songId, pitch: b.pitch, voice: b.voice,
+      return song.request({ song: b.song, songId: b.songId, track: b.track, artist: b.artist, correctsJobId: b.correctsJobId, pitch: b.pitch, voice: b.voice,
         ...context(b.chatId || `private:${api.config().ownerQQ}`, api.config().ownerQQ, `panel:${randomUUID()}`) })
     })
     api.route('/song/cancel', async (req) => { const b = await http.body(req); return song.cancel(b.id, context(b.chatId, api.config().ownerQQ, 'panel')) })
+    api.route('/song/result', async (req) => { const b = http.query(req); return song.result(b.id, context(b.chatId, api.config().ownerQQ, 'panel')) })
     api.route('/song/resend', async (req) => { const b = await http.body(req); return song.resend(b.id, context(b.chatId, api.config().ownerQQ, 'panel')) })
     return song
   },

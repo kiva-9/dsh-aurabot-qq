@@ -19,6 +19,7 @@ export function createFakeDsh({ brain }) {
     const tools = new Map()
     const contexts = new Map()
     const sections = new Map()
+    const scopedListeners = new Map()
     const events = []
     let turn = 0
     let chain = Promise.resolve()
@@ -39,14 +40,23 @@ export function createFakeDsh({ brain }) {
       injected: [],
       cancels: [],
       denied: new Set(),
+      restrictions: new Set(), guards: new Set(), runtimeSuppressed: false,
       ctx: {
+        on(name, fn) {
+          if (!scopedListeners.has(name)) scopedListeners.set(name, new Set())
+          scopedListeners.get(name).add(fn)
+          return () => scopedListeners.get(name).delete(fn)
+        },
         tools: {
+          presentAs: mode => { agent.toolMode = mode; return () => { delete agent.toolMode } },
           register: (t) => { tools.set(t.name, t); return () => tools.delete(t.name) },
-          restrict: ({ deny = [] }) => { for (const n of deny) agent.denied.add(n); return () => { for (const n of deny) agent.denied.delete(n) } },
+          restrict: (filter) => { agent.restrictions.add(filter);for (const n of filter.deny || []) agent.denied.add(n);return () => {agent.restrictions.delete(filter);for(const n of filter.deny || [])agent.denied.delete(n)} },
+          guard: (check) => {agent.guards.add(check);return ()=>agent.guards.delete(check)},
         },
         systemPrompt: {
           context: (c) => { contexts.set(c.name, c); return () => contexts.delete(c.name) },
           section: (s) => { sections.set(s.name, s); return () => sections.delete(s.name) },
+          suppressRuntimeContext: () => {agent.runtimeSuppressed=true;return ()=>{agent.runtimeSuppressed=false}},
         },
       },
       steered: [],
@@ -68,17 +78,25 @@ export function createFakeDsh({ brain }) {
           canceled = null
           const text = msg.content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
           const images = msg.content.filter((c) => c.type === 'image')
-          const ctxText = [...contexts.values()].map((c) => c.text()).filter(Boolean).join('\n')
+          const ctxText = [...contexts.values()].filter(c=>!agent.runtimeSuppressed||c.required).map((c) => c.text()).filter(Boolean).join('\n')
           const persona = sections.get('deployment:persona-prefix')?.text?.() ?? variables.get('aurabot_persona')?.({ agent }) ?? ''
           const calls = []
+          const visible = new Map([...globalTools].filter(([name])=>[...agent.restrictions].every(f=>(!f.allow||f.allow.includes(name))&&!f.deny?.includes(name))))
+          for(const [name,tool] of tools)visible.set(name,tool)
+          const assembly = { tools: [...visible.values()] }
+          const assemblers = [...scopedListeners.get('system-prompt/assemble') || []]
+          const next = () => (assemblers.shift() || (() => assembly))(assembly, { scope: agent }, next)
+          const presented = await next()
           const callTool = async (name, args) => {
-            const t = tools.get(name)
+            const t = visible.get(name)
             if (!t) { calls.push({ name, args, result: { ok: false, message: 'no such tool' } }); return null }
+            const denied=[...agent.guards].map(fn=>fn({name,agent})).find(Boolean)
+            if(denied){const result={ok:false,message:denied};calls.push({name,args,result});return result}
             const result = await t.execute(args, { agent })
             calls.push({ name, args, result })
             return result
           }
-          const reply = await brain({ preset, text, images, ctxText, persona, callTool, toolNames: [...tools.keys()], agent })
+          const reply = await brain({ preset, text, images, ctxText, persona, callTool, toolNames: presented.tools.map(tool => tool.name), agent })
           agent.status = 'idle'
           if (canceled) {
             turns.push({ sessionId, preset, userText: text, images: images.length, reply, toolCalls: calls, ctxText, aborted: true })

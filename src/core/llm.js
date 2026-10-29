@@ -20,6 +20,16 @@ export function observeModelUsage(dsh, listener) {
   }
 }
 
+// Domain settlement updates the same physical-call row; it never adds token usage.
+export function reportModelOutcome(dsh, { callId, scope, status, code = '' }) {
+  if (!callId) return
+  const event = Object.freeze({ id: callId, phase: 'business', businessStatus: status,
+    businessError: String(code).slice(0, 100), context: Object.freeze({ account: scope?.account, chatId: scope?.chat }) })
+  for (const { listener } of usageObservers.get(dsh) || []) {
+    try { Promise.resolve(listener(event)).catch(() => {}) } catch {}
+  }
+}
+
 /** 某个角色用的模型：设置里给这个角色单独选了就用它，否则用全局模型（再不行用 DSH 默认）。 */
 export function roleModel(dsh, cfg, role) {
   const r = role && cfg?.roles?.[role]
@@ -165,7 +175,9 @@ function callControl(parent, timeoutMs) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_MODEL_TIMEOUT_MS) throw modelError('INVALID_TIMEOUT', `timeoutMs 必须为 1..${MAX_MODEL_TIMEOUT_MS} 毫秒`)
   if (parent != null && (typeof parent.aborted !== 'boolean' || typeof parent.addEventListener !== 'function' || typeof parent.removeEventListener !== 'function')) throw modelError('INVALID_SIGNAL', 'signal 必须为 AbortSignal')
   const controller = new AbortController(), signal = controller.signal, deadline = performance.now() + timeoutMs
-  const abort = () => controller.abort(modelError('MODEL_ABORTED', '模型调用已取消', 'AbortError'))
+  const abort = () => controller.abort(parent?.reason?.code === 'MODEL_TIMEOUT' || parent?.reason?.name === 'TimeoutError'
+    ? modelError('MODEL_TIMEOUT', '模型调用超时', 'TimeoutError')
+    : modelError('MODEL_ABORTED', '模型调用已取消', 'AbortError'))
   const timeout = () => controller.abort(modelError('MODEL_TIMEOUT', '模型调用超时', 'TimeoutError'))
   const timer = setTimeout(timeout, timeoutMs)
   let rejectAbort
@@ -208,7 +220,7 @@ function streamFailure(failure) {
   return modelError(typeof f.code === 'string' ? f.code : 'MODEL_FAILED', '模型报错：' + (f.message || f.code || '未知'))
 }
 
-async function runStream(llm, params, control, attempt) {
+async function runStream(llm, params, control, attempt, maxOutputChars) {
   let out = '', iterator
   // DSH StreamChunk: usage precedes the terminal finish; nothing follows it.
   // https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/llm-streaming.md
@@ -234,12 +246,14 @@ async function runStream(llm, params, control, attempt) {
       if (chunk.type === 'text-delta') {
         if (typeof chunk.text !== 'string') throw modelError('INVALID_STREAM', '模型文字片段格式无效')
         out += chunk.text
+        if (maxOutputChars && out.length > maxOutputChars) throw modelError('MODEL_OUTPUT_TOO_LARGE', '模型结果超过字符上限')
       }
       if (['text-delta', 'reasoning-delta', 'tool-call-delta', 'block-end'].includes(chunk.type)) attempt.content = true
       if (chunk.type === 'usage') attempt.usage = usageOf(chunk.usage) // One attempt's cumulative snapshot, not a delta.
       if (chunk.type === 'error') throw streamFailure(chunk.error || chunk.failure)
       if (chunk.type === 'finish') {
         const kind = typeof chunk.reason === 'string' ? chunk.reason : chunk.reason?.kind
+        attempt.finishReason = kind || 'unknown'
         if (kind === 'aborted') throw modelError('MODEL_ABORTED', '模型流已取消', 'AbortError')
         if (kind === 'error') throw streamFailure(chunk.reason?.failure)
         if (!['stop', 'completed'].includes(kind)) throw modelError('MODEL_INCOMPLETE', '模型没有完整完成回答')
@@ -250,7 +264,7 @@ async function runStream(llm, params, control, attempt) {
   } finally { closeIterator(iterator) }
 }
 
-function notifyUsage(dsh, options, target, attempts, started, status) {
+function notifyUsage(dsh, options, target, attempts, started, startedAt, callId, status, errorCode) {
   attempts = attempts.filter(attempt => attempt.started)
   const reported = attempts.filter(attempt => attempt.usage)
   let tokens = null
@@ -268,7 +282,10 @@ function notifyUsage(dsh, options, target, attempts, started, status) {
   const id = value => typeof value === 'string' || typeof value === 'number' ? String(value).slice(0, 200) : null
   const role = id(options.role) || ''
   const duration = Math.max(0, Math.round(performance.now() - started))
-  const event = Object.freeze({ provider: id(target?.provider), model: id(target?.model), role,
+  const event = Object.freeze({ id: callId, startedAt, finishedAt: Date.now(),
+    operationId: id(options.operationId), stage: id(options.stage), errorCode,
+    sourceMessageIds: Object.freeze((Array.isArray(options.sourceMessageIds) ? options.sourceMessageIds : []).filter(v => typeof v === 'string').map(v=>v.slice(0,200)).slice(0, 100)),
+    finishReason: id(attempts.at(-1)?.finishReason), provider: id(target?.provider), model: id(target?.model), role,
     context: Object.freeze({ chatId: id(options.chatId || options.scope?.chat), requestId: id(options.requestId), account: id(options.scope?.account), role }),
     tokens, status, duration, durationMs: duration, attempts: attempts.length,
     usageComplete: attempts.length > 0 && attempts.every(a => a.usage && safeToken(a.usage.inputTokens) && safeToken(a.usage.outputTokens)),
@@ -287,13 +304,17 @@ function notifyUsage(dsh, options, target, attempts, started, status) {
  *   role：用哪个角色的模型（vision / memory / learning / judge / replyer），没设就用全局模型
  *   timeoutMs：整个调用（含预处理和兼容重试）的期限，默认120秒，最多600秒。
  *   onUsage / observeModelUsage：每次 askModel 结算各通知一次；duration / durationMs 均为毫秒。
+ *   startedAt / finishedAt 是调用入口/结算的真实墙钟；durationMs 使用单调时钟。
+ *   callId（默认 UUID）、operationId、stage、sourceMessageIds 仅用于关联，不进入模型参数。
+ *   reportModelOutcome 另发 phase=business 的同 id 更新；流成功与业务提交结果分别记录。
+ *   maxOutputChars 可选：流式累计文字上限，超过即失败，不返回截断 JSON。
  *   status: success | failed | aborted | timeout。tokens 为已报告计数或 null，
  *   usageComplete=false 表示有尝试未报告完整计数；绝不把未知当作零。
  * @returns {Promise<string>}
  */
 export async function askModel (dsh, o = {}) {
-  const started = performance.now(), attempts = []
-  let control, t, status = 'failed'
+  const started = performance.now(), startedAt = Date.now(), attempts = [], callId = String(o?.callId || randomUUID()).slice(0, 200)
+  let control, t, status = 'failed', errorCode = null
   try {
     if (!o || typeof o !== 'object') throw modelError('INVALID_OPTIONS', '需要模型调用参数')
     t = roleModel(dsh, o.cfg, o.role)
@@ -330,7 +351,7 @@ export async function askModel (dsh, o = {}) {
       const observed = { usage: null, content: false, started: false }
       attempts.push(observed)
       try {
-        const result = await runStream(llm, effort ? { ...base, reasoningEffort: effort } : base, control, observed)
+        const result = await runStream(llm, effort ? { ...base, reasoningEffort: effort } : base, control, observed, o.maxOutputChars)
         control.assertActive()
         status = 'success'
         return result
@@ -348,11 +369,12 @@ export async function askModel (dsh, o = {}) {
     }
   } catch (error) {
     const failure = control?.signal.aborted ? control.signal.reason : error
+    errorCode = String(failure?.code || 'MODEL_FAILED').slice(0, 100)
     status = failure?.code === 'MODEL_TIMEOUT' || failure?.name === 'TimeoutError' ? 'timeout'
       : failure?.code === 'MODEL_ABORTED' || failure?.name === 'AbortError' ? 'aborted' : 'failed'
     throw failure
   } finally {
     control?.dispose(status !== 'success')
-    notifyUsage(dsh, o || {}, t, attempts, started, status)
+    notifyUsage(dsh, o || {}, t, attempts, started, startedAt, callId, status, errorCode)
   }
 }

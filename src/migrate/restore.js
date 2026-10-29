@@ -9,6 +9,7 @@ import { ensureSchema as ensureMemorySchema } from '../memory/schema.js'
 import { factFingerprint } from '../memory/contracts.js'
 import { scopeKey } from '../memory/scope.js'
 import { createUsageLedger } from '../diagnostics/usage.js'
+import { ensureSchema as ensureLearningSchema } from '../learning/schema.js'
 
 const FORMAT = 'aurabot-offline-restore-v1'
 // Intentionally pinned. A future core migration must not silently expand the
@@ -26,7 +27,11 @@ wp6_model_budget wp6_model_calls wp6_mood_states wp6_mood_events wp6_mood_seen w
 wp6_learning_audit wp6_learning_versions wp6_learning_checkpoints wp6_learning_queue wp6_learning_seen wp6_learning_uses
 wp6_learning_shared_usage sticker_items sticker_quota sticker_sources sticker_tasks sticker_qq sticker_uses sticker_legacy
 retrieval_source_outbox retrieval_source_scans retrieval_source_clock retrieval_source_discovery
-service_calls service_call_requests restore_records restore_runs`.split(/\s+/))
+background_work_state service_calls service_call_requests service_call_outcomes restore_records restore_runs`.split(/\s+/))
+const USAGE_BASE = 'id account_id chat_id request_id service model role status billing started_at duration_ms input_tokens output_tokens cached_tokens input_count input_chars credits amount currency'
+const USAGE_EXTRA = 'provider finished_at attempts usage_complete business_status business_error operation_id stage source_ids_json error_code finish_reason'.split(' ')
+const BACKGROUND_NAMES = new Set(['memory','learning:expression','learning:jargon','mood'])
+const RESTORE_PAUSE = 'RESTORE_REQUIRES_REVIEW'
 const MODULES = 'stickers voice mood memory learning retrieval media-memory search qq-tools group-admin imagegen speakup bili song tasks profile contacts'.split(' ')
 
 /** Safe config is new, contains no copied credentials, and disables built-in and user modules. */
@@ -138,6 +143,14 @@ function checkSchema(db, label) {
     memory_evidence: 'id account chat persona message_id body revision deleted_at',
     memory_tombstones: 'kind key account chat persona deleted_at body', memory_audit: 'seq fact_id account chat persona at body',
   })) columns(db, table, names)
+  for (const [table,names] of Object.entries({background_work_state:'namespace scope_key body',
+    service_calls:USAGE_BASE,service_call_requests:'call_id request_id',service_call_outcomes:'call_id account_id chat_id status error',
+    memory_checkpoints:'scope_key scope recv_seq watermark last_success_at state lease_token lease_until error attempts',
+    wp6_learning_checkpoints:'scope_key account_id chat_id persona_id kind scan_seq processed_seq overflow_from overflow_to next_attempt_at last_attempt_at attempts outcome last_error lease_owner lease_until'})) {
+    if(has(db,table)) columns(db,table,names)
+  }
+  if(has(db,'service_calls')) for(const column of db.prepare('PRAGMA table_info(service_calls)').all())
+    if(![...USAGE_BASE.split(' '),...USAGE_EXTRA].includes(column.name)) failure('UNSUPPORTED_SCHEMA',`${label}: unhandled usage column ${column.name}`)
   // An arbitrary backup trigger must never run while barriers are being applied.
   // Drop copied triggers below; rebuild memory triggers from trusted local code.
   if (db.prepare("SELECT 1 FROM sqlite_schema WHERE type='view' LIMIT 1").get()) failure('UNSUPPORTED_SCHEMA', `${label}: views require explicit review`)
@@ -160,6 +173,109 @@ function checkedBody(row, kind) {
   if (kind === 'evidence' && (body.messageId !== row.message_id || (body.deletedAt ?? null) !== row.deleted_at))
     failure('INVALID_RECORD', 'Evidence deletion/message does not match its indexed body')
   return body
+}
+
+function isolateBackground(current, candidate, { archive, insertRow, bump, adapter }) {
+  const states=new Map(), memory=new Map(), learning=new Map(), budgets=new Map()
+  let recvFloor=0
+  const arrayKey=scope=>JSON.stringify([scope.account,scope.chat,scope.persona])
+  const arrayScope=value=>{
+    let key
+    try { key=JSON.parse(value) } catch { failure('INVALID_RECORD','Background scope key is not JSON') }
+    if(!Array.isArray(key) || key.length!==3) failure('INVALID_RECORD','Background scope must contain account, chat and persona')
+    const scope={account:key[0],chat:key[1],persona:key[2]};rowScope(scope)
+    return scope
+  }
+  const nullableMax=(a,b)=>a==null?b:b==null?a:Math.max(a,b)
+  const positiveMin=(a,b)=>a==null?b:b==null?a:Math.min(a,b)
+  const cursor=(value,label)=>{integer(value,label);recvFloor=Math.max(recvFloor,value);return value}
+  const pause=(namespace,scope,body={})=>{
+    if(!BACKGROUND_NAMES.has(namespace)) failure('UNSUPPORTED_SCHEMA',`Unhandled background namespace ${namespace}`)
+    rowScope(scope)
+    if(namespace!=='memory' && !scope.persona) failure('INVALID_RECORD','Learning/mood background state needs an explicit persona')
+    const key=arrayKey(scope), id=JSON.stringify([namespace,key]), old=states.get(id)?.body
+    const failures=integer(body.failures??0,'background failures')
+    for(const field of ['batchLimit','charLimit']) if(body[field]!=null) integer(body[field],field,1)
+    if(body.lastError!=null && typeof body.lastError!=='string') failure('INVALID_RECORD','Background error must be a code')
+    states.set(id,{namespace,scope_key:key,body:{failures:Math.max(old?.failures||0,failures),
+      batchLimit:positiveMin(old?.batchLimit??null,body.batchLimit??null),charLimit:positiveMin(old?.charLimit??null,body.charLimit??null),
+      lastError:body.lastError?.slice(0,100) || old?.lastError || '',paused:true,pauseReason:RESTORE_PAUSE,
+      nextAttemptAt:0,lastCallId:null,phase:'paused'}})
+  }
+  for(const db of [candidate,current]) {
+    const source=db===current?'current':'backup'
+    for(const row of rows(db,'background_work_state')) {
+      archive(source,'background_work_state',row)
+      pause(row.namespace,arrayScope(row.scope_key),json(row.body,'background work state'))
+    }
+    for(const row of rows(db,'memory_checkpoints')) {
+      archive(source,'memory_checkpoints',row)
+      const scope=json(row.scope,'memory checkpoint scope'),key=scopeKey(scope)
+      if(scopeKey(json(row.scope_key,'memory checkpoint key'))!==key) failure('IDENTITY_CONFLICT','Memory checkpoint scope/key mismatch')
+      cursor(row.recv_seq,'memory recv_seq');cursor(row.watermark,'memory watermark');integer(row.attempts,'memory attempts')
+      if(row.last_success_at!=null) integer(row.last_success_at,'memory last_success_at')
+      const old=memory.get(key)
+      memory.set(key,{...row,scope_key:key,scope:JSON.stringify(rowScope(scope)),recv_seq:Math.max(old?.recv_seq||0,row.recv_seq),
+        watermark:Math.max(old?.watermark||0,row.watermark,row.recv_seq),last_success_at:nullableMax(old?.last_success_at??null,row.last_success_at),
+        attempts:Math.max(old?.attempts||0,row.attempts),state:'pending',lease_token:null,lease_until:null,error:RESTORE_PAUSE})
+      pause('memory',scope)
+    }
+    for(const row of rows(db,'wp6_learning_checkpoints')) {
+      archive(source,'wp6_learning_checkpoints',row)
+      const scope=arrayScope(row.scope_key),key=arrayKey(scope)
+      if(scope.account!==row.account_id || scope.chat!==row.chat_id || scope.persona!==row.persona_id)
+        failure('IDENTITY_CONFLICT','Learning checkpoint scope/key mismatch')
+      if(!['expression','jargon'].includes(row.kind)) failure('UNSUPPORTED_SCHEMA','Unknown learning checkpoint kind')
+      for(const field of ['scan_seq','processed_seq']) cursor(row[field],field)
+      for(const field of ['attempts','last_attempt_at']) integer(row[field],field)
+      if((row.overflow_from==null)!==(row.overflow_to==null)) failure('INVALID_RECORD','Incomplete learning overflow range')
+      if(row.overflow_from!=null) {cursor(row.overflow_from,'overflow_from');cursor(row.overflow_to,'overflow_to')}
+      const id=JSON.stringify([key,row.kind]),old=learning.get(id)
+      learning.set(id,{...row,scope_key:key,scan_seq:Math.max(old?.scan_seq||0,row.scan_seq),processed_seq:Math.max(old?.processed_seq||0,row.processed_seq),
+        overflow_from:positiveMin(old?.overflow_from??null,row.overflow_from),overflow_to:nullableMax(old?.overflow_to??null,row.overflow_to),
+        attempts:Math.max(old?.attempts||0,row.attempts),last_attempt_at:Math.max(old?.last_attempt_at||0,row.last_attempt_at),
+        next_attempt_at:0,outcome:'paused',last_error:RESTORE_PAUSE,lease_owner:null,lease_until:0})
+      pause(`learning:${row.kind}`,scope,{failures:row.attempts})
+      // A scheduler visits both kinds for each persisted scope.
+      for(const kind of ['expression','jargon']) pause(`learning:${kind}`,scope)
+    }
+    for(const row of rows(db,'wp6_learning_queue')) {
+      archive(source,'wp6_learning_queue',row)
+      pause(`learning:${row.kind}`,arrayScope(row.scope_key));cursor(row.recv_seq,'queued recv_seq')
+    }
+    for(const row of rows(db,'wp6_mood_states')) {
+      archive(source,'wp6_mood_states',row)
+      const scope=arrayScope(row.scope_key)
+      if(scope.account!==row.account_id || scope.chat!==row.chat_id || scope.persona!==row.persona_id)
+        failure('IDENTITY_CONFLICT','Mood state scope/key mismatch')
+      pause('mood',scope)
+    }
+    for(const row of rows(db,'wp6_model_calls')) {
+      archive(source,'wp6_model_calls',row)
+      pause(row.kind==='mood'?'mood':`learning:${row.kind}`,arrayScope(row.scope_key))
+      bump('clearedModelReservations')
+    }
+    for(const row of rows(db,'wp6_model_budget')) {
+      archive(source,'wp6_model_budget',row);integer(row.calls,'model budget calls')
+      if(!/^\d{4}-\d{2}-\d{2}$/.test(row.day)) failure('INVALID_RECORD','Invalid model budget day')
+      budgets.set(row.day,Math.max(budgets.get(row.day)||0,row.calls))
+    }
+    for(const row of rows(db,'sequences').filter(r=>r.name==='recv')) {archive(source,'sequences',row);cursor(row.value,'recv sequence')}
+    cursor(db.prepare('SELECT COALESCE(MAX(recv_seq),0) n FROM messages').get().n,'source receive sequence')
+  }
+  candidate.exec('DELETE FROM memory_checkpoints')
+  for(const row of memory.values()) {insertRow('memory_checkpoints',row);bump('preservedMemoryCheckpoints')}
+  if([current,candidate].some(db=>has(db,'wp6_learning_checkpoints') || has(db,'wp6_model_calls') || has(db,'wp6_model_budget'))) {
+    ensureLearningSchema(adapter)
+    candidate.exec('DELETE FROM wp6_learning_checkpoints; DELETE FROM wp6_model_calls')
+    for(const row of learning.values()) {insertRow('wp6_learning_checkpoints',row);bump('preservedLearningCheckpoints')}
+    for(const [day,calls] of budgets) candidate.prepare('INSERT INTO wp6_model_budget VALUES(?,?) ON CONFLICT(day) DO UPDATE SET calls=MAX(calls,excluded.calls)').run(day,calls)
+  }
+  candidate.exec(`CREATE TABLE IF NOT EXISTS background_work_state(namespace TEXT NOT NULL,scope_key TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(namespace,scope_key));
+    DELETE FROM background_work_state;`)
+  for(const row of states.values()) {insertRow('background_work_state',{...row,body:JSON.stringify(row.body)});bump('isolatedBackgroundScopes')}
+  // Restored high-water marks must not swallow newly received messages after review.
+  candidate.prepare("INSERT INTO sequences(name,value) VALUES('recv',?) ON CONFLICT(name) DO UPDATE SET value=MAX(value,excluded.value)").run(recvFloor)
 }
 
 function reconcile(current, candidate, runId, at) {
@@ -186,18 +302,40 @@ function reconcile(current, candidate, runId, at) {
     // The usage ledger is immutable accounting evidence, not executable work.
     // Merge observed rows, never calculate or infer missing fees. A conflicting
     // receipt id needs human reconciliation and refuses this preparation.
-    if(has(current,'service_calls') || has(current,'service_call_requests')) {
-      columns(current,'service_calls','id account_id service status billing started_at amount currency')
-      columns(current,'service_call_requests','call_id request_id')
-      createUsageLedger({storage:{db:{run:(sql,...params)=>candidate.prepare(sql).run(...params)}},getAccount:()=>''})
-      archiveTable('service_calls');archiveTable('service_call_requests')
+    const candidateAdapter={run:(sql,...params)=>candidate.prepare(sql).run(...params),
+      all:(sql,...params)=>candidate.prepare(sql).all(...params),exec:sql=>candidate.exec(sql)}
+    if([current,candidate].some(db=>['service_calls','service_call_requests','service_call_outcomes'].some(table=>has(db,table)))) {
+      createUsageLedger({storage:{db:candidateAdapter},getAccount:()=>''})
+      archiveTable('service_calls');archiveTable('service_call_requests');archiveTable('service_call_outcomes')
       for(const row of rows(current,'service_calls')) {
         archive('current','service_calls',row)
         const old=candidate.prepare('SELECT * FROM service_calls WHERE id=?').get(row.id)
-        if(old && Object.keys(row).some(key=>row[key]!==old[key])) failure('USAGE_CONFLICT','Usage receipt id has conflicting evidence; no cost reconciliation was inferred')
+        if(old && Object.keys(row).some(key=>USAGE_EXTRA.includes(key) ? row[key]!=null && old[key]!=null && row[key]!==old[key] : row[key]!==old[key]))
+          failure('USAGE_CONFLICT','Usage receipt id has conflicting evidence; no cost reconciliation was inferred')
         if(!old) insertRow('service_calls',row)
+        else for(const key of USAGE_EXTRA) if(old[key]==null && row[key]!=null)
+          candidate.prepare(`UPDATE service_calls SET ${quote(key)}=? WHERE id=?`).run(row[key],row.id)
         bump('preservedUsageCalls')
       }
+      for(const row of rows(current,'service_call_outcomes')) {
+        archive('current','service_call_outcomes',row)
+        const old=candidate.prepare('SELECT * FROM service_call_outcomes WHERE call_id=?').get(row.call_id)
+        if(old && Object.keys(row).some(key=>row[key]!==old[key])) failure('USAGE_CONFLICT','Business outcome id has conflicting evidence')
+        if(!old) insertRow('service_call_outcomes',row)
+        bump('preservedUsageOutcomes')
+      }
+      for(const row of rows(candidate,'service_call_outcomes')) {
+        if(!row.account_id || !['success','failed','discarded'].includes(row.status)) failure('INVALID_RECORD','Invalid usage business outcome')
+        const call=candidate.prepare('SELECT * FROM service_calls WHERE id=?').get(row.call_id)
+        // A pre-usage cancellation receipt can be orphaned; never invent a billed call for it.
+        if(!call) continue
+        if(call.account_id!==row.account_id || call.chat_id!==row.chat_id ||
+          (call.business_status!=null && call.business_status!==row.status) || (call.business_error!=null && call.business_error!==row.error))
+          failure('USAGE_CONFLICT','Business outcome does not match the call scope or settlement')
+        candidate.prepare('UPDATE service_calls SET business_status=?,business_error=? WHERE id=?').run(row.status,row.error,row.call_id)
+      }
+      for(const row of rows(candidate,'service_call_requests'))
+        if(!candidate.prepare('SELECT 1 FROM service_calls WHERE id=?').get(row.call_id)) failure('BROKEN_REFERENCES','Usage request link has no call')
       for(const row of rows(current,'service_call_requests')) {
         archive('current','service_call_requests',row)
         if(!candidate.prepare('SELECT 1 FROM service_calls WHERE id=?').get(row.call_id)) failure('BROKEN_REFERENCES','Usage request link has no call')
@@ -301,9 +439,10 @@ function reconcile(current, candidate, runId, at) {
       candidate.prepare('INSERT INTO memory_audit(fact_id,account,chat,persona,at,body) VALUES(?,?,?,?,?,?)').run(row.id,row.account,row.chat,row.persona,at,JSON.stringify(audit))
       bump('isolatedFacts')
     }
-    for (const table of ['memory_profiles','memory_overrides','memory_episodes','memory_checkpoints']) {
+    for (const table of ['memory_profiles','memory_overrides','memory_episodes']) {
       archiveTable(table); candidate.exec(`DELETE FROM ${quote(table)}`)
     }
+    isolateBackground(current,candidate,{archive,insertRow,bump,adapter:candidateAdapter})
     for (const row of rows(candidate, 'memory_quarantine')) {
       archive('backup', 'memory_quarantine', row)
       candidate.prepare("UPDATE memory_quarantine SET state='quarantined',approved_fact_id=NULL WHERE id=?").run(row.id)
@@ -422,13 +561,13 @@ function reconcile(current, candidate, runId, at) {
         candidate.prepare('INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(row.key,JSON.stringify(b))
       }
     }
-    for(const table of ['wp6_learning_queue','wp6_learning_checkpoints','wp6_mood_states','wp6_mood_events','wp6_mood_seen','retrieval_source_outbox','retrieval_source_scans','retrieval_source_discovery']) {
+    for(const table of ['wp6_learning_queue','wp6_mood_states','wp6_mood_events','wp6_mood_seen','retrieval_source_outbox','retrieval_source_scans','retrieval_source_discovery']) {
       if(has(candidate,table)) { archiveTable(table); candidate.exec(`DELETE FROM ${quote(table)}`) }
     }
     // Never execute trigger SQL from a backup. Memory triggers are rebuilt from
     // this release's initializer; retrieval creates its own triggers when enabled.
     ensureMemorySchema({db:{exec:sql=>candidate.exec(sql),tx:fn=>fn()}})
-    const summary={counts,knownBarriersMerged:true,deletionHistoryComplete:false,switchAllowed:false,
+    const summary={counts,knownBarriersMerged:true,deletionHistoryComplete:false,switchAllowed:false,backgroundRequiresReview:true,
       rebuildRequired:['Retrieval indexes, worker database and source triggers require reviewed source rebuild; no external vector state was restored.']}
     candidate.prepare('INSERT INTO restore_runs VALUES(?,?,?)').run(runId,at,JSON.stringify(summary))
     integrity(candidate)

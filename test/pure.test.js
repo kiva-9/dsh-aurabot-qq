@@ -35,9 +35,9 @@ test('stripMarkdown 洗掉 Markdown', () => {
 })
 
 test('bubbleDelay 按下一条长短停顿', () => {
-  assert.equal(bubbleDelay('嗯', () => 0), 560)
+  assert.equal(bubbleDelay('嗯', () => 0), 200)
   assert.ok(bubbleDelay('这是一句比较长的话，要打好一会儿才打得完呢', () => 0) > bubbleDelay('嗯', () => 0))
-  assert.ok(bubbleDelay('x'.repeat(500), () => 1) <= 4500 * 1.3)
+  assert.ok(bubbleDelay('x'.repeat(500), () => 1) <= 1400 * 1.3)
 })
 
 test('回复按行拆成多条气泡；列表、代码、长文不拆；最多 5 条', () => {

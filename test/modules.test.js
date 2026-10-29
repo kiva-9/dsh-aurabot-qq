@@ -366,7 +366,7 @@ test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏�
   assert.ok(lib.every((i) => i.state === 'pending' && i.scope.account === BOT && i.scope.chat === chatId))
   const confirmed = lib.find((i) => i.qq.emojiId === 'existing-1')
   assert.equal(confirmed.qq.state, 'synced', 'QQ 收藏已存在不代表本地已经批准')
-  assert.equal(lib.find((i) => !i.qq.emojiId).qq.state, 'idle', '没有 QQ ID 时不能伪造已同步身份')
+  assert.equal(lib.find((i) => !i.qq.emojiId).qq.state, 'unidentified', '没有 QQ ID 时不能伪造已同步身份')
   assert.equal(api.stickers.match(confirmed.id, chatId), null)
   assert.equal((await fake.call('/sticker/approve', { id: confirmed.id })).json().item.state, 'approved')
   assert.equal(api.stickers.match(confirmed.id, chatId).id, confirmed.id)

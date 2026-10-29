@@ -6,6 +6,7 @@ import {join,resolve} from 'node:path'
 import {createStorage} from '../src/storage/index.js'
 import {createMemoryStore} from '../src/features/memory.js'
 import memoryModule from '../src/modules/memory/index.js'
+import { deferred, settled } from './helpers/wp6.js'
 
 const S={account:'bot',chat:'group:1',persona:''}
 const payload=(patch={})=>({scope:S,text:'小明喜欢咖啡',subject:'user',predicate:'likes',value:'咖啡',speakerId:'user',polarity:'positive',modality:'asserted',conditions:[],eventTime:null,validFrom:null,validTo:null,stability:'stable',
@@ -28,6 +29,28 @@ test('module tab and reload list use exact existing files; API rejects missing s
   assert.equal((await f.routes.get('/memories')({})).code,'SCOPE_REQUIRED')
   assert.equal((await f.routes.get('/profiles')({})).code,'SCOPE_REQUIRED')
   assert.equal((await f.routes.get('/memory/add')({text:'不带范围'})).ok,false)
+})
+
+test('memory config hook cancels revoked event snapshots and exposes an explicit POST-only resume',async t=>{
+  const f=fixture(t),entered=deferred(),late=deferred(),events=new Map(),params=[]
+  const cfg={enabled:true,botQQ:'bot',allow:{groups:['1']},model:{provider:'mock',model:'offline'},memory:{enabled:true,extraction:{minMessages:1}}}
+  f.api.config=()=>cfg;f.api.on=(event,fn)=>events.set(event,fn)
+  f.api.dsh={llm:{stream:async function*(args){params.push(args);entered.resolve();await late.promise;yield {type:'text-delta',text:'{"facts":[],"summary":null}'};yield {type:'finish',reason:'stop'}}}}
+  const memory=memoryModule.setup(f.api)
+  f.storage.messages.ingest({account:S.account,chatId:S.chat,authorId:'alice',eventKind:'message',text:'喜欢喝茶'})
+  memory.enqueue(S)
+  const job=f.timers[0]();await entered.promise
+  const revoked=structuredClone(cfg);revoked.allow.groups=[]
+  events.get('config')(revoked)
+  await job;assert.equal(params[0].signal.aborted,true)
+  assert.equal(memory.status(S).recvSeq,0)
+  late.resolve();await settled()
+  cfg.allow.groups=[];await f.timers[0]();assert.equal(params.length,1)
+  const resume=f.routes.get('/memory/extraction/resume')
+  assert.equal((await resume({method:'GET',scope:S})).code,'METHOD_NOT_ALLOWED')
+  assert.equal((await resume({method:'POST',scope:S})).code,'SCOPE_DISABLED')
+  cfg.allow.groups=['1'];assert.equal((await resume({method:'POST',scope:S})).ok,true)
+  await memory.stop()
 })
 test('panel create/edit/evidence/audit API preserves scope and revision contracts',async t=>{
   const f=fixture(t);memoryModule.setup(f.api)

@@ -503,7 +503,7 @@ export class MemoryVectorService {
       return result.hits.filter(hit => map.get(hit.id)?.snapshotHash === hit.metadata.snapshotHash).map(hit => ({ id: map.get(hit.id).row.id, score: hit.score }))
     } catch (error) { degraded.push({ channel: role, reason: errorCode(error) }); return [] }
   }
-  async _retrieve({ scope: input, query = '', image, limit, kind = 'fact', category, subject, from, to, signal, requestId }) {
+  async _retrieve({ scope: input, query = '', image, limit, kind = 'fact', category, subject, from, to, signal, requestId, vectorBudgetMs }) {
     if (this.closed || this.closing) fail('INDEX_CLOSED', 'Vector service is closed')
     signal = signal ? AbortSignal.any([signal, this.lifecycleController.signal]) : this.lifecycleController.signal
     abortIfNeeded(signal)
@@ -516,7 +516,13 @@ export class MemoryVectorService {
     const channels = {}
     if (query.trim()) {
       channels.lexical = await this.journal._call('lexicalSearch', { items: docs.map(d => ({ id: d.row.id, text: d.content, tags: d.row.tags ?? [], aboutName: d.row.aboutName, at: d.row.eventTime ?? d.row.createdAt, importance: d.row.importance })), query, limit: this.config.retrieval.lexicalLimit })
-      channels.text = await this._vectorChannel('text', docs, scope, query, 'text', degraded, signal, requestId)
+      if (Number.isFinite(vectorBudgetMs)) {
+        const budget = new AbortController(); let timer
+        try {
+          const deadline = new Promise(resolve => { timer = setTimeout(() => { budget.abort(); degraded.push({ channel: 'text', reason: 'CONTEXT_BUDGET' }); resolve([]) }, vectorBudgetMs) })
+          channels.text = await Promise.race([this._vectorChannel('text', docs, scope, query, 'text', degraded, AbortSignal.any([signal, budget.signal]), requestId), deadline])
+        } finally { clearTimeout(timer); budget.abort() }
+      } else channels.text = await this._vectorChannel('text', docs, scope, query, 'text', degraded, signal, requestId)
       if (kind === 'image') channels.joint = await this._vectorChannel('joint', docs, scope, query, 'text', degraded, signal, requestId)
     }
     if (image !== undefined && kind === 'image') channels.visual = await this._vectorChannel(this.encoders.has('image') ? 'image' : 'joint', docs, scope, image, 'image', degraded, signal, requestId)
@@ -530,7 +536,9 @@ export class MemoryVectorService {
       if (hits.length >= (this.config.reranker.enabled && query.trim() ? Math.max(max, this.config.reranker.maxCandidates) : max)) break
     }
     let guarded = this.finalGuard(hits, { scope, kind })
-    if (this.config.reranker.enabled && query.trim() && guarded.length) {
+    // Foreground chat already has a hard vector budget; optional remote
+    // reranking belongs to explicit recall, not another wait on every turn.
+    if (this.config.reranker.enabled && query.trim() && guarded.length && !Number.isFinite(vectorBudgetMs)) {
       // Only currently authorized, current-revision documents leave the process for reranking.
       const candidates = guarded.slice(0, this.config.reranker.maxCandidates)
       try {
@@ -574,7 +582,7 @@ export class MemoryVectorService {
     this.contexts.set(sessionId, slot)
     if (input.isCurrent && !input.isCurrent()) return { ready: false, stale: true }
     let result
-    try { result = await this.recall({ scope, query: slot.query, limit: input.limit, signal: input.signal, requestId: input.requestId }) }
+    try { result = await this.recall({ scope, query: slot.query, limit: input.limit, signal: input.signal, requestId: input.requestId || input.requestIds?.[0], vectorBudgetMs: this.config.retrieval.contextTimeoutMs ?? 800 }) }
     catch (error) { if (input.signal?.aborted) return { ready: false, aborted: true }; throw error }
     if (this.closed || input.signal?.aborted || (input.isCurrent && !input.isCurrent()) || this.contexts.get(sessionId)?.ticket !== ticket) return { ready: false, stale: true }
     slot.hits = result.hits

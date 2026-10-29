@@ -46,10 +46,23 @@ test('string return stays compatible; one usage event has only whitelisted model
   assert.equal(event.status, 'success'); assert.equal(event.attempts, 1); assert.equal(event.usageComplete, true)
   assert.ok(Number.isInteger(event.duration) && event.duration >= 0)
   assert.equal(event.durationMs, event.duration)
-  assert.deepEqual(Object.keys(event).sort(), ['attempts', 'context', 'duration', 'durationMs', 'model', 'provider', 'role', 'status', 'tokens', 'usageComplete'])
+  assert.deepEqual(Object.keys(event).sort(), ['attempts', 'context', 'duration', 'durationMs', 'errorCode', 'finishReason', 'finishedAt', 'id', 'model', 'operationId', 'provider', 'role', 'sourceMessageIds', 'stage', 'startedAt', 'status', 'tokens', 'usageComplete'])
   assert.equal(/PRIVATE|SECRET|prompt|apiKey/.test(JSON.stringify(event)), false)
   assert.ok(Object.isFrozen(event) && Object.isFrozen(event.context) && Object.isFrozen(event.tokens))
   assert.ok(f.calls[0].signal instanceof AbortSignal)
+})
+
+test('usage carries the actual invocation clock and stable call identity across delayed completion',async t=>{
+  let clock=1000
+  t.mock.method(Date,'now',()=>clock)
+  const entered=deferred(),late=deferred()
+  const f=fixture(t,{stream:async function*(){entered.resolve();await late.promise;yield {type:'finish',reason:'stop'}}})
+  const job=f.run({callId:'known-call',operationId:'batch-1',stage:'extraction',sourceMessageIds:['message-1']})
+  await entered.promise;clock=9000;late.resolve();await job
+  const event=f.reports[0]
+  assert.equal(event.startedAt,1000);assert.equal(event.finishedAt,9000)
+  assert.equal(event.id,'known-call');assert.equal(event.operationId,'batch-1');assert.equal(event.stage,'extraction')
+  assert.deepEqual(event.sourceMessageIds,['message-1'])
 })
 
 test('usage snapshots replace within an attempt; malformed/private counters are not forwarded or invented', async t => {
@@ -302,9 +315,11 @@ test('memory wrapper forwards lifecycle signal/scope; host observer sees cancell
   await memory.stop(); assert.equal((await job).ok, false)
   await nextTurn()
   assert.equal(params[0].signal.aborted, true)
-  assert.equal(seen.length, 1); assert.equal(seen[0].status, 'aborted')
-  assert.deepEqual(seen[0].context, { chatId: S.chat, account: S.account, requestId: null, role: 'memory' })
+  const usage=seen.filter(e=>e.phase!=='business'),outcome=seen.find(e=>e.phase==='business')
+  assert.equal(usage.length, 1); assert.equal(usage[0].status, 'aborted')
+  assert.equal(outcome.id,usage[0].id);assert.equal(outcome.businessStatus,'discarded')
+  assert.deepEqual(usage[0].context, { chatId: S.chat, account: S.account, requestId: null, role: 'memory' })
   assert.equal(JSON.stringify(seen).includes('PRIVATE'), false)
-  late.resolve(); await nextTurn(); assert.equal(seen.length, 1)
+  late.resolve(); await nextTurn(); assert.equal(seen.length, 2)
   assert.equal(storage.db.get('SELECT recv_seq FROM memory_checkpoints').recv_seq, 0)
 })

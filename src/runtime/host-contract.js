@@ -38,6 +38,9 @@ export function probeAgent(agent) {
     { id: 'agent.inject', ok: fn(agent, 'inject'), need: false, what: '补充上下文但不另起一轮' },
     { id: 'agent.cancel', ok: fn(agent, 'cancel'), need: false, what: '取消正在跑的一轮（换人设、重开时）' },
     { id: 'agent.tools', ok: fn(agent?.ctx?.tools, 'register'), need: true, what: '按会话挂工具' },
+    { id: 'agent.tools.restrict', ok: fn(agent?.ctx?.tools, 'restrict') && fn(agent?.ctx?.tools, 'guard'), need: true, what: '群会话工具隔离及执行拦截' },
+    { id: 'agent.tools.presentation', ok: fn(agent?.ctx?.tools, 'presentAs') && fn(agent?.ctx, 'on'), need: true, what: '过滤群会话模型可见工具' },
+    { id: 'agent.runtimeContext', ok: fn(agent?.ctx?.systemPrompt, 'suppressRuntimeContext'), need: true, what: '隔离无关宿主上下文' },
     { id: 'agent.systemPrompt.section', ok: fn(agent?.ctx?.systemPrompt, 'section'), need: false, what: '按会话设置人格' },
     { id: 'agent.systemPrompt.context', ok: fn(agent?.ctx?.systemPrompt, 'context'), need: false, what: '按会话注入记忆和上下文' },
   ]
