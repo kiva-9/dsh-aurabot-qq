@@ -82,12 +82,14 @@ export const DEFAULTS = {
   },
   stickers: {
     enabled: true,
+    libraryScope: 'account', // 同一机器人账号共用图库；chat 保留按聊天隔离。
+    autoReview: true, // 新素材经完整模型分析明确 approve 后自动可用。
     autoChance: 0.35, // 文字回复自动配一张表情的概率
     collect: true, // 偷表情
     fromGroups: true,
     fromPrivate: true,
     maxPerHour: 20,
-    maxLibrary: 300, // 表情库最多存多少张（QQ 收藏表情有上限），超了就清掉最少用的
+    maxLibrary: 300, // 达到图库容量后暂停接收；不自动删除已审核素材。
     caption: true, // 用视觉模型起备注
   },
   // 本地接口：数据目录 local/ 里的脚本接管这几项（文件要在、开关要开）
@@ -216,6 +218,8 @@ export function normalize(raw) {
   c.voice.groupAutoChance = num(c.voice.groupAutoChance, 0, 0, 1)
   c.voice.autoMaxChars = num(c.voice.autoMaxChars, 80, 1, 500)
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
+  c.stickers.libraryScope = c.stickers.libraryScope === 'chat' ? 'chat' : 'account'
+  c.stickers.autoReview = bool(c.stickers.autoReview, true)
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
   c.stickers.maxLibrary = num(c.stickers.maxLibrary, 300, 20, 2000)
   c.speakUp.idleMinutes = num(c.speakUp.idleMinutes, 40, 5, 1440)
@@ -472,6 +476,7 @@ export function publicConfig(cfg) {
 
 /** 面板保存时：没改的密码字段（空串）保留原值。 */
 export function mergeFromPanel(current, incoming) {
+  if (incoming?.stickers?.libraryScope !== undefined && !['account', 'chat'].includes(incoming.stickers.libraryScope)) throw new Error('表情图库范围只能是 account 或 chat')
   if(incoming?.retrieval?.roles!==undefined) {
     if(!isObj(incoming.retrieval.roles))throw new Error('检索模型配置必须是对象')
     for(const [role,value] of Object.entries(incoming.retrieval.roles)) {

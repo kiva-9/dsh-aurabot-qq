@@ -340,7 +340,7 @@ test('api.reply 在群里以引用回复发出；api.isOwner 认得主人', asyn
   assert.ok(c.params.message.some((s) => s.type === 'reply' && String(s.data.id) === '4242'))
 })
 
-test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏后显式批准才同步', async (t) => {
+test('#3 表情：QQ 收藏无需聊天即可导入共用图库；识别失败仍待审，批准后跨聊天使用', async (t) => {
   const chatId = `private:${OWNER}`
   const query = `/stickers?chatId=${chatId}`
   const fixtures = new Map([1, 2].map((salt) => [`https://93.184.216.34/sticker-test/${salt}.png`, fakePng(200, 200, salt)]))
@@ -350,8 +350,7 @@ test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏�
     ? new Response(fixtures.get(String(url)), { headers: { 'content-type': 'image/png' } }) : realFetch(url, options))
   mock.state.favorites = [...fixtures.keys()].map((url, i) => ({ url, ...(i === 0 ? { emoji_id: 'existing-1' } : {}) }))
   const adds = mock.sent('add_custom_face').length
-  assert.equal((await fake.call('/sticker/import-qq', {})).json().ok, false, '导入必须指定聊天范围')
-  const r = (await fake.call('/sticker/import-qq', { chatId })).json()
+  const r = (await fake.call('/sticker/import-qq', {})).json()
   assert.equal(r.ok, true, r.message)
   assert.ok(r.taskId)
   const taskDone = (id) => until(async () => (await fake.call(`/stickers/queue?kind=import&chatId=${chatId}`)).json().items.find((task) => task.id === id && task.state === 'done'))
@@ -370,7 +369,7 @@ test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏�
   assert.equal(api.stickers.match(confirmed.id, chatId), null)
   assert.equal((await fake.call('/sticker/approve', { id: confirmed.id })).json().item.state, 'approved')
   assert.equal(api.stickers.match(confirmed.id, chatId).id, confirmed.id)
-  assert.equal(api.stickers.match(confirmed.id, 'group:777'), null)
+  assert.equal(api.stickers.match(confirmed.id, 'group:777').id, confirmed.id)
   assert.equal(mock.sent('add_custom_face').length, adds, '导入不向 QQ 重复添加')
 
   // 主人私聊发来一张表情，再让她存（模拟测试里调工具）
@@ -382,7 +381,7 @@ test('#3 表情：按范围排队导入 QQ 收藏、待审隔离；主人收藏�
   const saved = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_save_sticker', args: { name: '测试表情' } })).json()
   assert.equal(saved.ok, true, saved.message)
   assert.equal(saved.result.ok, true, saved.result.message)
-  assert.match(saved.result.message, /本地已保存.*待审核/)
+  assert.match(saved.result.message, /本地已保存.*识别通过后自动可用/)
   assert.equal(saved.result.item.state, 'pending')
   assert.equal(saved.result.item.scope.chat, chatId)
   assert.equal(api.stickers.segmentFor(saved.result.item, chatId), null)

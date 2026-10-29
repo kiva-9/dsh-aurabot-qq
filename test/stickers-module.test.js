@@ -6,12 +6,12 @@ import { join } from 'node:path'
 import { createStorage } from '../src/storage/index.js'
 import moduleDefinition from '../src/modules/stickers/index.js'
 
-test('管理路由完成上传、待审过滤、编辑、批准、停用、删除；聊天工具不能全局管理', async (t) => {
+test('chat兼容模式：管理路由保留聊天隔离、上传目标及逐项版本检查', async (t) => {
   const root = mkdtempSync(join(tmpdir(), 'aurabot-stickers-panel-'))
   const storage = createStorage({ file: join(root, 'main.db'), filesDir: join(root, 'assets') })
   const routes = new Map(), disposers = []
   let buildTools, owner = false
-  const cfg = { botQQ: '100', ownerQQ: '200', dryRun: true, stickers: { enabled: true, collect: true, caption: false } }
+  const cfg = { botQQ: '100', ownerQQ: '200', dryRun: true, stickers: { enabled: true, collect: true, caption: false, libraryScope: 'chat', autoReview: false } }
   const api = {
     config: () => cfg, log: { warn() {} },
     core: { storage, stickerLegacyDir: join(root, 'legacy'), onebot: { call: async () => assert.fail('试运行不调用 QQ') },

@@ -1279,20 +1279,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     const fileData = file => new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(new Error('文件读取失败'));r.readAsDataURL(file)})
-    const STICKER_STATES={pending:'待审核',approved:'已批准',rejected:'已拒绝',disabled:'已停用',deleted:'已删除',quarantined:'旧库隔离'}
+    const STICKER_STATES={pending:'待处理',approved:'可用',rejected:'已拒绝',disabled:'已停用',deleted:'已删除',quarantined:'旧库隔离'}
     const STICKER_ANALYSIS={pending:'未识别/待处理',done:'识别完成',failed:'识别失败',needs_frames:'自动取帧未完成',unknown:'识别结果未知',canceled:'识别已取消'}
     const STICKER_TASKS={collect:'收藏下载',analyze:'模型识别',sync:'QQ 收藏同步',import:'QQ 收藏导入'}
     const STICKER_TASK_STATES={queued:'排队中',running:'执行中',done:'完成',failed:'失败',unknown:'结果未知',canceled:'已取消'}
     const STICKER_QQ={unidentified:'已导入，缺少收藏 ID',idle:'未同步',queued:'待同步',running:'同步中',synced:'已确认收藏',failed:'同步失败',unknown:'同步结果未知',removed:'已移除收藏'}
+    const stickerChatParams=chatId=>chatId?{chatId}:{}
     function Stickers({ st, draft, setDraft, toast }) {
-      const f=useField(draft,setDraft),[scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''}),[working,setWorking]=useState(false)
-      return h('div',{className:'ab-grid'},h('fieldset',{disabled:working,style:{border:0,padding:0,margin:0,minWidth:0}},h(ScopePicker,{scope,onChange:setScope,persona:false})),
-        h(Card,{title:'表情设置',right:f.sw('stickers.enabled'),desc:'设置修改后需保存。收藏、模型识别、人工审核、聊天发送和 QQ 收藏同步分别记录。'},
-          h(Row,{label:'自动配表情概率',hint:'只从当前聊天有权使用的已批准素材中匹配；没有合适素材时不发'},f.percent('stickers.autoChance')),
-          h(Row,{label:'自动收藏表情'},f.sw('stickers.collect'),h('span',null,'群聊'),f.sw('stickers.fromGroups'),h('span',null,'私聊'),f.sw('stickers.fromPrivate')),
-          h(Row,{label:'每小时收藏上限'},f.num('stickers.maxPerHour',{min:0,max:200})),
-          h(Row,{label:'库容量',hint:'达到上限后停止接收，已有审核结果会保留'},f.num('stickers.maxLibrary',{min:20,max:2000})),
-          h(Row,{label:'模型描述图片',hint:'关闭后暂停识别队列；仍可人工填写标签和审核'},f.sw('stickers.caption'))),
+      const f=useField(draft,setDraft),[chatScope,setChatScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''}),[working,setWorking]=useState(false)
+      const perChat=st.config.stickers.libraryScope==='chat',scope={account:st.config.botQQ,chat:perChat?chatScope.chat:'',persona:''}
+      return h('div',{className:'ab-grid'},
+        h(Card,{title:perChat?'表情包（兼容聊天隔离）':'表情包 · 当前机器人共用图库',right:f.sw('stickers.enabled'),desc:'正常素材可自动收集、识别并加入可用图库，回复时自动匹配；平时只需查看、删除不想要的表情或处理失败。来源聊天用于溯源，账号共用模式不限制素材只能在来源聊天使用。设置修改后需保存。'},
+          h(Row,{label:'1. 自动收集表情',hint:'从已授权聊天收到的表情保存到本机图库'},f.sw('stickers.collect')),
+          h(Row,{label:'2. 自动识别内容',hint:'后台调用视觉模型生成描述和标签；关闭后暂停识别队列'},f.sw('stickers.caption')),
+          h(Row,{label:'3. 正常素材自动可用',hint:'识别通过的素材自动入可用库，无需逐张手工批准；异常或不确定的素材可在人工处理中核对'},f.sw('stickers.autoReview')),
+          h(Row,{label:'回复时自动配表情概率',hint:'从可用图库匹配；没有合适素材就不发。不会因此启用新的聊天。'},f.percent('stickers.autoChance')),
+          h('details',null,h('summary',null,'来源与高级设置'),
+            h(Row,{label:'允许收集的来源类型',hint:'仍受「权限」allow 限制，不是素材可用范围'},h('span',null,'群聊'),f.sw('stickers.fromGroups'),h('span',null,'私聊'),f.sw('stickers.fromPrivate')),
+            h(Row,{label:'图库使用方式',hint:'仅影响表情包；记忆和表达与黑话仍按聊天隔离。保存后生效。'},h(Select,{value:draft.stickers.libraryScope||'account',options:[{value:'account',label:'当前机器人账号共用（默认）'},{value:'chat',label:'按聊天隔离（兼容选项）'}],onChange:value=>setDraft(setPath(draft,'stickers.libraryScope',value))})),
+            h(Row,{label:'每小时收集上限'},f.num('stickers.maxPerHour',{min:0,max:200})),
+            h(Row,{label:'库容量',hint:'达到上限后暂停接收；已有素材保留'},f.num('stickers.maxLibrary',{min:20,max:2000})))),
+        perChat?h('details',null,h('summary',null,'兼容模式：选择聊天图库'),h('fieldset',{disabled:working,style:{border:0,padding:0,margin:0,minWidth:0}},h(ScopePicker,{st,scope:chatScope,onChange:setChatScope,persona:false}))):null,
         h(StickerWorkspace,{key:scope.account+':'+scope.chat,scope,toast,onWorking:setWorking}))
     }
     function StickerWorkspace({scope,toast,onWorking}) {
@@ -1302,11 +1309,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState(''),[actionError,setActionError]=useState(''),[name,setName]=useState(''),[sync,setSync]=useState(false),[pending,setPending]=useState(null)
       const seq=useRef(0),gate=useRef(false),pendingRef=useRef(null),scopeRef=useRef(scope),fileRef=useRef(null),alive=useRef(true),pageSize=30
       scopeRef.current={account:scope.account,chat:scope.chat}
-      const itemParams={chatId:scope.chat,status:state,query,analysis,animated,qq},taskParams={chatId:scope.chat,kind,state:taskState}
+      const itemParams={...stickerChatParams(scope.chat),status:state,query,analysis,animated,qq},taskParams={...stickerChatParams(scope.chat),kind,state:taskState}
       const load=useCallback(async()=>{
         const id=++seq.current;setLoading(true)
         try {
-          const [r,q,s]=await Promise.all([get('/stickers?'+new URLSearchParams({...itemParams,limit:pageSize,offset})),get('/stickers/queue?'+new URLSearchParams({...taskParams,limit:pageSize,offset:queueOffset})),get('/stickers/stats?'+new URLSearchParams({chatId:scope.chat}))])
+          const [r,q,s]=await Promise.all([get('/stickers?'+new URLSearchParams({...itemParams,limit:pageSize,offset})),get('/stickers/queue?'+new URLSearchParams({...taskParams,limit:pageSize,offset:queueOffset})),get('/stickers/stats?'+new URLSearchParams(stickerChatParams(scope.chat)))])
           if(id!==seq.current||!alive.current)return
           if(!r.ok||!q.ok||!s.ok)throw new Error(r.message||q.message||s.message||'读取表情库失败')
           setItems(r.items);setTotal(r.total);setQueue(q.items);setQueueTotal(q.total);setRuntime(q.runtime);setStats(s);setError('')
@@ -1326,7 +1333,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if(gate.current||pendingRef.current||!alive.current||loading||error)return
         // 独立复制并冻结请求；确认期间的刷新、旧事件或对象更新不能改变授权范围。
         const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value)}return value}
-        const snapshot=freeze(JSON.parse(JSON.stringify({...request,scope:{account:scope.account,chat:scope.chat},body:{...request.body,chatId:scope.chat}})))
+        const snapshot=freeze(JSON.parse(JSON.stringify({...request,scope:{account:scope.account,chat:scope.chat},body:{...request.body,...stickerChatParams(scope.chat)}})))
         pendingRef.current=snapshot;setPending(snapshot);setActionError('');onWorking(true)
       }
       const cancelConfirmation=request=>{
@@ -1340,7 +1347,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         else toast(r.message||'操作已登记')
         await load();return r
       }
-      const act=(path,body={},confirmation)=>confirmation?requestConfirmation({...confirmation,path,body,targets:[{id:body.id||body.taskId,version:body.expectedRevision!=null?'v'+body.expectedRevision:body.expectedState!=null?(STICKER_TASK_STATES[body.expectedState]||body.expectedState)+' · 尝试 '+body.expectedAttempts+' 次':'隔离项'}]}):run(()=>postAction(path,{...body,chatId:scope.chat}))
+      const act=(path,body={},confirmation)=>confirmation?requestConfirmation({...confirmation,path,body,targets:[{id:body.id||body.taskId,version:body.expectedRevision!=null?'v'+body.expectedRevision:body.expectedState!=null?(STICKER_TASK_STATES[body.expectedState]||body.expectedState)+' · 尝试 '+body.expectedAttempts+' 次':'隔离项'}]}):run(()=>postAction(path,{...body,...stickerChatParams(scope.chat)}))
       const changeIdle=(setter,value)=>{if(!gate.current&&!pendingRef.current&&alive.current)setter(value)}
       const resetFilter=(setter,value)=>{if(gate.current||pendingRef.current)return;setter(value);setOffset(0);setSelected({});setReviewed({});setResult(null)}
       const resetTasks=(setter,value)=>{if(gate.current||pendingRef.current)return;setter(value);setQueueOffset(0);setTasks({});setResult(null)}
@@ -1367,7 +1374,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const submitConfirmation=request=>{
         if(gate.current||!alive.current||pendingRef.current!==request)return
-        if(scopeRef.current.account!==request.scope.account||scopeRef.current.chat!==request.scope.chat){cancelConfirmation(request);reportActionError(new Error('聊天范围已改变，请重新选择操作'));return}
+        if(scopeRef.current.account!==request.scope.account||scopeRef.current.chat!==request.scope.chat){cancelConfirmation(request);reportActionError(new Error('图库范围已改变，请重新选择操作'));return}
         return run(async()=>{
           if(!request.batch)return postAction(request.path,request.body)
           const r=await post(request.path,request.body)
@@ -1384,7 +1391,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const results=[]
         for(const file of [...files]){
           let r
-          try{if(file.size>5*1024*1024)throw new Error('超过 5 MB');r=await post('/sticker/upload',{chatId:scope.chat,data:await fileData(file),name,toQQ:sync})}catch(e){r={ok:false,message:e.message}}
+          try{if(file.size>5*1024*1024)throw new Error('超过 5 MB');r=await post('/sticker/upload',{...stickerChatParams(scope.chat),data:await fileData(file),name,toQQ:sync})}catch(e){r={ok:false,message:e.message}}
           results.push({id:file.name,ok:r.ok,message:r.message||r.reason,state:r.item?.state})
         }
         const succeeded=results.filter(r=>r.ok).length
@@ -1401,31 +1408,33 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         pending?h(StickerConfirmation,{request:pending,busy,onConfirm:()=>submitConfirmation(pending),onCancel:()=>cancelConfirmation(pending)}):null,
         h(Card,{title:'当前生效状态',right:h(Btn,{small:true,disabled:held,onClick:()=>{if(!gate.current&&!pendingRef.current)return load()}},'刷新状态')},
           runtime?h('div',{className:'ab-note'},'表情模块 '+(runtime.enabled?'开启':'关闭')+' · 自动收藏 '+(runtime.collect?'开启':'关闭')+' · 模型识别 '+(runtime.caption?'开启':'关闭')+' · 自动批准 '+(runtime.autoReview?'开启':'关闭')+' · 自动配图概率 '+Math.round((runtime.autoChance||0)*100)+'%'+(runtime.dryRun?' · 试运行暂停 QQ 任务':'')):null,
-          stats?h('p',null,'本聊天：已批准 '+stats.approved+' · 待审 '+stats.pending+' · 拒绝 '+stats.rejected+' · 停用 '+stats.disabled+' · 已删除 '+stats.deleted+'。'+(stats.approved===0?'本聊天尚无已批准素材；只有获准共享的其他聊天素材可能可用。':'')):null,
-          h('p',{className:'ab-small ab-muted'},'本地批准不等于 QQ 收藏成功。GIF 重试识别会优先使用人工帧；未选帧时由本机自动取样最多 6 帧。取样仅覆盖部分内容，仍需查看完整动画后人工审核。'),
+          stats?h('p',null,(scope.chat?'当前聊天图库':'当前机器人共用图库')+'：可用 '+stats.approved+' · 待处理 '+stats.pending+' · 拒绝 '+stats.rejected+' · 停用 '+stats.disabled+' · 已删除 '+stats.deleted+'。'+(stats.approved===0?'自动识别通过后，可用素材会出现在这里。':'')):null,
+          h('p',{className:'ab-small ab-muted'},'自动流程：收集 → 识别审核 → 加入可用图库 → 回复时匹配。普通素材无需逐张操作；失败、动画或结果未知的任务可在下方处理。QQ 收藏同步是独立功能，不影响本机图库的概念。'),
           error||actionError?h('div',{className:'ab-note err',role:'alert'},error||actionError):null),
         result?h(Card,{title:'操作结果 · 成功 '+result.succeeded+' / 失败 '+result.failed,desc:'成功项已取消选择，失败项保留。版本或任务状态改变时请刷新并重新勾选。'},
           ...result.results.map((r,i)=>h('div',{key:r.id+':'+i,className:'ab-note'},(r.ok?'成功':'失败')+' · '+r.id+' · '+(r.message||r.code||STICKER_STATES[r.state]||STICKER_TASK_STATES[r.state]||r.state||'已登记')+(r.taskId?' · 任务 '+r.taskId:'')+(r.sync?' · QQ：'+(r.sync.reason||r.sync.message||STICKER_QQ[r.sync.state]||r.sync.state):'')))):null,
-        h(Card,{title:'表情库 · '+total+' 项'},
+        h(Card,{title:(scope.chat?'聊天图库':'机器人共用图库')+' · '+total+' 项',desc:scope.chat?'当前为兼容聊天隔离模式。':'这里展示当前机器人账号的全部表情；来源聊天只用于溯源，不是可用范围。'},
+          h('div',{className:'ab-flex',style:{margin:'12px 0',flexWrap:'wrap'}},h('input',{className:'ab-input wide','aria-label':'搜索表情',placeholder:'搜索名字、描述或标签',disabled:held,value:query,onChange:e=>resetFilter(setQuery,e.target.value)}),h(Btn,{small:true,kind:'danger',disabled:locked||!selectedCount,onClick:()=>performBatch('delete')},'批量删除本地')),
+          h('details',null,h('summary',null,'更多筛选与人工处理（通常无需操作）'),
           h('fieldset',{disabled:held,style:{border:0,padding:0,minWidth:0}},h('div',{className:'ab-flex',style:{flexWrap:'wrap'}},
             h(Select,{value:state,onChange:v=>resetFilter(setState,v),options:[{value:'all',label:'全部审核状态'},...Object.entries(STICKER_STATES).map(([value,label])=>({value,label}))]}),
             h(Select,{value:analysis,onChange:v=>resetFilter(setAnalysis,v),options:options(STICKER_ANALYSIS,'全部识别状态')}),h(Select,{value:animated,onChange:v=>resetFilter(setAnimated,v),options:[{value:'',label:'全部格式'},{value:'true',label:'GIF / 动画'},{value:'false',label:'静态图片'}]}),
-            h(Select,{value:qq,onChange:v=>resetFilter(setQQ,v),options:options(STICKER_QQ,'全部 QQ 状态')}),h('input',{className:'ab-input','aria-label':'搜索表情',placeholder:'名字、描述、OCR 或标签',value:query,onChange:e=>resetFilter(setQuery,e.target.value)}))),
+            h(Select,{value:qq,onChange:v=>resetFilter(setQQ,v),options:options(STICKER_QQ,'全部 QQ 状态')}))),
           state!=='quarantined'?controls():h('div',{className:'ab-note warn'},'隔离库没有可靠聊天来源，仅支持逐项分配或删除；不会纳入批量批准。'),
-          state!=='quarantined'?h('div',{className:'ab-flex',style:{flexWrap:'wrap'}},...Object.entries({approve:'批量通过',reject:'批量拒绝',disable:'批量停用',analysis_retry:'批量重试识别',delete:'批量删除本地'}).map(([action,label])=>h(Btn,{key:action,small:true,kind:action==='delete'?'danger':undefined,disabled:locked||!selectedCount,onClick:()=>performBatch(action)},label))):null,
-          h('div',{className:'ab-flex',style:{margin:'12px 0',flexWrap:'wrap'}},h('input',{className:'ab-input',placeholder:'上传备注（可不填）','aria-label':'上传表情备注',disabled:held,value:name,onChange:e=>changeIdle(setName,e.target.value)}),h('label',null,h('input',{type:'checkbox',checked:sync,disabled:held,onChange:e=>changeIdle(setSync,e.target.checked)}),' 审核通过后同步 QQ'),h('input',{type:'file',ref:fileRef,accept:'image/*',multiple:true,hidden:true,onChange:e=>{const files=[...e.target.files];e.target.value='';upload(files)}}),h(Btn,{small:true,disabled:locked,onClick:()=>fileRef.current.click()},'上传到本聊天'),h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/import-qq')},'导入 QQ 收藏')),
-          items.length?h('div',{className:'ab-grid'},...items.map(it=>state==='quarantined'?h('div',{key:it.id,className:'ab-card'},h('b',null,it.legacy?.name||it.id),h('p',null,it.error||it.reason),h('div',{className:'ab-flex'},h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/legacy/assign',{id:it.id})},'分配到本聊天待审区'),h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/legacy/delete',{id:it.id},{label:'删除隔离项',note:'删除此隔离项，并阻止自动收藏回来。'})},'删除隔离项'))):h(StickerCell,{key:it.id+':'+it.revision,it,chatId:scope.chat,act,busy:locked,selected:Boolean(selected[it.id]),onSelect:value=>toggle(setSelected,it,value),reviewed:reviewed[it.id]===it.revision,onReviewed:value=>changeIdle(setReviewed,old=>({...old,[it.id]:value?it.revision:0}))}))):h(Empty,{text:loading?'正在读取…':'当前范围没有符合条件的表情'}),pagination(total,offset,setOffset)),
-        h(Card,{title:'后台任务 · '+queueTotal+' 项',desc:'识别与 QQ 同步分别重试。unknown 必须逐项核对；动画会先在本机有界取帧，成功后才调用识别模型。'},
+          state!=='quarantined'?h('div',{className:'ab-flex',style:{flexWrap:'wrap'}},...Object.entries({approve:'批量通过',reject:'批量拒绝',disable:'批量停用',analysis_retry:'批量重试识别'}).map(([action,label])=>h(Btn,{key:action,small:true,disabled:locked||!selectedCount,onClick:()=>performBatch(action)},label))):null),
+          h('details',null,h('summary',null,'手动上传与 QQ 收藏导入'),h('div',{className:'ab-flex',style:{margin:'12px 0',flexWrap:'wrap'}},h('input',{className:'ab-input',placeholder:'上传备注（可不填）','aria-label':'上传表情备注',disabled:held,value:name,onChange:e=>changeIdle(setName,e.target.value)}),h('label',null,h('input',{type:'checkbox',checked:sync,disabled:held,onChange:e=>changeIdle(setSync,e.target.checked)}),' 审核通过后同步 QQ 收藏（可选）'),h('input',{type:'file',ref:fileRef,accept:'image/*',multiple:true,hidden:true,onChange:e=>{const files=[...e.target.files];e.target.value='';upload(files)}}),h(Btn,{small:true,disabled:locked,onClick:()=>fileRef.current.click()},'上传到图库'),h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/import-qq')},'导入 QQ 收藏'))),
+          items.length?h('div',{className:'ab-grid'},...items.map(it=>state==='quarantined'?h('div',{key:it.id,className:'ab-card'},h('b',null,it.legacy?.name||it.id),h('p',null,it.error||it.reason),h('div',{className:'ab-flex'},h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/legacy/assign',{id:it.id})},'导入图库待处理区'),h(Btn,{small:true,disabled:locked,onClick:()=>act('/sticker/legacy/delete',{id:it.id},{label:'删除隔离项',note:'删除此隔离项，并阻止自动收藏回来。'})},'删除隔离项'))):h(StickerCell,{key:it.id+':'+it.revision,it,chatId:scope.chat,act,busy:locked,selected:Boolean(selected[it.id]),onSelect:value=>toggle(setSelected,it,value),reviewed:reviewed[it.id]===it.revision,onReviewed:value=>changeIdle(setReviewed,old=>({...old,[it.id]:value?it.revision:0}))}))):h(Empty,{text:loading?'正在读取…':'图库中没有符合条件的表情；开启自动流程后，收到的正常表情会自动加入'}),pagination(total,offset,setOffset)),
+        h('details',null,h('summary',null,'处理失败与后台任务 · '+queueTotal+' 项'),h(Card,{title:'后台任务',desc:'默认显示识别失败。识别与 QQ 同步分别重试；结果未知须先核对。动画先在本机取样再识别，取样仅覆盖部分内容。'},
           h('fieldset',{disabled:held,style:{border:0,padding:0}},h('div',{className:'ab-flex'},h(Select,{value:kind,onChange:v=>resetTasks(setKind,v),options:Object.entries(STICKER_TASKS).map(([value,label])=>({value,label}))}),h(Select,{value:taskState,onChange:v=>resetTasks(setTaskState,v),options:options(STICKER_TASK_STATES,'全部任务状态')}))),
           controls(true),h(Btn,{small:true,disabled:locked||!taskCount,onClick:()=>performBatch('task_retry',true)},'批量重试'+STICKER_TASKS[kind]+'（仅明确失败）'),
-          ...queue.map(t=>h(StickerTask,{key:t.id+':'+t.state+':'+t.attempts,t,act,busy:locked,selected:Boolean(tasks[t.id]),onSelect:value=>toggle(setTasks,t,value)})),!queue.length?h(Empty,{text:'此筛选下暂无任务'}):null,pagination(queueTotal,queueOffset,setQueueOffset)))
+          ...queue.map(t=>h(StickerTask,{key:t.id+':'+t.state+':'+t.attempts,t,act,busy:locked,selected:Boolean(tasks[t.id]),onSelect:value=>toggle(setTasks,t,value)})),!queue.length?h(Empty,{text:'此筛选下暂无任务'}):null,pagination(queueTotal,queueOffset,setQueueOffset))))
     }
     function StickerConfirmation({request,busy,onConfirm,onCancel}) {
       const panelRef=useRef(null),cancelRef=useRef(null)
       useEffect(()=>{panelRef.current?.scrollIntoView?.({block:'nearest'});cancelRef.current?.focus?.({preventScroll:true})},[request])
       return h('section',{className:'ab-card',role:'alertdialog','aria-modal':false,'aria-label':'表情操作确认','aria-describedby':'sticker-confirm-note','aria-busy':busy,ref:panelRef,onKeyDown:e=>{if(e.key==='Escape'&&!busy){e.preventDefault();e.stopPropagation();onCancel()}}},
         h('h3',null,'确认'+request.label+' · '+request.targets.length+' 项'),
-        h('p',{className:'ab-small'},'机器人 '+request.scope.account+' · 聊天 '+request.scope.chat),
+        h('p',{className:'ab-small'},'机器人 '+request.scope.account+(request.scope.chat?' · 聊天 '+request.scope.chat:' · 账号共用图库')),
         h('p',{id:'sticker-confirm-note',className:'ab-note warn'},request.note),
         request.body.emojiId?h('p',null,'QQ 收藏 ID：'+request.body.emojiId):null,request.body.reason?h('p',null,'核对 / 审核说明：'+request.body.reason):null,
         h('details',null,h('summary',null,'本次操作的条目与版本（已固定）'),h('ul',{style:{maxHeight:180,overflow:'auto',overflowWrap:'anywhere'}},...request.targets.map(it=>h('li',{key:it.id},(it.name?it.name+' · ':'')+it.id+' · '+it.version)))),
@@ -1438,16 +1447,17 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const body={id:it.id,expectedRevision:it.revision,reason,reviewedOriginal:reviewed},change=(k,v)=>setDraft({...draft,[k]:v}),locked=busy||it.state==='deleted'
       const save=()=>act('/sticker/edit',{...body,patch:Object.fromEntries(Object.entries(draft).map(([k,v])=>[k,['tags','emotions','suitable','unsuitable'].includes(k)?v.split(/[、,，\n]/).map(x=>x.trim()).filter(Boolean):v]))})
       return h('div',{className:'ab-card'},h('label',null,h('input',{type:'checkbox',disabled:busy,checked:selected,onChange:e=>onSelect(e.target.checked),'aria-label':'选择表情 '+(it.name||it.id)}),' 选择此项'),
-        h('details',null,h('summary',{className:'ab-flex'},h('img',{src:API+'/sticker/image?'+new URLSearchParams({id:it.id,chatId}),alt:it.name||'待审表情',loading:'lazy',style:{width:72,height:72,objectFit:'contain',borderRadius:8}}),h('div',{className:'body'},h('b',null,it.name||'未命名表情'),h('div',{className:'ab-muted ab-small'},STICKER_STATES[it.state]+' · v'+it.revision+' · '+(it.animated?'动画':'静态')+' · '+(STICKER_ANALYSIS[it.analysis?.state]||it.analysis?.state)+' · QQ '+(STICKER_QQ[it.qq?.state]||it.qq?.state)))),
-          h('a',{href:API+'/sticker/image?'+new URLSearchParams({id:it.id,chatId}),target:'_blank',rel:'noreferrer'},'打开完整原图 / 动画'),
+        h(Btn,{small:true,kind:'danger',disabled:locked,onClick:()=>act('/sticker/delete',{...body,fromQQ:false},{label:'删除本地条目',note:'删除本地表情，并阻止自动收藏回来；不会删除 QQ 收藏。'})},'删除本地条目'),
+        h('details',null,h('summary',{className:'ab-flex'},h('img',{src:API+'/sticker/image?'+new URLSearchParams({id:it.id,...stickerChatParams(chatId)}),alt:it.name||'表情',loading:'lazy',style:{width:72,height:72,objectFit:'contain',borderRadius:8}}),h('div',{className:'body'},h('b',null,it.name||'未命名表情'),h('div',{className:'ab-muted ab-small'},STICKER_STATES[it.state]+' · '+(it.analysis?.evidence?.singleFrame?'单帧图片':it.animated?'动画':'静态')+' · '+(STICKER_ANALYSIS[it.analysis?.state]||it.analysis?.state||'待识别')),h('div',{className:'ab-muted ab-small'},'来源：'+(it.sourceLabel||it.sourceChatId||it.source?.scope?.chat||it.scope?.chat||'手动上传 / 导入')+'（仅溯源）'))),
+          h('a',{href:API+'/sticker/image?'+new URLSearchParams({id:it.id,...stickerChatParams(chatId)}),target:'_blank',rel:'noreferrer'},'打开完整原图 / 动画'),
           ...[['name','名字'],['description','画面描述'],['ocr','图中文字'],['tags','标签'],['emotions','情绪'],['suitable','适用情境'],['unsuitable','不适用情境']].map(([key,label])=>h(Row,{key,label},h('input',{className:'ab-input wide',value:draft[key],disabled:locked,'aria-label':'表情'+label,onChange:e=>change(key,e.target.value)}))),
           h(Btn,{small:true,disabled:locked,onClick:save},'保存表情信息'),
           it.analysis?.evidence?.coverage==='sampled_partial'?h('p',{className:'ab-note warn'},'自动取样 '+(it.frames?.length||0)+' 帧，仅为部分动画内容；不能代表完整动画。'):null,it.analysis?.error?h('p',{className:'ab-note warn'},'识别：'+it.analysis.error):null,it.qq?.error?h('p',{className:'ab-note warn'},'QQ 同步：'+it.qq.error):null,
           it.qq?.state==='unidentified'?h('div',{className:'ab-flex'},h('input',{className:'ab-input',placeholder:'已核对的 QQ 收藏 ID','aria-label':'已有 QQ 收藏 ID',value:qqId,disabled:locked,onChange:e=>setQQId(e.target.value)}),h(Btn,{small:true,disabled:locked||!qqId.trim(),onClick:()=>act('/sticker/sync/bind',{...body,emojiId:qqId.trim(),confirmedExisting:true},{label:'绑定已有 QQ 收藏',note:'请确认已核对此 ID 对应这张素材的现有 QQ 收藏。这里只登记绑定，不会新建收藏。'})},'绑定已有 QQ 收藏')):null,
-          h(Row,{label:'审核说明'},h('input',{className:'ab-input wide',value:reason,disabled:locked,'aria-label':'表情审核说明',onChange:e=>setReason(e.target.value)})),
+          h('details',null,h('summary',null,'人工处理（异常、动画或停用）'),h(Row,{label:'审核说明'},h('input',{className:'ab-input wide',value:reason,disabled:locked,'aria-label':'表情审核说明',onChange:e=>setReason(e.target.value)})),
           it.animated?h('label',null,h('input',{type:'checkbox',disabled:locked,checked:reviewed,onChange:e=>onReviewed(e.target.checked)}),' 我已查看这张完整动画，确认适用内容（批量审核也需此确认）'):null,
-          h('div',{className:'ab-flex',style:{marginTop:10,flexWrap:'wrap'}},...[['approve','批准使用'],['reject','拒绝'],['disable','停用'],['analysis/retry','重新识别'],['sync','同步 QQ 收藏']].map(([path,label])=>h(Btn,{key:path,small:true,disabled:locked||(path==='approve'&&it.animated&&!reviewed)||(path==='analysis/retry'&&it.analysis?.state==='unknown')||(path==='sync'&&(it.state!=='approved'||['unknown','unidentified'].includes(it.qq?.state))),onClick:()=>act('/sticker/'+path,body)},label)),h(Btn,{small:true,kind:'danger',disabled:locked,onClick:()=>act('/sticker/delete',{...body,fromQQ:false},{label:'删除本地条目',note:'删除本地表情，并阻止自动收藏回来；不会删除 QQ 收藏。'})},'删除本地条目')),
-          it.animated?h('details',{style:{marginTop:12}},h('summary',null,'动画关键帧（辅助识别）'),h('div',{className:'ab-note'},'关键帧不能代替完整动画审核。没有人工帧时重试识别会自动取样；上传可替换自动帧并重新排队识别。'),h('input',{className:'ab-input sm',type:'number',min:0,value:frameAt,disabled:locked,'aria-label':'关键帧时间毫秒',onChange:e=>setFrameAt(Number(e.target.value))}),h('input',{type:'file',ref:fileRef,accept:'image/png,image/jpeg,image/webp',hidden:true,onChange:async e=>{const file=e.target.files[0];e.target.value='';if(file)await act('/sticker/frames',{...body,frames:[{atMs:frameAt,data:await fileData(file)}]})}}),h(Btn,{small:true,disabled:locked||it.analysis?.state==='unknown',onClick:()=>fileRef.current.click()},'上传关键帧'),...(it.frames||[]).map((frame,i)=>h('img',{key:i,src:API+'/sticker/image?'+new URLSearchParams({id:it.id,chatId,frame:i}),alt:(frame.selection==='sampled'?'自动取样（部分）':'人工关键帧')+' '+frame.atMs+'ms',style:{width:100,objectFit:'contain'}}))):null,
+          h('div',{className:'ab-flex',style:{marginTop:10,flexWrap:'wrap'}},...[['approve','批准使用'],['reject','拒绝'],['disable','停用'],['analysis/retry','重新识别'],['sync','同步 QQ 收藏']].map(([path,label])=>h(Btn,{key:path,small:true,disabled:locked||(path==='approve'&&it.animated&&!reviewed)||(path==='analysis/retry'&&it.analysis?.state==='unknown')||(path==='sync'&&(it.state!=='approved'||['unknown','unidentified'].includes(it.qq?.state))),onClick:()=>act('/sticker/'+path,body)},label)))),
+          it.animated?h('details',{style:{marginTop:12}},h('summary',null,'动画关键帧（辅助识别）'),h('div',{className:'ab-note'},'关键帧不能代替完整动画审核。没有人工帧时重试识别会自动取样；上传可替换自动帧并重新排队识别。'),h('input',{className:'ab-input sm',type:'number',min:0,value:frameAt,disabled:locked,'aria-label':'关键帧时间毫秒',onChange:e=>setFrameAt(Number(e.target.value))}),h('input',{type:'file',ref:fileRef,accept:'image/png,image/jpeg,image/webp',hidden:true,onChange:async e=>{const file=e.target.files[0];e.target.value='';if(file)await act('/sticker/frames',{...body,frames:[{atMs:frameAt,data:await fileData(file)}]})}}),h(Btn,{small:true,disabled:locked||it.analysis?.state==='unknown',onClick:()=>fileRef.current.click()},'上传关键帧'),...(it.frames||[]).map((frame,i)=>h('img',{key:i,src:API+'/sticker/image?'+new URLSearchParams({id:it.id,...stickerChatParams(chatId),frame:i}),alt:(frame.selection==='sampled'?'自动取样（部分）':'人工关键帧')+' '+frame.atMs+'ms',style:{width:100,objectFit:'contain'}}))):null,
           h('details',{style:{marginTop:10}},h('summary',null,'来源与审核记录'),h('pre',{style:{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}},JSON.stringify({scope:it.scope,source:it.source,review:it.review,analysis:it.analysis,qq:it.qq},null,2)))))
     }
     function StickerTask({t,act,busy,selected,onSelect}) {
@@ -1464,7 +1474,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     function SpeakUp({ st, draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '主动搭话', right: f.sw('speakUp.enabled'), desc: '只在和你的私聊里：你一阵子没理她，她会主动来找你说一句——每次由头不一样（分享小事、接着上次的话题、想起你的事、按时间问候……），内容是她现想的，不是模板。群里不会这样。' },
+        h(Card, { title: '主动搭话（主人私聊）', right: f.sw('speakUp.enabled'), desc: '发送目标固定为配置中主人的私聊，与其他页面的查看范围无关，不向群聊主动搭话。内容按当时情境生成。' },
+          h(Row, { label: '实际发送目标', hint: '由已保存的主人 QQ（ownerQQ）决定' }, h('span', null, '主人私聊 · private:' + st.config.ownerQQ)),
           h(Row, { label: '追问', hint: '她问了你一句、你 15~40 分钟没回，偶尔轻轻追一句（「人呢」之类），每句最多追一次' }, f.sw('speakUp.nudge')),
           h(Row, { label: '多久没聊才找你' }, f.num('speakUp.idleMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
           h(Row, { label: '两次之间隔', hint: '在这个范围里随机' }, f.num('speakUp.minIntervalMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '到'), f.num('speakUp.maxIntervalMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
@@ -1473,7 +1484,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-flex', style: { marginTop: 10 } },
             h('span', { className: 'ab-muted ab-small' }, '今天已经找过你 ' + (st.speakUp.count || 0) + ' 次'),
             h('div', { className: 'ab-spacer' }),
-            h(Btn, { small: true, onClick: async () => { const r = await post('/speakup/fire'); toast(r.message) } }, '现在就让她来找我')),
+            h(Btn, { small: true, onClick: async () => { const r = await post('/speakup/fire'); toast(r.message) } }, '立即向主人私聊搭话')),
         ),
       )
     }
@@ -1531,15 +1542,16 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     function SearchPanel({ st, draft, setDraft, toast, go }) {
-      const f = useField(draft, setDraft), [scope, setScope] = useState({account: st.config.botQQ, chat: 'private:' + st.config.ownerQQ, persona: ''})
+      const f = useField(draft, setDraft), [scope, setScope, isCurrent] = useViewingScope({account: st.config.botQQ, chat: 'private:' + st.config.ownerQQ, persona: ''})
       const [query, setQuery] = useState(''), [urls, setUrls] = useState(''), [entity, setEntity] = useState({name:'',work:'',version:'',kind:'fictional'})
       const [result, setResult] = useState(null), [history, setHistory] = useState([]), [busy, setBusy] = useState(false), [error, setError] = useState('')
       const dirty = JSON.stringify(draft.search) !== JSON.stringify(st.config.search)
-      const load = useCallback(async()=>{const r=await get('/search/history?chatId='+encodeURIComponent(scope.chat));if(r.ok)setHistory(r.list);else setError(r.message)},[scope.chat])
+      const load = useCallback(async()=>{if(!isCurrent())return;const r=await get('/search/history?chatId='+encodeURIComponent(scope.chat));if(!isCurrent())return;if(r.ok)setHistory(r.list);else setError(r.message)},[scope])
       useEffect(()=>{setResult(null);setError('');load()},[load])
       const run = async(path,body)=>{
+        if(!isCurrent())return
         setBusy(true);setError('')
-        try { const r=await post(path,{...body,chatId:scope.chat});if(!r.ok){setError(r.message);return r};if(r.result)setResult(r.result);await load();return r } finally {setBusy(false)}
+        try { const r=await post(path,{...body,chatId:scope.chat});if(!isCurrent())return;if(!r.ok){setError(r.message);return r};if(r.result)setResult(r.result);await load();if(isCurrent())return r } finally {if(isCurrent())setBusy(false)}
       }
       return h('div',{className:'ab-grid'},
         h(Card,{title:'网页与参考图搜索',right:f.sw('search.enabled'),desc:'搜索保留来源和抓取时间。摘要、原文和参考图审核结果分别显示；网页内容不会自动成为记忆。设置修改后先保存。'},
@@ -1548,7 +1560,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row,{label:'每次结果数'},f.range('search.maxResults',1,20,1,v=>v+' 条')),
           h(Row,{label:'每日请求上限',hint:'包括搜索、提取与来源验证请求'},f.num('search.maxRequestsPerDay',{min:1,max:10000})),
           h(Row,{label:'视觉审核参考图',hint:'额外使用视觉模型检查对应性、清晰度、遮挡、拼图和水印'},f.sw('search.visionReview'))),
-        h(ScopePicker,{scope,persona:false,onChange:setScope}),
+        h(ScopePicker,{st,scope,persona:false,onChange:next=>{setScope(next);setResult(null);setHistory([]);setError('');setBusy(false);setQuery('');setUrls('');setEntity({name:'',work:'',version:'',kind:'fictional'})}}),
         h(Card,{title:'搜索工作台',desc:'先查资料，或填写角色与作品寻找参考图。每个请求最多两轮搜索；仍有歧义时保留待确认。'},
           dirty?h('div',{className:'ab-note warn'},'搜索设置尚未保存，保存后再测试。'):null,
           error?h('div',{className:'ab-note err',role:'alert'},error):null,
@@ -1568,7 +1580,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             try {sessionStorage.setItem('aurabot.imageReference',JSON.stringify({account:scope.account,chatId:scope.chat,reference:r.reference}))} catch {toast('浏览器不能暂存参考图','err');return};go('imagegen')
           }})),
           ...(result.failures||[]).map((failure,i)=>h('div',{key:i,className:'ab-note warn'},(failure.url||'')+' · '+(failure.message||failure.code)))):null,
-        h(Card,{title:'本聊天搜索记录',right:h(Btn,{small:true,onClick:load},'刷新记录')},history.length?history.map(item=>h('div',{className:'ab-li',key:item.id},h('div',{className:'body'},h('b',null,item.query||item.type),h('div',{className:'ab-small ab-muted'},new Date(item.createdAt).toLocaleString()+' · '+item.status+' · 来源 '+item.sourceCount+' · 候选 '+item.candidateCount)),h(Btn,{small:true,onClick:async()=>{const r=await get('/search/result?'+new URLSearchParams({chatId:scope.chat,id:item.id}));if(r.ok)setResult(r.result);else toast(r.message,'err')}},'查看'))):h(Empty,{text:'还没有搜索记录'})))
+        h(Card,{title:'本聊天搜索记录',right:h(Btn,{small:true,onClick:load},'刷新记录')},history.length?history.map(item=>h('div',{className:'ab-li',key:item.id},h('div',{className:'body'},h('b',null,item.query||item.type),h('div',{className:'ab-small ab-muted'},new Date(item.createdAt).toLocaleString()+' · '+item.status+' · 来源 '+item.sourceCount+' · 候选 '+item.candidateCount)),h(Btn,{small:true,onClick:async()=>{if(!isCurrent())return;const r=await get('/search/result?'+new URLSearchParams({chatId:scope.chat,id:item.id}));if(!isCurrent())return;if(r.ok)setResult(r.result);else toast(r.message,'err')}},'查看'))):h(Empty,{text:'还没有搜索记录'})))
     }
     function ReferenceCandidate({ scope, resultId, candidate, busy, run, onUse }) {
       const [review,setReview]=useState({matchesTarget:false,clear:false,unobstructed:false,singleSubject:false,noWatermark:false,reason:''})
@@ -1593,12 +1605,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     function Mood({ st, draft, setDraft, toast }) {
-      const f=useField(draft,setDraft),[scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:st.config.persona.current}),[mood,setMood]=useState(null),[delta,setDelta]=useState(0),[reason,setReason]=useState(''),[error,setError]=useState('')
-      const load=useCallback(async()=>{const r=await get('/mood/state?'+memoryQuery(scope));if(r.ok){setMood(r);setError('')}else setError(r.message)},[scope])
+      const f=useField(draft,setDraft),[scope,setScope,isCurrent]=useViewingScope({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:st.config.persona.current}),[mood,setMood]=useState(null),[delta,setDelta]=useState(0),[reason,setReason]=useState(''),[error,setError]=useState('')
+      const load=useCallback(async()=>{if(!isCurrent())return;const r=await get('/mood/state?'+memoryQuery(scope));if(!isCurrent())return;if(r.ok){setMood(r);setError('')}else setError(r.message)},[scope])
       useEffect(()=>{setMood(null);load()},[load])
-      const act=async(path,body)=>{const r=await post(path,{...scope,expectedRevision:mood?.revision,...body});if(!r.ok)return toast(r.message,'err');toast('已保存');await load()}
-      return h('div',{className:'ab-grid'},h(ScopePicker,{scope,onChange:setScope,personaHint:'心情按人设隔离，填写所选聊天当前使用的人设 ID'}),
-        h(Card,{title:'心情设置',right:f.sw('mood.enabled'),desc:'每个聊天和人设分别保存。情绪影响语气；明确请求和已接受的任务照常处理。'},
+      const act=async(path,body)=>{if(!isCurrent())return;const r=await post(path,{...scope,expectedRevision:mood?.revision,...body});if(!isCurrent())return;if(!r.ok)return toast(r.message,'err');toast('已保存');await load()}
+      return h('div',{className:'ab-grid'},h(ScopePicker,{st,scope,requirePersona:true,onChange:next=>{setScope(next);setMood(null);setDelta(0);setReason('');setError('')}}),
+        h(Card,{title:'心情设置（全局）',right:f.sw('mood.enabled'),desc:'本卡开关和参数全局生效；下方心情记录按聊天和人设分别保存。情绪影响语气；明确请求和已接受的任务照常处理。'},
           h(Row,{label:'抽象基线'},f.range('mood.baseline',30,80,1,v=>String(v))),
           h(Row,{label:'恢复速度',hint:'情绪半衰期'},f.range('mood.halfLifeHours',0.5,24,0.5,v=>v+' 小时')),
           h(Row,{label:'模型判断情绪',hint:'开启后受调用间隔和后台预算限制'},f.sw('mood.judge'))),
@@ -1609,12 +1621,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     const LEARNING_STATES={pending:'待审核',approved:'已批准',disabled:'已停用',deleted:'已删除'}
     function Learning({st,draft,setDraft,toast}) {
-      const f=useField(draft,setDraft),[scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:st.config.persona.current}),[kind,setKind]=useState('expression'),[status,setStatus]=useState(''),[items,setItems]=useState([]),[queues,setQueues]=useState([]),[budget,setBudget]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[creating,setCreating]=useState(false)
-      const seq=useRef(0),load=useCallback(async()=>{const id=++seq.current;const [r,q]=await Promise.all([get('/learning/items?'+memoryQuery(scope,{kind,status,includeDeleted:'true'})),get('/learning/status?'+memoryQuery(scope))]);if(id!==seq.current)return;if(!r.ok||!q.ok){setError(r.message||q.message);return}setItems(r.items);setQueues(q.queues);setBudget(q.budget);setError('')},[scope,kind,status])
+      const f=useField(draft,setDraft),[scope,setScope,isCurrent]=useViewingScope({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:st.config.persona.current}),[kind,setKind]=useState('expression'),[status,setStatus]=useState(''),[items,setItems]=useState([]),[queues,setQueues]=useState([]),[budget,setBudget]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[creating,setCreating]=useState(false)
+      const seq=useRef(0),load=useCallback(async()=>{if(!isCurrent())return;const id=++seq.current;const [r,q]=await Promise.all([get('/learning/items?'+memoryQuery(scope,{kind,status,includeDeleted:'true'})),get('/learning/status?'+memoryQuery(scope))]);if(id!==seq.current||!isCurrent())return;if(!r.ok||!q.ok){setError(r.message||q.message);return}setItems(r.items);setQueues(q.queues);setBudget(q.budget);setError('')},[scope,kind,status])
       useEffect(()=>{setItems([]);setCreating(false);load();return()=>{seq.current++}},[load])
-      const act=async(path,body={})=>{setBusy(true);try{const r=await post('/learning/'+path,{...scope,...body});if(!r.ok)toast(r.message||r.code,'err');else{toast(r.message||'已保存');await load()}return r}catch(e){toast(e.message,'err')}finally{setBusy(false)}}
-      return h('div',{className:'ab-grid'},h(ScopePicker,{scope,onChange:setScope,personaHint:'表达与词典绑定聊天和人设；填写当前人设 ID'}),
-        h(Card,{title:'表达与黑话设置',right:f.sw('learning.enabled'),desc:'学习只生成待审候选；批准后才允许进入上下文。原始消息必须可见且仍然有效。'},
+      const act=async(path,body={})=>{if(!isCurrent())return;setBusy(true);try{const r=await post('/learning/'+path,{...scope,...body});if(!isCurrent())return;if(!r.ok)toast(r.message||r.code,'err');else{toast(r.message||'已保存');await load()}if(isCurrent())return r}catch(e){if(isCurrent())toast(e.message,'err')}finally{if(isCurrent())setBusy(false)}}
+      return h('div',{className:'ab-grid'},h(ScopePicker,{st,scope,requirePersona:true,onChange:next=>{setScope(next);seq.current++;setItems([]);setQueues([]);setBudget(null);setCreating(false);setError('');setBusy(false)}}),
+        h(Card,{title:'表达与黑话设置（全局）',right:f.sw('learning.enabled'),desc:'本卡总开关、自动学习和使用开关全局生效，不随查看范围切换；启用聊天仍由「权限」allow 控制。学习只生成待审候选；批准后才允许使用有效来源。修改后点页面底部保存。'},
           h(Row,{label:'自动学习'},f.sw('learning.learnEnabled')),h(Row,{label:'使用已批准内容'},f.sw('learning.useEnabled')),
           h(Row,{label:'表达习惯'},h('span',null,'学习'),f.sw('learning.learnExpressions'),h('span',null,'使用'),f.sw('learning.useExpressions')),
           h(Row,{label:'群内黑话'},h('span',null,'学习'),f.sw('learning.learnJargon'),h('span',null,'使用'),f.sw('learning.useJargon')),
@@ -1625,8 +1637,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row,{label:'至少不同说话者'},f.num('learning.minAuthors',{min:2,max:10})),h(Row,{label:'至少证据条数'},f.num('learning.minEvidence',{min:2,max:20}))),
         h(Card,{title:'审核工作台',right:h(Btn,{small:true,disabled:busy,onClick:load},'刷新')},error?h('div',{className:'ab-note err',role:'alert'},error):null,
           h('div',{className:'ab-flex'},h(Select,{value:kind,onChange:setKind,options:[{value:'expression',label:'表达习惯'},{value:'jargon',label:'黑话词典'}]}),h(Select,{value:status,onChange:setStatus,options:[{value:'',label:'全部状态'},...Object.entries(LEARNING_STATES).map(([value,label])=>({value,label}))]}),h(Btn,{small:true,disabled:busy,onClick:()=>setCreating(!creating)},creating?'取消新增':'新增有证据的条目'),h(Btn,{small:true,disabled:busy||JSON.stringify(draft.learning)!==JSON.stringify(st.config.learning),onClick:()=>act('run',{kind})},'提炼当前队列')),
-          creating?h(LearningEditor,{kind,scope,busy,onSave:async data=>{const r=await act('create',{kind,data});if(r?.ok)setCreating(false)}}):null,
-          ...items.map(item=>h(LearningRecord,{key:item.id+':'+item.revision,item,scope,act,busy,toast})),!items.length?h(Empty,{text:'当前范围没有条目；消息积累后可学习，也可手工引用证据建立待审条目'}):null),
+          creating?h(LearningEditor,{key:JSON.stringify(scope)+':'+kind,kind,scope,busy,onSave:async data=>{const r=await act('create',{kind,data});if(r?.ok&&isCurrent())setCreating(false)}}):null,
+          ...items.map(item=>h(LearningRecord,{key:JSON.stringify(scope)+':'+item.id+':'+item.revision,item,scope,act,busy,toast})),!items.length?h(Empty,{text:'当前范围没有条目；消息积累后可学习，也可手工引用证据建立待审条目'}):null),
         h(Card,{title:'提炼进度'},...queues.map(q=>h('div',{key:q.kind,className:'ab-card',style:{marginTop:8}},h('b',null,q.kind==='expression'?'表达习惯':'黑话词典'),h(BackgroundProgress,{state:q,busy,onResume:()=>act('resume',{kind:q.kind})}),h('p',null,(q.running?'处理中':'等待下一批')+' · 待处理 '+q.queued+' 条 · 已处理到消息序号 '+q.processedSeq),q.lastAttemptAt?h('div',{className:'ab-muted ab-small'},'上次尝试 '+new Date(q.lastAttemptAt).toLocaleString()+' · '+({done:'完成',no_info:'没有新信息',failed:'失败待重试',stale:'中断待恢复',running:'处理中'}[q.outcome]||'尚未运行')):null,q.lastError?h('div',{className:'ab-note err'},q.lastError):null,q.overflow?h('div',{className:'ab-note warn'},'队列容量不足；仍保留消息区间 '+q.overflow.from+'–'+q.overflow.to+' 等待补入'):null,q.nextAttemptAt>Date.now()?h('p',{className:'ab-muted ab-small'},'下次可尝试 '+new Date(q.nextAttemptAt).toLocaleString()):null))))
     }
     function LearningEditor({kind,scope,item,busy,onSave}) {
@@ -1660,33 +1672,91 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         details?h('div',{style:{marginTop:12}},...details.evidence.map(e=>h('div',{key:e.id||e.messageId,className:'ab-li'},h('div',{className:'body'},e.text||e.messageId||e.id,h('div',{className:'ab-small ab-muted'},e.authorId+' · '+(e.id||e.messageId))),h(Btn,{small:true,disabled:busy,onClick:()=>act('evidence/delete',{...b,messageId:e.id||e.messageId})},'移除证据'))),...details.audit.map((a,i)=>h('div',{key:i,className:'ab-li'},h('div',{className:'body'},'v'+a.revision+' · '+a.action+' · '+new Date(a.at).toLocaleString()),a.revision<item.revision&&item.status!=='deleted'?h(Btn,{small:true,disabled:busy,onClick:()=>act('revert',{...b,targetRevision:a.revision})},'回退并复核'):null))):null)
     }
     function Tasks({st,toast}) {
-      const [scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''}),[items,setItems]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false)
-      const load=useCallback(async()=>{const r=await get('/tasks/list?'+new URLSearchParams({chatId:scope.chat,limit:50}));if(r.ok){setItems(r.list||r.tasks||r.items||[]);setError('')}else setError(r.message)},[scope.chat])
+      const [scope,setScope,isCurrent]=useViewingScope({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''}),[items,setItems]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false)
+      const load=useCallback(async()=>{if(!isCurrent())return;const r=await get('/tasks/list?'+new URLSearchParams({chatId:scope.chat,limit:50}));if(!isCurrent())return;if(r.ok){setItems(r.list||r.tasks||r.items||[]);setError('')}else setError(r.message)},[scope])
       useEffect(()=>{load()},[load])
-      return h('div',{className:'ab-grid'},h(ScopePicker,{scope,onChange:setScope,persona:false}),h(Card,{title:'任务与等待',right:h(Btn,{small:true,onClick:load},'刷新'),desc:'统一查看生图、翻唱和 Planner 等待。取消等待不会取消它所等待的后台任务；结果未知不会自动重发。'},error?h('div',{className:'ab-note err'},error):null,...items.map(t=>h('div',{key:t.id,className:'ab-card',style:{marginTop:10}},h('div',{className:'ab-flex'},h('b',null,t.kind),h('span',{className:'ab-pill'},t.stateLabel||t.state)),h('div',{className:'ab-muted ab-small'},t.id+' · 请求者 '+t.actorId),t.condition?h('p',null,'等待 '+t.condition+' · 截止 '+new Date(t.deadline).toLocaleString()):null,t.error?h('div',{className:'ab-note warn'},t.error):null,h(Btn,{small:true,disabled:busy||['delivered','failed','canceled','unknown','woken','expired'].includes(t.state),onClick:async()=>{setBusy(true);try{const r=await post('/tasks/cancel',{chatId:scope.chat,id:t.id});toast(r.message||r.code,r.ok?'ok':'err');await load()}finally{setBusy(false)}}},'取消'))),!items.length?h(Empty,{text:'当前聊天没有任务或等待'}):null))
+      return h('div',{className:'ab-grid'},h(ScopePicker,{st,scope,onChange:next=>{setScope(next);setItems([]);setError('');setBusy(false)},persona:false}),h(Card,{title:'任务与等待',right:h(Btn,{small:true,onClick:load},'刷新'),desc:'统一查看生图、翻唱和 Planner 等待。取消等待不会取消它所等待的后台任务；结果未知不会自动重发。'},error?h('div',{className:'ab-note err'},error):null,...items.map(t=>h('div',{key:t.id,className:'ab-card',style:{marginTop:10}},h('div',{className:'ab-flex'},h('b',null,t.kind),h('span',{className:'ab-pill'},t.stateLabel||t.state)),h('div',{className:'ab-muted ab-small'},t.id+' · 请求者 '+t.actorId),t.condition?h('p',null,'等待 '+t.condition+' · 截止 '+new Date(t.deadline).toLocaleString()):null,t.error?h('div',{className:'ab-note warn'},t.error):null,h(Btn,{small:true,disabled:busy||['delivered','failed','canceled','unknown','woken','expired'].includes(t.state),onClick:async()=>{if(!isCurrent())return;setBusy(true);try{const r=await post('/tasks/cancel',{chatId:scope.chat,id:t.id});if(!isCurrent())return;toast(r.message||r.code,r.ok?'ok':'err');await load()}finally{if(isCurrent())setBusy(false)}}},'取消'))),!items.length?h(Empty,{text:'当前聊天没有任务或等待'}):null))
     }
 
     const MEMORY_STATES = { active: '有效', conflicted: '有冲突', superseded: '已更正', retracted: '已撤回', quarantined: '待复核', deleted: '已删除' }
     const PROFILE_SECTIONS = { identity: '身份', relationships: '关系', stableFacts: '稳定事实', preferences: '偏好', recentInteractions: '近期互动', uncertain: '待确认' }
     const memoryQuery = (scope, extra = {}) => new URLSearchParams({ ...scope, ...extra }).toString()
-    function ScopePicker({ scope, onChange, persona = true, personaHint }) {
-      const [value, setValue] = useState(scope)
-      const [error,setError]=useState('')
-      useEffect(()=>setValue(scope),[scope])
-      const update = (k, v) => setValue({ ...value, [k]: v })
-      return h(Card, { title: '查看范围', desc: '资料按机器人账号和聊天隔离。切换范围后再查看、编辑或复核。' },
+    // 只用已保存的配置和已有会话填充选项；选择范围不会写入 allow。
+    function scopeChatOptions(st = {}, knownChats = []) {
+      const config = st.config || {}, owner = String(config.ownerQQ || ''), chats = new Map()
+      const add = (chat, label) => { if (/^(private|group):[\w-]+$/.test(chat) && !chats.has(chat)) chats.set(chat, { value: chat, label }) }
+      if (owner) add('private:' + owner, '主人私聊 · ' + owner)
+      for (const id of config.allow?.groups || []) {
+        const name = st.groupNames?.[id]
+        add('group:' + id, '群聊 · ' + (typeof name === 'string' && name ? name + '（' + id + '）' : id) + ' · 白名单')
+      }
+      for (const id of config.allow?.private || []) add('private:' + id, '私聊 · ' + id + ' · 白名单')
+      for (const chat of [...Object.keys(st.sessions || {}).filter(k => k.startsWith('private:')), ...knownChats]) {
+        add(chat, (chat.startsWith('group:') ? '群聊 · ' : '私聊 · ') + chat.split(':')[1] + ' · 已有会话')
+      }
+      return [...chats.values()]
+    }
+    // 旧范围的请求和事件即使晚于切换完成，也不能回填或操作新范围。
+    function useViewingScope(initial) {
+      const [scope, setScope] = useState(initial), current = useRef(scope), mounted = useRef(true)
+      useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+      return [scope, next => { current.current = next; setScope(next) }, () => mounted.current && current.current === scope]
+    }
+    function ScopePicker({ scope, onChange, st, knownChats, persona = true, personaHint, requirePersona = false }) {
+      const options = scopeChatOptions(st, knownChats)
+      const [value, setValue] = useState(scope), [custom, setCustom] = useState(() => !options.some(o => o.value === scope.chat))
+      const [error, setError] = useState(''), [resolving, setResolving] = useState(false)
+      const draft = useRef(scope), seq = useRef(0), applied = useRef(scope)
+      applied.current = scope
+      useEffect(() => {
+        seq.current++; draft.current = { ...scope }; setValue(draft.current)
+        setCustom(!scopeChatOptions(st, knownChats).some(o => o.value === scope.chat)); setError(''); setResolving(false)
+        return () => { seq.current++ }
+      }, [scope.account, scope.chat, scope.persona])
+      const valid = s => !!s.account && /^(private|group):[\w-]+$/.test(s.chat)
+      const update = (k, v) => {
+        seq.current++; setError(''); setResolving(false)
+        const next = { ...draft.current, [k]: v }
+        if (k === 'chat' && v !== draft.current.chat) next.persona = ''
+        draft.current = next; setValue(next)
+      }
+      const resolve = async (applyAfter = false) => {
+        if (!valid(draft.current)) return
+        const id = ++seq.current, source = applied.current, chat = draft.current.chat
+        setError(''); setResolving(true)
+        try {
+          const r = await get('/persona/resolve?chatId=' + encodeURIComponent(chat))
+          if (id !== seq.current || source !== applied.current) return
+          if (!r.ok || r.error || !r.personaId) { setError(r.message || r.error || '当前聊天没有可用人设'); return }
+          draft.current = { ...draft.current, persona: r.personaId }; setValue(draft.current)
+          if (applyAfter === true) onChange({ ...draft.current })
+        } catch (e) { if (id === seq.current && source === applied.current) setError(e.message) }
+        finally { if (id === seq.current && source === applied.current) setResolving(false) }
+      }
+      const apply = () => {
+        if (!valid(draft.current) || resolving) return
+        if (persona && requirePersona && !draft.current.persona) return resolve(true)
+        seq.current++; onChange({ ...draft.current })
+      }
+      const manual = custom || !options.some(o => o.value === value.chat)
+      const personaControl = persona ? h(Row, { label: '人设 ID', hint: personaHint || (requirePersona ? '留空即可；切换查看时自动读取所选聊天当前人设。仅高级指定时填写。' : '普通事实留空；查看角色经历时填写对应人设 ID。切换聊天会清空旧人设。') }, h('input', { className: 'ab-input', 'aria-label': '人设范围', value: value.persona, onChange: e => update('persona', e.target.value.trim()) }), h(Btn, { small: true, disabled: !valid(value) || resolving, onClick: () => resolve() }, resolving ? '正在读取人设…' : '使用此聊天当前人设')) : null
+      return h(Card, { title: '查看范围（一次一个聊天）', desc: '仅选择本页查看、编辑和审核的资料范围，不控制启用名单。真正启用聊天请到「权限」设置 allow 白名单；记忆和表达与黑话的开关是全局设置，不随查看范围切换。' },
+        h('div', { className: 'ab-note' }, '当前查看：' + scope.chat + (persona && scope.persona ? ' · 人设 ' + scope.persona : '')),
         h(Row, { label: '机器人账号' }, h('input', { className: 'ab-input', 'aria-label': '机器人账号', value: value.account, readOnly: true })),
-        h(Row, { label: '聊天', hint: '例如 private:123456 或 group:123456' }, h('input', { className: 'ab-input wide', 'aria-label': '聊天范围', value: value.chat, onChange: e => update('chat', e.target.value.trim()) })),
-          persona ? h(Row, { label: '人设 ID', hint: personaHint || '普通事实留空；查看角色经历时填写对应人设 ID' }, h('input', { className: 'ab-input', 'aria-label': '人设范围', value: value.persona, onChange: e => update('persona', e.target.value.trim()) }),h(Btn,{small:true,onClick:async()=>{const r=await get('/persona/resolve?chatId='+encodeURIComponent(value.chat));if(!r.ok||r.error){setError(r.message||r.error||'当前聊天没有可用人设');return}setError('');update('persona',r.personaId)}},'使用此聊天当前人设')) : null,
-          error?h('div',{className:'ab-note err',role:'alert'},error):null,
-        h(Btn, { small: true, disabled: !value.account || !/^(private|group):[^\s:]+$/.test(value.chat), onClick: () => onChange(value) }, '应用范围'))
+        h(Row, { label: '选择聊天', hint: '来自已保存白名单和已知私聊；选好后点「切换查看」。已有会话不代表已启用。' },
+          h('select', { className: 'ab-input wide', 'aria-label': '选择查看的聊天', value: manual ? '' : value.chat, onChange: e => { setCustom(!e.target.value); update('chat', e.target.value) } },
+            ...options.map(o => h('option', { key: o.value, value: o.value }, o.label)), h('option', { value: '' }, '列表外自定义…'))),
+        manual ? h(Row, { label: '自定义聊天范围', hint: '一次填写一个 private:QQ号 或 group:群号；填写不会新增授权。' }, h('input', { className: 'ab-input wide', 'aria-label': '聊天范围', value: value.chat, onChange: e => update('chat', e.target.value.trim()) })) : null,
+        persona && requirePersona ? h('details', null, h('summary', null, '高级：指定人设（默认自动读取）'), personaControl) : personaControl,
+        error ? h('div', { className: 'ab-note err', role: 'alert' }, error) : null,
+        h(Btn, { small: true, disabled: !valid(value) || resolving, onClick: apply }, resolving ? '正在切换…' : '切换查看'))
     }
     function ScopedMemory({ st, draft, setDraft, toast }) {
       const [scope, setScope] = useState({ account: st.config.botQQ, chat: 'private:' + st.config.ownerQQ, persona: '' })
       const f = useField(draft, setDraft)
       return h('div', { className: 'ab-grid' },
-        h(ScopePicker, { scope, onChange: setScope }),
-        h(Card, { title: '记忆设置', right: f.sw('memory.enabled'), desc: '增量提炼会保留原始聊天和处理进度。失败区间留待重试，不当作已处理。此卡修改后使用页面底部保存。' },
+        h(ScopePicker, { st, scope, onChange: setScope }),
+        h(Card, { title: '记忆设置（全局）', right: f.sw('memory.enabled'), desc: '本卡开关和参数全局生效，不随查看范围切换。增量提炼保留原始聊天和处理进度，失败区间留待重试。修改后使用页面底部保存。' },
           h(Row, { label: '每轮召回数量' }, f.range('memory.recallCount', 0, 12, 1, v => v + ' 条')),
           h(Row, { label: '积累消息数' }, f.range('memory.extraction.minMessages', 5, 100, 5, v => v + ' 条')),
           h(Row, { label: '最长等待提炼时间' }, f.range('memory.extraction.intervalMs', 300000, 7200000, 300000, v => Math.round(v / 60000) + ' 分钟'))),
@@ -1696,10 +1766,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     const MEDIA_STATES={unanalysed:'未分析',waiting_asset:'等待原图',queued:'排队中',running:'分析中',ready:'可用',needs_frames:'动画需人工复核',failed:'失败',unknown:'结果不确定',disabled:'已停用',unavailable:'来源不可用'}
     function MediaMemory({st,draft,setDraft,toast}) {
       const f=useField(draft,setDraft),[scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''})
-      return h('div',{className:'ab-grid'},h(ScopePicker,{scope,onChange:setScope,persona:false}),
-        h(Card,{title:'图片描述与文字识别',right:f.sw('mediaMemory.enabled'),desc:'图片的描述和 OCR 绑定到原始消息。自动分析默认关闭；也可直接填写人工说明，不调用模型。动画不会仅凭首帧被当作完整分析。'},
+      return h('div',{className:'ab-grid'},h(ScopePicker,{st,scope,onChange:setScope,persona:false}),
+        h(Card,{title:'图片描述与文字识别（全局设置）',right:f.sw('mediaMemory.enabled'),desc:'本卡配置不随查看范围切换。图片描述和 OCR 绑定到原始消息；也可填写人工说明，不调用模型。动画不会仅凭首帧被当作完整分析。'},
           h(Row,{label:'自动分析'},f.sw('mediaMemory.autoAnalyze')),h(Row,{label:'动画自动取帧',hint:'本地 ffmpeg 抽样，最多 6 帧；明确标记部分覆盖，无法取帧时保留待复核。'},f.sw('mediaMemory.autoFrames')),
-          h(Row,{label:'允许自动分析的聊天',hint:'一行一个 private:QQ 或 group:群号；留空不自动调用'},f.list('mediaMemory.autoChats')),
+          h(Row,{label:'自动分析执行名单（autoChats）',hint:'可填多个：一行一个 private:QQ 或 group:群号；留空不自动调用。这是执行名单，与上方查看范围无关，仍须通过「权限」allow。'},f.list('mediaMemory.autoChats')),
           h(Row,{label:'忽略这些发言者',hint:'一行一个 QQ 号'},f.list('mediaMemory.blockedAuthors')),
           h(Row,{label:'模型版本标记',hint:'视觉模型更换后修改；模型选择在「模型」页'},f.text('mediaMemory.modelVersion')),
           h(Row,{label:'每日调用上限'},f.num('mediaMemory.maxCallsPerDay',{min:0,max:1000})),
@@ -1737,14 +1807,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     const RETRIEVAL_ROLES={text:'文本向量',image:'图片向量',joint:'文本与图片联合空间'}
     const retrievalChannels=value=>(Array.isArray(value)?value:Object.keys(value||{})).join(' / ')
     function RetrievalPanel({st,draft,setDraft,toast,go}) {
-      const f=useField(draft,setDraft),c=draft.retrieval,[scope,setScope]=useState({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''})
+      const f=useField(draft,setDraft),c=draft.retrieval,[scope,setScope,isCurrent]=useViewingScope({account:st.config.botQQ,chat:'private:'+st.config.ownerQQ,persona:''})
       const [health,setHealth]=useState(null),[query,setQuery]=useState(''),[kind,setKind]=useState('query'),[occurrence,setOccurrence]=useState(''),[result,setResult]=useState(null),[busy,setBusy]=useState(false),[generation,setGeneration]=useState(''),[role,setRole]=useState('text')
       const dirty=JSON.stringify(c)!==JSON.stringify(st.config.retrieval),seq=useRef(0)
       const load=useCallback(async()=>{const r=await get('/retrieval/health');setHealth(r)},[])
       useEffect(()=>{load()},[load,st.config.retrieval.enabled])
       useEffect(()=>{seq.current++;setResult(null)},[scope.account,scope.chat,scope.persona,kind])
-      const act=async(path,body={})=>{setBusy(true);try{const r=await post('/retrieval/'+path,{...scope,...body});toast(r.ok?'操作已登记':(r.message||'操作失败')+(r.code?'（'+r.code+'）':''),r.ok?'ok':'err');await load();return r}finally{setBusy(false)}}
-      const run=async()=>{const id=++seq.current;setBusy(true);try{const r=await post('/retrieval/'+kind,{...scope,query,limit:20,...(kind==='images'&&occurrence?{occurrenceId:occurrence}:{})});if(id===seq.current)setResult(r)}finally{if(id===seq.current)setBusy(false)}}
+      const act=async(path,body={})=>{if(!isCurrent())return;setBusy(true);try{const r=await post('/retrieval/'+path,{...scope,...body});if(!isCurrent())return;toast(r.ok?'操作已登记':(r.message||'操作失败')+(r.code?'（'+r.code+'）':''),r.ok?'ok':'err');await load();if(isCurrent())return r}finally{if(isCurrent())setBusy(false)}}
+      const run=async()=>{if(!isCurrent())return;const id=++seq.current;setBusy(true);try{const r=await post('/retrieval/'+kind,{...scope,query,limit:20,...(kind==='images'&&occurrence?{occurrenceId:occurrence}:{})});if(id===seq.current&&isCurrent())setResult(r)}finally{if(id===seq.current&&isCurrent())setBusy(false)}}
       const addRole=r=>setDraft(setPath(draft,'retrieval.roles.'+r,{type:r==='text'?'openai-text':'fixed-http',baseUrl:'',apiKey:'',space:{spaceId:'aurabot-'+r+'-v1',provider:'',endpointIdentity:'',model:'',revision:'v1',dims:1024,metric:'cosine',modalities:r==='joint'?['text','image']:[r],prefixes:{query:'',document:''},normalization:'l2',preprocess:{text:{version:'1',unicode:'NFC',trim:true},...(r!=='text'?{image:{version:'1',mode:'passthrough'}}:{})},protocolMappingVersion:r==='text'?'openai-text-v1':'v1'},...(r==='text'?{samples:{text:['一只蓝色的猫','下雨天的城市']}}:{mapping:{},samples:{}})}))
       const active=st.config.retrieval.enabled&&!dirty
       return h('div',{className:'ab-grid'},
@@ -1774,7 +1844,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             ...Object.entries(health.roles||{}).map(([r,value])=>h('p',{key:r},RETRIEVAL_ROLES[r]+'：'+(value.ready?'探测已通过':value.reason||value.error||'需探测'))),
             h('div',{className:'ab-muted ab-small'},'后端 '+(health.index?.backend||'正在初始化')+' · 待处理队列 '+(health.jobs?.length||0)),
             h(Btn,{small:true,disabled:busy||!active||!Object.keys(c.roles).length,onClick:()=>act('probe',{roles:Object.keys(c.roles)})},'探测已配置模型（调用服务）'))),
-        h(ScopePicker,{scope,onChange:setScope}),
+        h(ScopePicker,{st,scope,onChange:next=>{setScope(next);seq.current++;setResult(null);setBusy(false);setQuery('');setOccurrence('')}}),
         h(Card,{title:'检索工作台',desc:'只展示当前范围仍可见的来源。图片可直接带入生图工作台，提交时再次校验。'},
           h(Choices,{value:kind,onChange:setKind,options:[{value:'query',label:'事实记忆'},{value:'images',label:'历史图片'}]}),
           h(Row,{label:'查找内容'},h('input',{className:'ab-input wide','aria-label':'检索内容',value:query,onChange:e=>setQuery(e.target.value)})),
@@ -1809,10 +1879,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     function SharingPolicy({draft,setDraft}) {
       const groups=draft.memory.shareGroups||[],cats={fact:'事实',profile:'人物画像',image:'历史图片',expression:'表达习惯',jargon:'黑话',experience:'角色经历'}
       const put=list=>setDraft(setPath(draft,'memory.shareGroups',list)),update=(i,k,v)=>put(groups.map((g,n)=>n===i?{...g,[k]:v}:g))
-      return h(Card,{title:'跨聊天共享',desc:'默认互相隔离。仅同一机器人账号下、同一共享组内选中的类别可互相读取；角色经历与表达仍要求相同人设。撤销后，后续读取和发送会重新核验。修改后点页面底部保存。'},
+      return h(Card,{title:'跨聊天资料共享（全局规则）',desc:'这是资料读取规则，与查看范围和聊天启用名单不同，不新增聊天授权，也不授予跨聊天编辑权限。同一账号、同一共享组内选中的类别可互相读取；角色经历与表达仍要求相同人设。撤销后后续读取和发送会重新核验。修改后点页面底部保存。'},
         ...groups.map((g,i)=>h('div',{key:i,className:'ab-card',style:{marginBottom:12}},
           h(Row,{label:'共享组 ID'},h('input',{className:'ab-input','aria-label':'共享组 ID',value:g.id,onChange:e=>update(i,'id',e.target.value)})),
-          h(Row,{label:'共享的聊天',hint:'至少两个；一行一个 private:QQ号 或 group:群号'},h('textarea',{className:'ab-textarea','aria-label':'共享的聊天',value:g.chats.join('\n'),onChange:e=>update(i,'chats',e.target.value.split('\n'))})),
+          h(Row,{label:'互相读取资料的聊天',hint:'至少两个；一行一个 private:QQ号 或 group:群号。仅共享勾选的类别，不是启用白名单。'},h('textarea',{className:'ab-textarea','aria-label':'共享的聊天',value:g.chats.join('\n'),onChange:e=>update(i,'chats',e.target.value.split('\n'))})),
           h('div',{className:'ab-flex'},...Object.entries(cats).map(([category,label])=>h('label',{key:category},h('input',{type:'checkbox',checked:g.categories.includes(category),onChange:e=>update(i,'categories',e.target.checked?[...g.categories,category]:g.categories.filter(c=>c!==category))}),label))),
           h(Btn,{small:true,onClick:()=>put(groups.filter((_,n)=>n!==i))},'移除共享组'))),
         !groups.length?h('p',{className:'ab-muted'},'没有跨聊天共享组'):null,

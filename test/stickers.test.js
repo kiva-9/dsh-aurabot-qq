@@ -19,7 +19,7 @@ function gate() { let release; const promise = new Promise((r) => { release = r 
 function fixture(t, overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), 'aurabot-stickers-'))
   const dbOptions = { file: join(root, 'data.db'), filesDir: join(root, 'assets') }
-  const cfg = { botQQ: '100', ownerQQ: '200', dryRun: false, stickers: { enabled: true, collect: true, caption: true, maxPerHour: 20, maxLibrary: 100, maxQueued: 100, concurrency: 2, ...overrides } }
+  const cfg = { botQQ: '100', ownerQQ: '200', dryRun: false, stickers: { enabled: true, collect: true, caption: true, libraryScope: 'chat', autoReview: false, maxPerHour: 20, maxLibrary: 100, maxQueued: 100, concurrency: 2, ...overrides } }
   let clock = 1_000_000
   const stores = [], connections = []
   const open = () => { const s = createStorage(dbOptions); connections.push(s); return s }
@@ -700,7 +700,7 @@ const sampledFrames = () => ({ ok: true, state: 'sampled', coverage: 'partial',
   frames: [0, 100].map((atMs, frameIndex) => ({ bytes: PNG, mime: 'image/png', width: 1, height: 1, atMs, frameIndex, selection: 'sampled', coverage: 'partial' })),
   sampling: { selection: 'sampled', coverage: 'partial', complete: false, sourceFrames: 2, sampledFrames: 2, durationMs: 200 } })
 
-test('GIF 批量重试自动本地取样，保存部分帧证据；模型approve也不能替代完整动画人工审核', async (t) => {
+test('GIF 批量重试自动本地取样，模型approve可自动使用但仍保留部分帧证据', async (t) => {
   const f = fixture(t, { caption: false, autoReview: true })
   let samples = 0
   const seen = []
@@ -714,10 +714,10 @@ test('GIF 批量重试自动本地取样，保存部分帧证据；模型approve
   assert.equal(r.succeeded, 1)
   await store.drain()
   let current = store.get(it.id, admin)
-  assert.equal(current.state, 'pending')
+  assert.equal(current.state, 'approved')
   assert.equal(current.analysis.state, 'done')
   assert.equal(current.analysis.evidence.coverage, 'sampled_partial')
-  assert.equal(current.analysis.evidence.decision, 'pending')
+  assert.equal(current.analysis.evidence.decision, 'approve')
   assert.equal(current.analysis.evidence.modelDecision, 'approve')
   assert.equal(current.analysis.evidence.sampling.complete, false)
   assert.ok(current.frames.every(f => f.selection === 'sampled' && f.coverage === 'partial' && f.sourceAssetId === it.assetId))

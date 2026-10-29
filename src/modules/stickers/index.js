@@ -6,7 +6,7 @@ import { dataDir } from '../../core/store.js'
 
 export default {
   id: 'stickers', name: '表情包', version: '2.0.0', tab: 'stickers',
-  description: '按聊天收藏、审核和选择表情；QQ 收藏同步独立跟踪',
+  description: '默认同账号共用图库，自动采集识别；可选按聊天隔离，QQ 收藏同步独立跟踪',
   files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/analysis.js', 'stickers/legacy.js', 'runtime/image-frames.js'],
   setup(api) {
     const { hub, onebot, http, storage } = api.core
@@ -30,35 +30,35 @@ export default {
             const ok = await hub.sendSticker(chatId, String(name || ''))
             return { ok: Boolean(ok), message: ok ? '发了' : '没有找到当前聊天可用的表情' }
           } }),
-        defineTool({ name: 'qq_list_stickers', description: '查看当前聊天可使用的已审核表情。', properties: { query: str('可选名字或标签') },
+        defineTool({ name: 'qq_list_stickers', description: '查看表情库中可用于当前聊天的表情；默认同一机器人账号的所有聊天共用图库。', properties: { query: str('可选名字或标签') },
           execute: async ({ query }) => {
             const r = store.list({ chatId, query, limit: 60 })
             return { ok: true, count: r.total, items: r.items.map((it) => ({ id: it.id, name: it.name, tags: it.tags })),
               message: r.items.length ? r.items.map((it) => it.name || '未命名').join('、') : '没有可用表情' }
           } }),
-        defineTool({ name: 'qq_edit_sticker', description: '主人要求时修改当前聊天表情名字、标签或删除。删除会保留阻止重新收藏的记录。',
+        defineTool({ name: 'qq_edit_sticker', description: '主人要求时修改表情库中的名字、标签或删除。账号共用模式下对所有聊天生效；删除会保留阻止重新收藏的记录。',
           properties: { sticker: str('现在的名字或标签'), new_name: str('新名字'), tags: { type: 'array', items: { type: 'string' } }, delete: { type: 'boolean' } }, required: ['sticker'],
           execute: async ({ sticker, new_name, tags, delete: del }) => {
             if (!owner()) return denied()
             const item = store.match(String(sticker || ''), chatId)
-            if (!item) return { ok: false, message: '当前聊天没有这张表情' }
+            if (!item) return { ok: false, message: '图库里没有这张可用表情' }
             return del ? store.remove(item.id, management()) : store.rename(item.id, new_name, tags, management())
           } }),
-        defineTool({ name: 'qq_save_sticker', description: '主人要求时保存当前聊天最近图片为待审核素材；本地保存不代表 QQ 收藏同步成功。',
+        defineTool({ name: 'qq_save_sticker', description: '主人要求时把当前聊天最近图片保存到表情库，随后自动识别并按审核设置处理；本地保存不代表 QQ 收藏同步成功。',
           properties: { name: str('备注'), tags: { type: 'array', items: { type: 'string' } } }, execute: async ({ name, tags }) => {
             if (!owner()) return denied()
             const media = hub.recentMedia(chatId)
             const pick = media.filter((x) => x.userId === String(api.config().ownerQQ)).at(-1) || media.at(-1)
             if (!pick) return { ok: false, message: '当前聊天没有可保存的近期图片' }
             const buf = await segmentBytes(pick.seg, onebot, { maxBytes: 5 * 1024 * 1024 })
-            return store.addFromBuffer(buf, { chatId, name: name || '', tags: tags || [], from: 'tool', toQQ: true })
+            return store.addFromBuffer(buf, { chatId, name: name || '', tags: tags || [], from: 'tool', toQQ: true, messageId: pick.messageId, segment: pick.seg })
           } }),
-        defineTool({ name: 'qq_import_qq_stickers', description: '把 QQ 收藏导入当前聊天的待审区；不会自动跨群共享。', execute: async () => {
+        defineTool({ name: 'qq_import_qq_stickers', description: '把 QQ 收藏导入表情库，新素材识别通过后可用；使用范围遵循当前图库设置。', execute: async () => {
           if (!owner()) return denied()
           return store.importFromQQ(management())
         } }),
       ]
-      if (level === 'full') tools.push(defineTool({ name: 'qq_add_sticker', description: '主人指定图片路径或网址时保存为当前聊天待审核素材。',
+      if (level === 'full') tools.push(defineTool({ name: 'qq_add_sticker', description: '主人指定图片路径或网址时保存到表情库，随后自动识别并按审核设置处理；使用范围遵循当前图库设置。',
         properties: { source: str('图片路径或 http(s) 地址'), name: str('备注'), tags: { type: 'array', items: { type: 'string' } } }, required: ['source'],
         execute: async ({ source, name, tags }) => {
           if (!owner()) return denied()
@@ -98,7 +98,7 @@ export default {
       const bytes = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
       return store.addFromBuffer(bytes, { ...o, name: b.name || '', tags: b.tags || [], from: 'panel', toQQ: b.toQQ !== false })
     })
-    api.rule(() => '- 保存表情只代表本地待审核；不能说已批准或 QQ 收藏成功。没有合适的已批准表情就不发。')
+    api.rule(() => '- 表情库默认同账号共用。新素材识别明确通过后自动可用；以实际状态为准，本地保存不等于审核或 QQ 收藏已成功。没有合适的可用表情就不发。')
     store.recover()
     store.start()
     api.onDispose?.(() => store.stop())

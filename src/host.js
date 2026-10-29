@@ -486,6 +486,7 @@ export function apply(ctx) {
       voice: { provider: cfg.voice.provider },
       song: use('song')?.status?.() ?? null,
       sessions: hub.sessions(),
+      groupNames: Object.fromEntries(hub.groupNames),
       workspaceDir: WORKSPACE_DIR,
       personas: personas.compat.list(),
       modules: mods.status(),

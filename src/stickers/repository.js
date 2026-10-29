@@ -21,12 +21,27 @@ function taskView(r) {
     error: r.error, outcome: r.outcome, createdAt: r.created_at, updatedAt: r.updated_at } : null
 }
 
-export function createStickerRepository({ storage, now = Date.now, limits }) {
+export function createStickerRepository({ storage, now = Date.now, limits, libraryScope = () => 'account', sourceValid = () => false }) {
   ensureStickerSchema(storage)
   const db = storage.db
   const get = (id) => decode(db.get('SELECT body_json FROM sticker_items WHERE id=?', id))
   const all = (includeDeleted = false) => db.all(`SELECT body_json FROM sticker_items ${includeDeleted ? '' : "WHERE state!='deleted'"} ORDER BY created_at DESC,id`).map(decode)
   const find = (account, key) => db.all('SELECT body_json FROM sticker_items WHERE account=? AND (id=? OR md5=? OR sha256=?)', account, key, key, key).map(decode)
+  // Existing chat-local duplicates remain intact. A deny/tombstone wins over
+  // another copy's approval; switching modes never migrates or revives data.
+  const canonical = (items) => [...items].sort((a, b) => {
+    const rank = { deleted: 0, disabled: 1, rejected: 2, approved: 3, pending: 4 }
+    return rank[a.state] - rank[b.state] || a.at - b.at || a.id.localeCompare(b.id)
+  })[0]
+  function library(account, includeDeleted = false) {
+    let items = all(true).filter(it => it.scope.account === account)
+    if (libraryScope() === 'account') {
+      const byHash = new Map()
+      for (const it of items) byHash.set(it.sha256, canonical([...(byHash.has(it.sha256) ? [byHash.get(it.sha256)] : []), it]))
+      items = [...byHash.values()]
+    }
+    return includeDeleted ? items : items.filter(it => it.state !== 'deleted')
+  }
   const save = (it) => db.run(`INSERT INTO sticker_items(id,account,chat,sha256,md5,asset_id,state,revision,body_json,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,revision=excluded.revision,
     body_json=excluded.body_json,updated_at=excluded.updated_at`,
@@ -52,14 +67,23 @@ export function createStickerRepository({ storage, now = Date.now, limits }) {
   function ingest(buf, info, scope, input = {}) {
     return db.tx(() => {
       const digest = hash(buf)
-      const existing = decode(db.get('SELECT body_json FROM sticker_items WHERE account=? AND chat=? AND sha256=?', scope.account, scope.chat, digest))
+      const existing = libraryScope() === 'account' ? canonical(find(scope.account, digest)) :
+        decode(db.get('SELECT body_json FROM sticker_items WHERE account=? AND chat=? AND sha256=?', scope.account, scope.chat, digest))
       if (existing) {
         if (input.source) saveSource(scope, input.source.key, input.source, existing.id)
         if (existing.state === 'deleted') fail('TOMBSTONED', '这张图已删除，重复收藏不会恢复')
+        if (libraryScope() === 'account' && input.automatic && input.source?.messageId &&
+            ['pending', 'approved'].includes(existing.state) && !sourceValid(existing) && sourceValid({ source: input.source })) {
+          const { segment: _segment, ...evidence } = input.source
+          const refreshed = update(existing.id, it => { it.source = evidence; it.from = evidence.scope.chat })
+          // saveSource retains the old and new evidence associations. No old
+          // message is recreated, review state changed, or model task queued.
+          return { ok: true, item: refreshed, existed: true, sourceUpdated: true }
+        }
         return { ok: true, item: existing, existed: true }
       }
       const { maxLibrary, maxPerHour } = limits()
-      if (db.get("SELECT COUNT(*) AS n FROM sticker_items WHERE account=? AND state!='deleted'", scope.account).n >= maxLibrary) fail('LIBRARY_FULL', '表情库已满，请先审核或删除')
+      if (library(scope.account).length >= maxLibrary) fail('LIBRARY_FULL', '表情库已满，请先审核或删除')
       if (input.automatic && db.get('SELECT COUNT(*) AS n FROM sticker_quota WHERE account=? AND reserved_at>?', scope.account, now() - 3600_000).n >= maxPerHour) fail('QUOTA_EXCEEDED', '这小时收够了')
       const asset = storage.assets.put(buf, { mime: info.mime, width: info.width, height: info.height, sourceKind: input.automatic ? 'inbound' : 'upload' })
       const t = now()
@@ -68,7 +92,7 @@ export function createStickerRepository({ storage, now = Date.now, limits }) {
         scope, state: 'pending', revision: 1, name: String(input.name || '').slice(0, 80), tags: input.tags || [],
         description: '', ocr: '', emotions: [], suitable: [], unsuitable: [], editedFields: input.editedFields || [],
         analysis: { state: 'pending', error: null, evidence: null }, frames: [], animated: info.animated,
-        review: { kind: 'pending', reason: '等待审核' }, wantsQQ: Boolean(input.toQQ),
+        review: { kind: 'pending', reason: '等待审核' }, wantsQQ: Boolean(input.toQQ), autoReviewEligible: input.autoReviewEligible === true,
         mime: info.mime, width: info.width, height: info.height, bytes: buf.length, from: input.from || 'manual',
         source: input.source ? sourceEvidence : null, at: t, updatedAt: t, uses: 0, lastUsed: 0 }
       save(item)
@@ -180,5 +204,5 @@ export function createStickerRepository({ storage, now = Date.now, limits }) {
   const usage = (scope, sha256) => db.get('SELECT uses,last_used AS lastUsed FROM sticker_uses WHERE account=? AND chat=? AND sha256=?', scope.account, scope.chat, sha256) || { uses: 0, lastUsed: 0 }
   const used = (scope, sha256) => db.run(`INSERT INTO sticker_uses(account,chat,sha256,uses,last_used) VALUES (?,?,?,1,?)
     ON CONFLICT(account,chat,sha256) DO UPDATE SET uses=uses+1,last_used=excluded.last_used`, scope.account, scope.chat, sha256, now())
-  return { db, get, all, find, save, update, ingest, source, saveSource, task, tasks, taskPage, enqueue, qq, saveQQ, recover, claim, owns, finish, retryTask, forget, usage, used }
+  return { db, get, all, find, canonical, library, save, update, ingest, source, saveSource, task, tasks, taskPage, enqueue, qq, saveQQ, recover, claim, owns, finish, retryTask, forget, usage, used }
 }

@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm'
 const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
 const component = client.slice(client.indexOf('    const STICKER_STATES='), client.indexOf('    function SpeakUp('))
 const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))
-function mount({ total = 3, postResult, tasks = [], holdPost } = {}) {
+function mount({ total = 3, postResult, tasks = [], holdPost, scope = { account: '100', chat: 'group:1' }, page = false, libraryScope = 'account' } = {}) {
   let cursor = 0, tree, effects = [], itemRows = Array.from({ length: total }, (_, i) => ({ id: 'item-' + i, revision: i + 1, state: 'pending', name: '素材' + i, animated: false, analysis: { state: 'failed' } }))
   let slots = []
   const instances = new Map(), calls = [], notifications = [], working = []
@@ -20,6 +20,8 @@ function mount({ total = 3, postResult, tasks = [], holdPost } = {}) {
   const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(v => v !== null && v !== undefined && v !== false) })
   const context = { ...hooks, h, URLSearchParams, API: '/api', confirm: () => assert.fail('Stickers 不能调用原生 confirm'),
     Btn: 'Btn', Card: 'Card', Select: 'Select', Empty: 'Empty', Row: 'Row', ScopePicker: 'ScopePicker',
+    useField: draft => new Proxy({}, { get: () => path => h('Field', { path, value: path.split('.').reduce((o, k) => o?.[k], draft) }) }),
+    fileData: async () => 'data:image/png;base64,b2ZmbGluZQ==',
     async get(path) {
       calls.push({ path }); const url = new URL(path, 'http://local.invalid'), offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 30)
       if (url.pathname === '/stickers/queue') return { ok: true, items: tasks.slice(offset, offset + limit), total: tasks.length, runtime: { enabled: true, collect: true, caption: true } }
@@ -32,21 +34,22 @@ function mount({ total = 3, postResult, tasks = [], holdPost } = {}) {
       return postResult || (body.entries ? { ok: true, total: body.entries.length, succeeded: body.entries.length, failed: 0, results: body.entries.map(it => ({ id: it.id, ok: true, state: 'approved' })) } : { ok: true })
     },
   }
-  runInNewContext(component + '\nglobalThis.parts={StickerWorkspace,StickerConfirmation,StickerCell,StickerTask};', context)
-  const props = { scope: { account: '100', chat: 'group:1' }, toast: (...args) => notifications.push(args), onWorking: v => working.push(v) }
+  runInNewContext(component + '\nglobalThis.parts={Stickers,StickerWorkspace,StickerConfirmation,StickerCell,StickerTask};', context)
+  const config = { botQQ: '100', ownerQQ: '200', allow: { groups: ['1', '2'], private: [] }, stickers: { libraryScope, enabled: true, collect: true, caption: true, autoReview: true, autoChance: 0.1 } }
+  const props = { scope, st: { config }, draft: structuredClone(config), setDraft: () => assert.fail('浏览图库不能修改配置'), toast: (...args) => notifications.push(args), onWorking: v => working.push(v) }
   const invoke = (type, props) => { const key = type.name + ':' + (props.key || 'single'); if (!instances.has(key)) instances.set(key, []); slots = instances.get(key); cursor = 0; return type(props) }
   const expand = node => {
     if (!node || typeof node !== 'object') return node
     return { ...node, children: typeof node.type === 'function' ? [expand(invoke(node.type, node.props))] : node.children.map(expand) }
   }
-  const render = () => { tree = expand(invoke(context.parts.StickerWorkspace, props)); const todo = effects; effects = []; todo.forEach(f => f()); return tree }
+  const render = () => { tree = expand(invoke(page ? context.parts.Stickers : context.parts.StickerWorkspace, props)); const todo = effects; effects = []; todo.forEach(f => f()); return tree }
   const flush = async () => { render(); await new Promise(resolve => setImmediate(resolve)); render(); return tree }
   const nodes = (root = tree) => root && typeof root === 'object' ? [root, ...root.children.flatMap(child => nodes(child)), ...nodes(root.props?.right || null)] : []
   const label = node => node && typeof node === 'object' ? node.children.map(label).join('') : String(node ?? '')
   const button = name => { const node = nodes().find(n => ['Btn', 'button'].includes(n.type) && label(n) === name); assert.ok(node, name); return node.props }
   const input = name => { const node = nodes().find(n => n.type === 'input' && n.props['aria-label'] === name); assert.ok(node, name); return node.props }
   const unmount = () => { for (const state of instances.values()) for (const slot of state) slot?.cleanup?.(); instances.clear() }
-  return { flush, render, button, input, nodes, label, calls, notifications, working, context, unmount, setItems: v => { itemRows = v }, setScope: v => { props.scope = v } }
+  return { flush, render, button, input, nodes, label, calls, notifications, working, context, props, unmount, setItems: v => { itemRows = v }, setScope: v => { props.scope = v } }
 }
 
 test('表情 UI：当前页选择跨页保留，筛选切换清空，当前筛选选中数可见', async () => {
@@ -261,3 +264,55 @@ for (const example of singleCases) {
     assert.equal(ui.working.at(-1), false)
   })
 }
+
+test('表情 UI：默认账号共用图库无需选群，自动开关只展示配置，兼容聊天模式藏在次级入口', async () => {
+  const ui = mount({ page: true }); await ui.flush()
+  assert.equal(ui.nodes().some(n => n.type === 'ScopePicker'), false)
+  assert.ok(ui.nodes().some(n => n.type === 'Card' && n.props.title === '表情包 · 当前机器人共用图库'))
+  for (const path of ['stickers.enabled', 'stickers.collect', 'stickers.caption', 'stickers.autoReview']) {
+    assert.equal(ui.nodes().find(n => n.type === 'Field' && n.props.path === path).props.value, true)
+  }
+  assert.equal(ui.props.draft.stickers.autoChance, 0.1)
+  assert.equal(ui.calls.some(c => c.body), false)
+  assert.ok(ui.nodes().some(n => n.type === 'details' && ui.label(n).startsWith('更多筛选与人工处理') && !n.props.open))
+  const legacy = mount({ page: true, libraryScope: 'chat' }); await legacy.flush()
+  const picker = legacy.nodes().find(n => n.type === 'ScopePicker')
+  assert.equal(picker.props.st, legacy.props.st)
+  assert.equal(picker.props.scope.chat, 'private:200')
+  assert.ok(legacy.nodes().some(n => n.type === 'details' && ui.label(n).startsWith('兼容模式：选择聊天图库') && !n.props.open))
+})
+
+test('表情 UI：账号图库读取/预览不发送 chatId；素材来源只是溯源，跨来源批量保留各自版本', async () => {
+  const ui = mount({ scope: { account: '100', chat: '' }, total: 2 })
+  ui.setItems([
+    { id: 'group-item', revision: 2, state: 'approved', scope: { account: '100', chat: 'group:1' }, analysis: { state: 'done' } },
+    { id: 'private-item', revision: 5, state: 'pending', scope: { account: '100', chat: 'private:200' }, sourceKind: 'panel', sourceChatId: null, sourceLabel: '面板上传', animated: true, frames: [{ atMs: 0 }], analysis: { state: 'done' } },
+  ])
+  await ui.flush()
+  for (const c of ui.calls) assert.equal(new URL(c.path, 'http://offline').searchParams.has('chatId'), false)
+  const previews = ui.nodes().filter(n => n.type === 'img' || n.type === 'a').map(n => n.props.src || n.props.href)
+  assert.ok(previews.length >= 4)
+  for (const url of previews) assert.equal(new URL(url, 'http://offline').searchParams.has('chatId'), false)
+  assert.match(ui.label(ui.render()), /来源：group:1（仅溯源）/)
+  assert.match(ui.label(ui.render()), /来源：面板上传（仅溯源）/)
+  assert.doesNotMatch(ui.label(ui.render()), /来源：private:200（仅溯源）/)
+  ui.button('全选当前页').onClick(); ui.render(); ui.button('批量删除本地').onClick(); ui.render()
+  assert.match(ui.label(ui.nodes().find(n => n.props.role === 'alertdialog')), /机器人 100 · 账号共用图库/)
+  await ui.button('确认提交').onClick()
+  const request = ui.calls.find(c => c.body)
+  assert.equal(Object.hasOwn(request.body, 'chatId'), false)
+  assert.deepEqual(request.body.entries.map(e => [e.id, e.expectedRevision]), [['group-item', 2], ['private-item', 5]])
+})
+
+test('表情 UI：账号图库单项删除、上传和导入均不隐式指定主人或来源聊天', async () => {
+  const ui = mount({ scope: { account: '100', chat: '' }, total: 1 }); await ui.flush()
+  ui.button('删除本地条目').onClick(); ui.render(); await ui.button('确认提交').onClick(); await ui.flush()
+  await ui.button('导入 QQ 收藏').onClick(); await ui.flush()
+  const file = ui.nodes().find(n => n.type === 'input' && n.props.type === 'file' && n.props.multiple)
+  file.props.onChange({ target: { files: [{ size: 10, name: 'offline.png' }], value: 'file' } }); await ui.flush()
+  const writes = ui.calls.filter(c => c.body)
+  assert.deepEqual(writes.map(c => c.path), ['/sticker/delete', '/sticker/import-qq', '/sticker/upload'])
+  for (const c of writes) assert.equal(Object.hasOwn(c.body, 'chatId'), false)
+  assert.equal(writes[0].body.expectedRevision, 1)
+  assert.equal(writes[2].body.toQQ, false)
+})

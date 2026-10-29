@@ -207,12 +207,12 @@ function renderSource(source, plan) {
   if (isSilence(source.text)) return { silent: true, items: [], source }
   const items = []
   let quote = null, breakBefore = false
-  const emit = (item, block, start = block.start, end = block.end, before) => {
+  const emit = (item, block, start = block.start, end = block.end, before, explicitBreak = false) => {
     const refs = []
     if (quote) refs.push({ blockId: quote.id, start: quote.start, end: quote.end, raw: quote.raw })
     if (quote) { item.replyTo = quote.value; quote = null }
     refs.push({ blockId: block.id, start, end, raw: source.text.slice(start, end) })
-    sourced(item, { refs, before, source })
+    sourced(item, { refs, before, source, explicitBreak })
     items.push(item)
   }
   for (let n = 0; n < source.blocks.length; n++) {
@@ -230,7 +230,7 @@ function renderSource(source, plan) {
         const display = displayText(piece.text)
         if (!display.value) { trailing += piece.text; continue }
         const before = emitted ? trailing + display.leading : breakBefore ? '\n' + display.leading : undefined
-        emit({ kind: 'text', value: display.value }, block, block.start + pendingStart, block.start + piece.end, before)
+        emit({ kind: 'text', value: display.value }, block, block.start + pendingStart, block.start + piece.end, before, !emitted && breakBefore)
         emitted = true; trailing = display.trailing; breakBefore = false
         pendingStart = piece.end
       }
@@ -304,15 +304,20 @@ function mergeText(a, b) {
   const left = a[layout], right = b[layout]
   const separator = left && right && left.source === right.source ? right.before ?? '\n' : '\n'
   const out = { ...a, value: a.value + separator + b.value }
-  if (left || right) sourced(out, { refs: [...(left?.refs || []), ...(right?.refs || [])], before: left?.before, source: left?.source === right?.source ? left?.source : undefined })
+  if (left || right) sourced(out, { refs: [...(left?.refs || []), ...(right?.refs || [])], before: left?.before, source: left?.source === right?.source ? left?.source : undefined, explicitBreak: left?.explicitBreak })
   return out
 }
 
 function mergeToLimit(items, max, count) {
   const out = [...items]
-  for (let n = out.length - 1; n > 0 && count(out) > max; n--) {
-    const merged = mergeText(out[n - 1], out[n])
-    if (merged) out.splice(n - 1, 2, merged)
+  // Consume ordinary line splits first, even when they occur before explicit
+  // boundaries. Only cross an explicit boundary if the cap still requires it.
+  for (const allowExplicit of [false, true]) {
+    for (let n = out.length - 1; n > 0 && count(out) > max; n--) {
+      if (!allowExplicit && out[n][layout]?.explicitBreak) continue
+      const merged = mergeText(out[n - 1], out[n])
+      if (merged) out.splice(n - 1, 2, merged)
+    }
   }
   return out
 }
@@ -341,15 +346,15 @@ export function bubbleDelay(next = '', rand = Math.random) {
   return Math.round(Math.min(1400, Math.max(250, 150 + stringOf(next).length * 25)) * (0.8 + rand() * 0.5))
 }
 
-/** 合并短答碎片；引用、代码、表格与媒体边界保持原样。 */
+/** 合并普通换行的短答碎片；显式 |||、引用、代码、表格与媒体边界保持原样。 */
 export function compactShortReplies(items, maxChars = 100) {
   const out = []
   for (const item of items) {
     const previous = out.at(-1)
-    if (item.kind === 'text' && previous?.kind === 'text' && !item.replyTo && !previous.replyTo &&
+    if (item.kind === 'text' && previous?.kind === 'text' && !item[layout]?.explicitBreak && !item.replyTo && !previous.replyTo &&
       !/[`|]/.test(previous.value + item.value) && !item.value.includes('\n') && previous.value.length + item.value.length + 1 <= maxChars) {
-      out[out.length - 1] = { ...previous, value: previous.value + '\n' + item.value }
-    } else out.push({ ...item })
+      out[out.length - 1] = mergeText(previous, item)
+    } else out.push(item)
   }
   return out
 }

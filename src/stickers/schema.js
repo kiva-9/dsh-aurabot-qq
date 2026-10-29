@@ -9,6 +9,7 @@ export const STICKER_SCHEMA = `
   );
   CREATE INDEX IF NOT EXISTS sticker_scope ON sticker_items(account,chat,state);
   CREATE INDEX IF NOT EXISTS sticker_md5 ON sticker_items(account,md5);
+  CREATE INDEX IF NOT EXISTS sticker_account_hash ON sticker_items(account,sha256);
   CREATE TABLE IF NOT EXISTS sticker_quota (
     item_id TEXT PRIMARY KEY REFERENCES sticker_items(id), account TEXT NOT NULL, reserved_at INTEGER NOT NULL
   );
