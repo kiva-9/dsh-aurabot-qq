@@ -859,17 +859,21 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           handle(await post('/persona/rollback', { id: card.id, revision: r.revision, editRevision: card.editRevision }), '回滚好了（发布成了新的一版）').then(() => loadCard(card.id))
         } }))) : null,
         ),
-        h(EffectivePrompt, { st, bindings }),
+        h(EffectivePrompt, { st, bindings, personaVersions: (list || []).map(p => [p.id, p.revision]) }),
       )
     }
 
     /** 某个聊天实际会用的提示词：哪张卡哪个版本（从哪层绑定来的）、运行规则、模型。 */
-    function EffectivePrompt({ st, bindings }) {
+    function EffectivePrompt({ st, bindings, personaVersions }) {
       const chats = Array.from(new Set([...Object.keys(st.sessions || {}).filter((k) => !k.startsWith('system:')), ...(st.config.allow.groups || []).map((g) => 'group:' + g), 'private:' + st.config.ownerQQ, ...(st.config.allow.private || []).map((q) => 'private:' + q)])).filter((c) => /^(group|private):\d+$/.test(c))
       const [chat, setChat] = useState(chats[0] || '')
       const [p, setP] = useState(null)
       const [open, setOpen] = useState('')
-      useEffect(() => { if (chat) get('/prompt/preview?chatId=' + encodeURIComponent(chat)).then(setP) }, [chat, JSON.stringify(bindings)])
+      useEffect(() => {
+        let active = true
+        if (chat) get('/prompt/preview?chatId=' + encodeURIComponent(chat)).then(value => { if (active) setP(value) })
+        return () => { active = false }
+      }, [chat, JSON.stringify(bindings), JSON.stringify(personaVersions), JSON.stringify(st.config)])
       const label = (c) => (c === 'private:' + st.config.ownerQQ ? '主人私聊' : c.replace('group:', '群 ').replace('private:', '私聊 '))
       return h(Card, { className: 'ab-span', title: '某个聊天实际用的提示词', desc: '按现在的绑定和设置，这个聊天下一轮会拿到的人设和规则。改了卡或绑定后这里跟着变。',
         right: h(Select, { value: chat, width: 180, options: chats.map((c) => ({ value: c, label: label(c), desc: c })), onChange: setChat }) },

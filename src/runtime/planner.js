@@ -29,14 +29,21 @@ const hash = (parts) => createHash('sha256').update(JSON.stringify(parts)).diges
  */
 export function createPlanner({
   storage, getConfig, getRunner = () => null, onWake, now = () => Date.now(), log,
-  maxRounds = 4, maxTools = 6, maxSearches = 2, maxAutoWakes = 8,
+  maxRounds = 4, maxTools, maxSearches = 2, maxAutoWakes = 8,
   maxWaitMs = 86_400_000, minWaitMs = 1000, maxPendingPerRequest = 8, ...queueOptions
 }) {
-  for (const [name, n] of Object.entries({ maxRounds, maxTools, maxSearches, maxAutoWakes, maxWaitMs, minWaitMs, maxPendingPerRequest })) {
+  for (const [name, n] of Object.entries({ maxRounds, maxTools: maxTools === undefined ? 6 : maxTools, maxSearches, maxAutoWakes, maxWaitMs, minWaitMs, maxPendingPerRequest })) {
     if (!Number.isSafeInteger(n) || n < 1) throw new RangeError(name + ' 必须是正整数')
   }
   if (maxWaitMs < minWaitMs) throw new RangeError('maxWaitMs 小于 minWaitMs')
   const db = storage.db
+  // Follow the same live setting as the host wrapper. An explicit constructor
+  // limit remains authoritative for embedders; absent/invalid config uses 6.
+  const toolLimit = () => {
+    if (maxTools !== undefined) return maxTools
+    const value = Number(getConfig().toolCallsPerTurn)
+    return Number.isSafeInteger(value) ? Math.max(1, Math.min(30, value)) : 6
+  }
   let disposed = false
   const get = (key) => {
     const r = db.get('SELECT value FROM meta WHERE key = ?', key)
@@ -113,7 +120,7 @@ export function createPlanner({
   function admit(ctx, { action, tool, search = false } = {}) {
     const { key, r } = turn(ctx)
     if (r.state !== 'active') return { ok: false, code: r.state === 'exhausted' ? 'BUDGET_EXHAUSTED' : 'PLANNER_STOPPED', message: '本次决策已经结束', wakeId: r.id }
-    if ((action && r.rounds >= maxRounds) || (tool && r.tools >= maxTools) || (search && r.searches >= maxSearches)) {
+    if ((action && r.rounds >= maxRounds) || (tool && r.tools >= toolLimit()) || (search && r.searches >= maxSearches)) {
       put(key, { ...r, state: 'exhausted', updatedAt: now(), finishedAt: now() })
       return { ok: false, code: 'BUDGET_EXHAUSTED', message: '本次唤醒预算已用完；使用已有结果或结束，不能自动再次唤醒', wakeId: r.id }
     }

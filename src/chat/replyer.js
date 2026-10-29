@@ -23,7 +23,7 @@ export const REPLYER_SYSTEM = [
   '输入 blocks 的每个 id 必须按原顺序出现恰好一次，输出 {"type":原type,"ref":原id}。不得增加、删减、重排 block。',
   'type 仅取输入中的 text / imageAsset / voiceRequest / stickerAsset / quote / poke / break。非 text 段只能引用，不输出路径、网址、资产 ID、语音、引用编号或替代内容。',
   'text 段可选 cuts 数组：从该段原文开头计算的 UTF-16 偏移，严格递增且不含 0 或末尾；程序从原文切片。省略 cuts 使用默认分行，cuts:[] 保持整段。',
-  '最多 64 个切点，不能切开 Unicode 字符、组合字符、URL、代码、公式、数字、引文。原文标点和空白全部保留。',
+  '最多 64 个切点，不能切开 Unicode 字符、组合字符、URL、代码、表格、公式、数字、引文。原文标点和空白全部保留。',
   '不要改写、概括或补充内容。text 字段可省略；若回显，必须逐字等于输入 raw。不确定就只引用原段。',
   '角色风格只能影响合法切点，不改变语音、引用、事实、否定、状态、承诺或混合内容的先后顺序。',
 ].join('\n')

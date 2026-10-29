@@ -71,6 +71,9 @@ export function protectedReplyRanges(value) {
   for (const r of text.matchAll(/(`+)([^\r\n]*?)\1(?!`)/g)) if (!inside(r.index)) add(r.index, r.index + r[0].length, 'code')
   for (const r of text.matchAll(/`+/g)) if (!inside(r.index)) add(r.index, text.length, 'code')
   for (const r of text.matchAll(/^(?: {4}|\t)[^\r\n]*(?:\r?\n|$)/gm)) add(r.index, r.index + r[0].length, 'code')
+  // Keep a Markdown table's header, separator and rows together, including
+  // short tables that would otherwise look like ordinary chat lines.
+  for (const r of text.matchAll(/^[^\r\n]*\|[^\r\n]*\r?\n[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)+\|?[ \t]*(?:\r?\n(?=[^\r\n]*\|)[^\r\n]+)*/gm)) if (!inside(r.index)) add(r.index, r.index + r[0].length, 'table')
   for (const r of text.matchAll(/\$\$[\s\S]*?(?:\$\$|$)|\\\[[\s\S]*?(?:\\\]|$)|\\\([\s\S]*?(?:\\\)|$)|(?<!\\)\$[^$\r\n]+\$/g)) if (!inside(r.index)) add(r.index, r.index + r[0].length, 'formula')
   for (const r of text.matchAll(/「[^」]*」|『[^』]*』|“[^”]*”|‘[^’]*’|"[^"\r\n]*"|(?<![\p{L}\p{N}])'[^'\r\n]*'/gu)) if (!inside(r.index)) add(r.index, r.index + r[0].length, 'quotation')
   for (let at = 0; at < text.length; at++) {
@@ -158,7 +161,7 @@ function defaultCuts(text) {
   if (text.length > 240) return []
   const lines = text.split(/\r?\n/).filter(s => s.trim())
   if (lines.length < 2 || lines.filter(s => /^\s*(?:\d+[.、)]|[-*+•·]|>)/.test(s)).length >= Math.ceil(lines.length / 2)) return []
-  if (protectedReplyRanges(text).some(r => ['code', 'formula'].includes(r.kind))) return []
+  if (protectedReplyRanges(text).some(r => ['code', 'formula', 'table'].includes(r.kind))) return []
   const cuts = []
   for (const m of text.matchAll(/(?:\r?\n)+/g)) if (m.index + m[0].length < text.length) cuts.push(m.index + m[0].length)
   return cuts.slice(0, MAX_CUTS)

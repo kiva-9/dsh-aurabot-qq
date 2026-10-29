@@ -133,3 +133,23 @@ test('分层编译：名字、性格、样子、做法、说话方式按层拼�
   assert.equal(n.behavior.proactivity, 'normal')
   assert.equal(n.junk, undefined)
 })
+
+test('内置 JSON 卡保留分层与导出格式，优先于同名内置 Markdown，更新不覆盖用户版本', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aurabot-native-persona-'))
+  const bundled = join(dir, 'bundled'), legacy = join(dir, 'legacy')
+  mkdirSync(bundled); mkdirSync(legacy)
+  const card = { format: 'aurabot-persona', version: 1, id: 'dafeiyu', name: '大肥鱼', layers: L('分层身份', { appearance: { text: '蓝色鲸鱼娘' } }) }
+  writeFileSync(join(bundled, 'dafeiyu.persona.json'), JSON.stringify(card))
+  writeFileSync(join(bundled, 'dafeiyu.md'), '---\nname: 旧内置卡\n---\n旧内置正文')
+  const s = storage(), svc = createPersonaService({ storage: s, legacyDir: legacy, bundledDir: bundled })
+  assert.equal(svc.store.get('dafeiyu').published.layers.legacy, undefined)
+  assert.equal(svc.store.exportCard('dafeiyu').layers.appearance.text, '蓝色鲸鱼娘')
+  assert.match(svc.textOf(svc.snapshotFor('group:1')), /分层身份/)
+  writeFileSync(join(bundled, 'dafeiyu.persona.json'), JSON.stringify({ ...card, layers: L('后来更新的内置身份') }))
+  createPersonaService({ storage: s, legacyDir: legacy, bundledDir: bundled })
+  assert.equal(svc.store.get('dafeiyu').published.revision, 1)
+  assert.equal(svc.store.get('dafeiyu').published.layers.identity.core, '分层身份')
+  writeFileSync(join(legacy, 'dafeiyu.md'), '---\nname: 用户旧卡\n---\n用户自己的设定')
+  const migrated = createPersonaService({ storage: storage(), legacyDir: legacy, bundledDir: bundled })
+  assert.equal(migrated.store.get('dafeiyu').published.layers.legacy.body, '用户自己的设定')
+})

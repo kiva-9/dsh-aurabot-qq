@@ -24,6 +24,23 @@ function readMarkdownDir(dir) {
   return out
 }
 
+// Native exported cards retain editable layers. User Markdown is only imported
+// through importLegacy; a bundled update never overwrites a published user card.
+function readBundledDir(dir, log) {
+  const cards = new Map(readMarkdownDir(dir).map(p => [p.id, { id: p.id, name: p.name, layers: layersFromMarkdown(p) }]))
+  if (!existsSync(dir)) return [...cards.values()]
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.endsWith('.persona.json')) continue
+    try {
+      const card = JSON.parse(readFileSync(join(dir, name), 'utf8'))
+      if (card.format !== 'aurabot-persona' || card.version !== 1 || !PERSONA_ID.test(card.id) ||
+          name !== `${card.id}.persona.json` || !card.layers || typeof card.layers !== 'object' || Array.isArray(card.layers)) throw new Error('无效的分层人设文件')
+      cards.set(card.id, { id: card.id, name: card.name, layers: card.layers })
+    } catch (error) { log?.warn?.(`内置人设 ${name} 未加载：${error.message}`) }
+  }
+  return [...cards.values()]
+}
+
 /**
  * @param {object} o
  * @param {object} o.storage
@@ -62,7 +79,7 @@ export function createPersonaService({ storage, legacyDir, legacyCurrent, log, b
 
   function init() {
     importLegacy()
-    store.seed(readMarkdownDir(bundledDir).map((p) => ({ id: p.id, name: p.name, layers: layersFromMarkdown(p) })))
+    store.seed(readBundledDir(bundledDir, log))
     if (!store.bindings().some((b) => b.scope === 'global')) {
       const first = store.get(DEFAULT_ID)?.published ? DEFAULT_ID : store.list({ includeArchived: false }).find((p) => p.published)?.id
       if (first) store.bind('global', first)

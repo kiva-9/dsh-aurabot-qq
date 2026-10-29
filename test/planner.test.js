@@ -63,6 +63,33 @@ function setup(t, options = {}) {
     time: (value) => { clock = value }, advance: (value) => { clock += value }, now: () => clock }
 }
 
+test('Planner follows the live tool limit beyond six and preserves exhausted turns', (t) => {
+  const f = setup(t)
+  f.cfg.toolCallsPerTurn = 30
+  for (let i = 0; i < 10; i++) assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).ok, true)
+  // A panel reduction applies immediately; restoring a higher limit cannot
+  // reopen the same exhausted decision or reset its persisted consumption.
+  f.cfg.toolCallsPerTurn = 10
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).code, 'BUDGET_EXHAUSTED')
+  f.cfg.toolCallsPerTurn = 30
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).code, 'BUDGET_EXHAUSTED')
+  const next = f.request()
+  for (let i = 0; i < 30; i++) assert.equal(f.p.useTool(next, { name: 'recall' }).ok, true)
+  assert.equal(f.p.useTool(next, { name: 'recall' }).code, 'BUDGET_EXHAUSTED')
+})
+
+test('explicit Planner limits override config and searches retain an independent cap', (t) => {
+  const f = setup(t, { maxTools: 2 })
+  f.cfg.toolCallsPerTurn = 30
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).ok, true)
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).ok, true)
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).code, 'BUDGET_EXHAUSTED')
+  const p = f.make(f.s, { maxTools: undefined }), next = f.request()
+  assert.equal(p.useTool(next, { name: 'search', search: true }).ok, true)
+  assert.equal(p.useTool(next, { name: 'search', search: true }).ok, true)
+  assert.equal(p.useTool(next, { name: 'search', search: true }).code, 'BUDGET_EXHAUSTED')
+})
+
 test('wait 落库后结束决策，stop 不取消等待或后台任务', async (t) => {
   const f = setup(t)
   const j = f.job()

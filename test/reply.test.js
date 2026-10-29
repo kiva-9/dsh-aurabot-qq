@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   capBubbles, capItems, createReplySource, parseReply, protectedReplyRanges,
-  replySourceRefs, splitLines, splitReplyText, stripMarkdown,
+  replySourceRefs, splitLines, splitReplyText, stripMarkdown, REPLY_SCHEMA, REPLY_VERSION, validateReplyPlan,
 } from '../src/chat/reply.js'
 
 test('旧标签、表情闭合标签、引用与多气泡仍兼容；原文 block 连续覆盖', () => {
@@ -115,6 +115,17 @@ test('代码、列表、长文默认整段发送；普通短行保留原有拆�
     assert.equal(parseReply(text).items.length, 1, text)
   }
   assert.equal(parseReply('a\nb\nc\nd\ne\nf\ng').items.at(-1).value, 'e\nf\ng')
+})
+
+test('短表格连同表头和数据整段交付，Replyer 不能把行切成聊天气泡', () => {
+  for (const text of ['| 项目 | 值 |\n| --- | --- |\n| 数量 | 2 |', '项目 | 值\n:--- | ---:\n数量 | 2']) {
+    const parsed = parseReply(text)
+    assert.equal(parsed.items.length, 1)
+    assert.equal(parsed.items[0].value, text)
+    const source = createReplySource(text)
+    const plan = { schema: REPLY_SCHEMA, version: REPLY_VERSION, blocks: source.blocks.map(b => ({ type: b.type, ref: b.id, cuts: [text.indexOf('\n') + 1] })) }
+    assert.equal(validateReplyPlan(text, plan).ok, false)
+  }
 })
 
 test('合并相邻原文切片保留 CRLF、空行和空白分隔符', () => {
