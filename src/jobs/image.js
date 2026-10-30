@@ -195,7 +195,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       const save = () => {
         storage.db.run(`INSERT INTO generation_lineage(job_id, parent_job_id, inputs_json, outputs_json, intent, params_json) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(job_id) DO UPDATE SET outputs_json = excluded.outputs_json`,
-      job.id, job.parentJobId, toJson((job.input.refs || []).map((r) => ({ assetId: r.assetId, role: r.role, occurrenceId: r.occurrenceId || null, sourceMessageId: r.sourceMessageId || null, selectionReason: r.reason || '' }))),
+      job.id, job.parentJobId, toJson((job.input.refs || []).map((r) => ({ assetId: r.assetId, role: r.role, occurrenceId: r.occurrenceId || null, sourceMessageId: r.sourceMessageId || null, selectionReason: r.reason || '', ...(r.avatar ? { avatar: r.avatar } : {}) }))),
         toJson(assetIds), String(job.input.prompt || '').slice(0, 500), toJson({ mode: job.input.mode, size: job.input.size, profileId: job.profileId, persona: job.input.persona }))
         for (const [segIndex, assetId] of assetIds.entries()) {
           const old = storage.db.get("SELECT id FROM asset_occurrences WHERE json_extract(remote_json,'$.jobId')=? AND seg_index=?", job.id, segIndex)
