@@ -63,6 +63,7 @@ export default {
 | send(chatId,text) | 正常拆条和回复流程，可含 voice/sticker/poke 标记 |
 | sendText(chatId,text) / reply(msg,text) | 直接文字；reply 在群内引用原消息 |
 | sendImage(chatId,src) / sendSegments(chatId,segments,note?) | 图片 / OneBot 消息段；路径和资产仍须符合宿主校验 |
+| sendFile(chatId,file,name?) / sendVoiceFile(chatId,file,note?) | 发文件 / 把音频当语音条发；本机路径限 QQ 工作区和 `files.dirs`，受 `files.enabled` 控制。没确认送达时抛错，`DELIVERY_UNKNOWN` 不要重发 |
 | onebot(action,params,options?) | 直接网关调用，不能假定继承高层发送、试运行或请求权限保护 |
 | ask(stringOrOptions) | 单次模型调用，可能收费；并无统一物理取消保证 |
 | think(prompt,{title,timeoutMs}?) | 带人格的后台会话，返回文字，不自动送达 QQ |

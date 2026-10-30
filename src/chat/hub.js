@@ -6,9 +6,10 @@
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { dataDir, readJson, writeJson } from '../core/store.js'
+import { checkLocalFile, displayName, FILE_BASE64_MAX } from '../delivery/files.js'
 import { parseMessageEvent } from './inbound.js'
 import { expandMentions, hasMention, stripAtTags } from './mentions.js'
 import { createFaces, textToSegments, stripFaceTags } from './faces.js'
@@ -42,6 +43,7 @@ const RECENT_MEDIA_MS = 30 * 60_000
 const RECENT_MEDIA_MAX = 6
 const MEMBER_CACHE_MS = 10 * 60_000
 const MEMBER_RETRY_MS = 60_000
+const FILE_TIMEOUT_MS = 120_000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 音频文件的类型，认不出来就当 wav。 */
@@ -467,7 +469,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!canSend()) throw Object.assign(new Error('机器人账号尚未核对通过，暂不发送'), { outcome: 'not_sent' })
     const params = tgt.kind === 'group' ? { group_id: Number(tgt.id), message } : { user_id: Number(tgt.id), message }
     try {
-      const r = await onebot.call(action, params)
+      const r = message[0]?.type === 'file' ? await uploadFile(tgt, message[0].data) : await onebot.call(action, params)
       if (r && r.message_id !== undefined) {
         sentIds.set(sentKey(account, chatId, r.message_id), Date.now())
         if (sentIds.size > 500) sentIds.delete(sentIds.keys().next().value)
@@ -477,6 +479,20 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     } catch (error) {
       bump('errors')
       throw error
+    }
+  }
+
+  /** 上传文件（不是消息段，走 upload_*_file）。本机路径被网关拒绝时（网关看不到这台机器的文件）小文件改 base64 再试一次；超时可能已经传上去了，不重试。 */
+  async function uploadFile(tgt, { file, name, size }) {
+    const action = tgt.kind === 'group' ? 'upload_group_file' : 'upload_private_file'
+    const base = { ...(tgt.kind === 'group' ? { group_id: Number(tgt.id) } : { user_id: Number(tgt.id) }), name }
+    const call = (src) => onebot.call(action, { ...base, file: src }, { timeoutMs: FILE_TIMEOUT_MS })
+    try {
+      return await call(file)
+    } catch (error) {
+      if (error.outcome !== 'rejected' || !size || size > FILE_BASE64_MAX) throw error
+      log.info(`网关收不了本机路径，改走 base64：${name}`)
+      return call('base64://' + readFileSync(file).toString('base64'))
     }
   }
 
@@ -627,6 +643,33 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (r.canceled) throw Object.assign(new Error('任务或会话已取消，音频已保留'), { code: 'DELIVERY_CANCELED', delivery: r, assetId: asset.id })
     if (!r.delivered && !r.skipped) throw Object.assign(new Error('网关没接受这条语音'), { code: 'DELIVERY_REJECTED', delivery: r, assetId: asset.id })
     return { ...r, assetId: asset.id, ...(r.delivered ? { message_id: r.messageIds[0] } : {}) }
+  }
+
+  /**
+   * 把文件发到 QQ（不是语音条）。file：本机绝对路径（须在 QQ 工作区或 files.dirs 内）、http(s) 网址或 base64://。
+   * 结果和 sendVoiceFile 一样：没确认送达就抛错，DELIVERY_UNKNOWN 表示可能已送达，不要重发。
+   */
+  async function sendFile(chatId, file, name, options = {}) {
+    const cfg = getConfig(), src = String(file ?? '').trim(), maxBytes = cfg.files.maxMB * 1048576
+    if (!cfg.files.enabled) throw Object.assign(new Error('发文件没打开（面板「聊天」页）'), { code: 'FILE_DISABLED' })
+    if (!targetOf(chatId)) throw Object.assign(new Error('发送目标不对'), { code: 'FILE_REJECTED' })
+    if (!src) throw Object.assign(new Error('要发哪个文件？'), { code: 'FILE_REJECTED' })
+    let data
+    if (/^https?:\/\//i.test(src)) data = { file: src, name: displayName(name, basename(src.split(/[?#]/)[0])) }
+    else if (/^base64:\/\//i.test(src)) {
+      const buf = Buffer.from(src.slice(9), 'base64')
+      if (!buf.length || buf.length > maxBytes) throw Object.assign(new Error('文件内容是空的或超过大小上限'), { code: 'FILE_REJECTED' })
+      data = { file: 'asset:' + storage.assets.put(buf, { mime: 'application/octet-stream', sourceKind: 'upload' }).id, name: displayName(name) }
+    } else {
+      const local = checkLocalFile(src, { roots: [WORKSPACE_DIR, ...cfg.files.dirs], denied: [dataDir('.')], maxBytes })
+      data = { file: local.path, size: local.size, name: displayName(name, local.name) }
+    }
+    const r = await sendItems(chatId, [{ kind: 'file', message: [{ type: 'file', data }], note: `[文件] ${data.name}` }], options)
+    if (r.unknown || r.pending) throw Object.assign(new Error('文件发送结果不确定，请先核对 QQ 记录，不要重发'), { code: 'DELIVERY_UNKNOWN', delivery: r })
+    if (r.canceled) throw Object.assign(new Error('任务或会话已取消，文件没发'), { code: 'DELIVERY_CANCELED', delivery: r })
+    if (!r.delivered && !r.skipped) throw Object.assign(new Error(`网关没接受这个文件：${r.rows?.[0]?.lastError || '未知原因'}`), { code: 'DELIVERY_REJECTED', delivery: r })
+    log.info(`${chatId}：发文件「${data.name}」${data.size ? `（${Math.ceil(data.size / 1024)} KB）` : ''}${r.delivered ? '' : '（没真发）'}`)
+    return { ...r, name: data.name }
   }
 
   function stickerItem(query, replyId, chatId) {
@@ -1884,6 +1927,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     sendText,
     sendVoice,
     sendVoiceFile,
+    sendFile,
     sendSticker,
     sendImage,
     sendSegments,

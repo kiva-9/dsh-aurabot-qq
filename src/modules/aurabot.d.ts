@@ -363,6 +363,8 @@ export interface Api {
   reply(msg: Message, text: string): Promise<any>
   sendImage(chatId: ChatId | string, src: string): Promise<any>
   sendSegments(chatId: ChatId | string, segments: Segment[], note?: string): Promise<any>
+  sendFile(chatId: ChatId | string, file: string, name?: string): Promise<any>
+  sendVoiceFile(chatId: ChatId | string, file: string, note?: string): Promise<any>
   onebot(action: string, params?: any, options?: {timeoutMs?: number}): Promise<any>
   isOwner(userId: string | number): boolean
   ask(options: string | {system?: string; text: string; maxTokens?: number}): Promise<string>

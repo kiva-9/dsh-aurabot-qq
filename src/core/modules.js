@@ -280,6 +280,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       isOwner: (userId) => String(userId) === String(getConfig().ownerQQ),
       sendImage: guard('发送图片', (chatId, src) => core.hub.sendImage(String(chatId), src)),
       sendSegments: guard('发送消息段', (chatId, segs, note) => core.hub.sendSegments(String(chatId), segs, note || `[${id}]`)),
+      sendFile: guard('发送文件', (chatId, file, name) => core.hub.sendFile(String(chatId), file, name)),
+      sendVoiceFile: guard('发送语音文件', (chatId, file, note) => core.hub.sendVoiceFile(String(chatId), file, note)),
       ask: guard('模型调用', (opts) => core.ask(typeof opts === 'string' ? { text: opts } : opts)),
       think: guard('后台决策', (prompt, opts = {}) => core.hub.runSystemTurn(`ext-${id}`, opts.title || def.name || id, String(prompt), opts)),
       onebot: guard('OneBot操作', (action, params, opts) => core.onebot.call(action, params, opts)),

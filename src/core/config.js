@@ -23,6 +23,7 @@ export const DEFAULTS = {
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
   profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' }, // 改资料类操作的权限：off 关 / owner 仅主人私聊 / all 所有人
+  files: { enabled: false, maxMB: 50, dirs: [] }, // 发文件：默认关；除 QQ 工作区外只能发 dirs 里的（绝对路径）
   security: { dangerConfirm: false }, // 危险终端命令先在 QQ 问主人（只覆盖 bash / pwsh，不是沙箱）
   toolCallsPerTurn: 6, // 一轮里最多调用几次插件工具（防止模型反复自我唤醒、烧额度）；DSH 自带的电脑工具不算
   conversation: { maxTurns: 48, maxContextTokens: 48000, maxAgeMinutes: 480, followupSeconds: 90 },
@@ -234,6 +235,9 @@ export function normalize(raw) {
   c.mood.judgeIntervalMs = num(c.mood.judgeIntervalMs, 60000, 1000, 86400000)
   c.learning = learningSettings(c)
   c.security.dangerConfirm = c.security.dangerConfirm === true
+  c.files.enabled = c.files.enabled === true
+  c.files.maxMB = num(c.files.maxMB, 50, 1, 2048)
+  c.files.dirs = (Array.isArray(c.files.dirs) ? c.files.dirs : String(c.files.dirs || '').split(/\r?\n/)).map((d) => String(d).trim()).filter((d) => /^(?:[a-zA-Z]:[\\/]|\/)/.test(d))
   c.schemaVersion = 2
   c.policyRevision = Math.max(0, Math.floor(Number(c.policyRevision)||0))
   c.memory.shareGroups = normalizeShareGroups(c.memory.shareGroups)

@@ -11,7 +11,7 @@ export default {
   description: '翻当前聊天的记录（qq_chat_history）；主人私聊里让她主动给白名单里的人和群发消息（qq_send_message）',
   setup(api) {
     const { hub, onebot, storage } = api.core
-    api.tool(({ chat, level }) => {
+    api.tool(({ chat, level, sessionId }) => {
       if (chat.kind === 'system') return []
       const self = String(api.config().botQQ)
       const tools = [defineTool({
@@ -50,6 +50,26 @@ export default {
           const r = await hub.deliver(`${kind}:${id}`, String(text || ''))
           const missed = [...new Set(r?.missedMentions || [])]
           return { ok: true, message: '发出去了' + (missed.length ? `；这些 @ 没对上，只发成了文字：${missed.join('、')}` : '') }
+        },
+      }))
+      if (level === 'full' && api.config().files.enabled) tools.push(defineTool({
+        name: 'qq_send_file',
+        description: '把文件发到 QQ（不是图片或语音）。主人让你发文件时用。file 写本机绝对路径（只能是 QQ 工作区和面板允许的目录）或 http(s) 网址；不填 target 就发到当前聊天。',
+        properties: { file: str('本机绝对路径或网址'), name: str('发到 QQ 上显示的文件名，可不填'), target: str('private:QQ号 或 group:群号，不填发到当前聊天') },
+        required: ['file'],
+        execute: async ({ file, name, target }) => {
+          const cfg = api.config()
+          if (!cfg.files.enabled) return { ok: false, message: '发文件没打开' }
+          if (!hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '只有主人能让我发文件' }
+          const [kind, id] = String(target || chat.chatId).split(':')
+          const okList = kind === 'group' ? cfg.allow.groups : kind === 'private' ? [cfg.ownerQQ, ...cfg.allow.private] : []
+          if (!okList.includes(String(id))) return { ok: false, message: '不在白名单里，不能发' }
+          try {
+            const r = await hub.sendFile(`${kind}:${id}`, file, name)
+            return { ok: true, message: r.delivered ? `文件「${r.name}」发出去了` : `试运行：文件「${r.name}」没有真发` }
+          } catch (error) {
+            return { ok: false, code: error.code, message: error.message }
+          }
         },
       }))
       return tools
