@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createStorage } from '../src/storage/index.js'
 import { createMemoryStore } from '../src/memory/index.js'
 import memoryModule from '../src/modules/memory/index.js'
+import { hubFixture, privateChat, OWNER, until } from './helpers/hub-fixture.js'
 
 const scope = { account: '1', chat: 'private:2', persona: '' }
 const chat = { kind: 'private', chatId: scope.chat, userId: '2' }
@@ -63,4 +64,29 @@ test('prompt 钩子：hint 放最前；出错时原内容照常提交', async t 
   assert.equal(hooks.prompt(content, { ...info, chat: { kind: 'system', chatId: 'system:x' } }), content)
   assert.deepEqual(hooks.prompt(content, info), content, '没有命中时不加块')
   assert.equal(hooks.prompt(content, { ...info, chat: {} }), content, '范围解析出错不能吞掉消息')
+})
+
+test('prompt 钩子命中时 hint 放在内容最前，用的是当前范围', async t => {
+  const hooks = {}, storage = createStorage({ file: ':memory:', filesDir: '/tmp/unused-aurabot-assets' })
+  const api = { core: { hub: { selfId: '1' }, http: {}, storage }, dsh: {}, config: () => ({ botQQ: '1', memory: { enabled: true, recallCount: 6 } }), log: { warn() {}, info() {}, debug() {} },
+    on: (name, fn) => { hooks[name] = fn }, onDispose() {}, context() {}, every() {}, tool() {}, route() {}, panel() {} }
+  const memory = memoryModule.setup(api)
+  t.after(async () => { await memory.dispose?.(); storage.close() })
+  const text = '阿强喜欢钓鱼'
+  assert.equal(memory.add({ scope, text, subject: '2', predicate: 'likes', value: text, speakerId: '2', polarity: 'positive', modality: 'asserted', conditions: [], eventTime: null, validFrom: null, validTo: null, stability: 'stable', manualEvidence: { kind: 'manual', text, speakerId: '2', actorId: '2' } }).ok, true)
+  const content = [{ type: 'text', text: '【私聊】嗯嗯' }]
+  const out = hooks.prompt(content, { chat, queryText: '嗯嗯', prevText: text, senderId: '2', persona: null })
+  assert.match(out[0].text, /相关记忆[\s\S]*阿强喜欢钓鱼/)
+  assert.equal(out[1], content[0])
+})
+
+test('中枢把上一句和会话传给 prompt 钩子', async t => {
+  const seen = []
+  const f = await hubFixture(t, { hooks: { prompt: (content, info) => { seen.push(info); return content } } })
+  await f.hub.pushToSession(privateChat(), [{ type: 'text', text: '第一句' }], OWNER, { queryText: '第一句' })
+  await until(() => f.fake.turns.length === 1)
+  await f.hub.pushToSession(privateChat(), [{ type: 'text', text: '第二句' }], OWNER, { queryText: '第二句' })
+  assert.equal(seen[0].prevText, '')
+  assert.equal(seen[1].prevText, '第一句')
+  assert.equal(seen[1].sessionId, f.hub.sessions()[privateChat().chatId].sessionId)
 })
