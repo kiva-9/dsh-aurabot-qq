@@ -60,7 +60,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     if (input.maskAssetId && !storage.assets.get(input.maskAssetId)) throw new ProviderError('invalid', '蒙版找不到了，请重新绘制', { maybeCharged: false })
   }
 
-  function enqueue(runner, args) {
+  function prepare(args) {
     const c = cfg()
     const input = { ...structuredClone(args.input), accountId: String(getConfig().botQQ), stylePrompt: c.stylePrompt, size: args.input.size || c.size }
     const persona = args.personaSnapshot || hub.personaFor?.(args.chatId)
@@ -79,9 +79,14 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     const picked = pickProfile({ mode: input.mode, inputs: input.refs, size: input.size, mask: input.maskAssetId ? {} : null }, input.profileId)
     if (picked.error) throw new ProviderError('unsupported', picked.error, { maybeCharged: false })
     input.profileId = picked.profile.id
+    return { input, profile: picked.profile }
+  }
+
+  function enqueue(runner, args) {
+    const { input, profile } = prepare(args)
     return storage.db.tx(() => {
-      const job = runner.enqueue({ ...args, input, profileId: picked.profile.id })
-      storage.db.run('INSERT INTO image_job_configs(job_id, profile_json, created_at) VALUES (?, ?, ?)', job.id, toJson(picked.profile), Date.now())
+      const job = runner.enqueue({ ...args, input, profileId: profile.id })
+      storage.db.run('INSERT INTO image_job_configs(job_id, profile_json, created_at) VALUES (?, ?, ?)', job.id, toJson(profile), Date.now())
       return job
     })
   }
@@ -260,5 +265,5 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     return r ? { jobId, parentJobId: r.parent_job_id, inputs: fromJson(r.inputs_json, []), outputs: fromJson(r.outputs_json, []), intent: r.intent, params: fromJson(r.params_json, {}) } : null
   }
 
-  return { handler, profiles, profileInfo, pickProfile, lineage, enqueue, validateInput }
+  return { handler, profiles, profileInfo, pickProfile, lineage, enqueue, validateInput, preview: (args) => { prepare(args) } }
 }

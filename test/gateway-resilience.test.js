@@ -46,15 +46,21 @@ test('portOpen / waitPortFree', async () => {
 
 async function install(t, onebotPort, botQQ = '20000002') {
   const dir = mkdtempSync(join(tmpdir(), 'fake-snowluma-gw-'))
-  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  let manager
+  t.after(async () => {
+    manager?.dispose()
+    const deadline = Date.now() + 5000
+    while (manager?.ownsProcess && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
+    assert.notEqual(manager?.ownsProcess, true, '模拟 SnowLuma 未退出')
+    rmSync(dir, { recursive: true, force: true })
+  })
   const probe = createNet(), webuiPort = await listen(probe)
   await close(probe)
   mkdirSync(join(dir, 'config'))
   writeFileSync(join(dir, 'config', 'webui.json'), '{}')
   writeFileSync(join(dir, 'index.mjs'), `import fs from 'node:fs'; import http from 'node:http'; fs.writeFileSync('spawned', '1'); http.createServer((q, s) => s.end('{}')).listen(${webuiPort}, '127.0.0.1')`)
   writeFileSync(join(dir, 'config', `onebot_${botQQ}.json`), JSON.stringify({ networks: { httpServers: [{ host: '127.0.0.1', port: onebotPort }] } }))
-  const manager = createSnowLumaManager({ getConfig: () => ({ botQQ, snowluma: { dir, webuiPort, webuiPassword: 'x' } }), log: { info() {}, warn() {}, debug() {} }, portWaitMs: 60 })
-  t.after(() => manager.dispose())
+  manager = createSnowLumaManager({ getConfig: () => ({ botQQ, snowluma: { dir, webuiPort, webuiPassword: 'x' } }), log: { info() {}, warn() {}, debug() {} }, portWaitMs: 60 })
   return { dir, manager }
 }
 const spawned = async (dir) => { for (let i = 0; i < 100 && !existsSync(join(dir, 'spawned')); i++) await new Promise((resolve) => setTimeout(resolve, 20)); return existsSync(join(dir, 'spawned')) }

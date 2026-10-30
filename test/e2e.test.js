@@ -594,6 +594,22 @@ async function imageServer() {
   return imgSrv
 }
 
+test('模块工具模拟不创建后台生图任务或向 QQ 投递', async () => {
+  const base = await imageServer()
+  await fake.call('/save', { imageGen: { enabled: true, defaultProfile: 'sim-image', profiles: [{ id: 'sim-image', name: '模拟服务', protocol: 'openai', baseUrl: base, model: 'test-model', apiKey: 'img-key-123456', capabilities: { modes: ['text'], maxInputs: 0 } }] } })
+  await settle()
+  const jobsBefore = (await fake.call('/imagegen/jobs')).json().list.length
+  const callsBefore = imgCalls.length
+  const sendsBefore = sentTo('private', OWNER).length
+  const result = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_draw_image', args: { prompt: '模拟一只鲸鱼' } })).json()
+  assert.equal(result.ok, true)
+  assert.equal(result.result.simulated, true)
+  assert.match(result.result.message, /模拟.*不会提交生图任务/)
+  assert.equal((await fake.call('/imagegen/jobs')).json().list.length, jobsBefore)
+  assert.equal(imgCalls.length, callsBefore)
+  assert.equal(sentTo('private', OWNER).length, sendsBefore)
+})
+
 test('生图：主人让她画图 → 后台任务画好直接发出来；密钥不回传', async () => {
   const base = await imageServer()
   await fake.call('/save', { imageGen: { enabled: true, stylePrompt: '可爱风', defaultProfile: 'p1', profiles: [{ id: 'p1', name: '测试服务', protocol: 'openai', baseUrl: base, model: 'test-model', apiKey: 'img-key-123456', capabilities: { modes: ['text', 'reference', 'edit'], maxInputs: 4 } }] } })

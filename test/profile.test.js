@@ -153,6 +153,15 @@ test('「用我头像画」：群友自己的头像成 identity 参考，走现�
   assert.equal(f.api.runner.get(r.job_id).input.mode, 'reference')
 })
 
+test('头像生图的模拟调用验证参考，但不创建后台任务', async t => {
+  const f = draw(t)
+  const result = await f.tool.execute({ prompt: '一只猫', use_avatar: true }, { simulated: true })
+  assert.equal(result.ok, true, result.message)
+  assert.equal(result.simulated, true)
+  assert.equal(f.api.runner.list({ chatId: group.chatId }).length, 0)
+  assert.equal((await f.tool.execute({ prompt: '', use_avatar: true }, { simulated: true })).ok, false)
+})
+
 test('群友用别人头像：拒绝且不建任务；非本群成员、下载失败也不画', async t => {
   const f = draw(t)
   assert.equal((await f.tool.execute({ prompt: '猫', avatar: { qq: OWNER } })).ok, false)

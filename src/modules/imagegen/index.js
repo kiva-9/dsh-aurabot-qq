@@ -59,7 +59,7 @@ export default {
           avatar: { type: 'object', description: '可选，比 use_avatar 更具体：qq 只有主人能填且须是本群成员，role 默认 identity', properties: { qq: str('QQ 号'), role: { type: 'string', enum: ['identity', 'style', 'base'] } } },
         },
         required: ['prompt'],
-        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references, use_avatar, avatar }) => {
+        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references, use_avatar, avatar }, execution) => {
           if (!allowed(sessionId)) return { ok: false, message: '画图只给主人画哦' }
           const who = hub.turnActor(sessionId)
           if (who.error) return { ok: false, message: who.error }
@@ -120,12 +120,21 @@ export default {
           if (!refs.length && pool.some((im) => String(im.actorId) === String(who.actorId) && im.state !== 'ready')) return { ok: false, message: '这个请求的图片还未就绪或下载失败，请等待或明确是否只需文生图，不能忽略输入图' }
           const roles = refs.map((r) => r.role)
           const mode = !refs.length ? 'text' : roles.includes('base') ? 'edit' : 'reference'
+          const jobArgs = {
+            kind: 'image', chatId: chat.chatId, requestId: who.requestId, actorId: who.actorId, parentJobId, personaSnapshot: hub.turnPersona?.(sessionId),
+            input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
+          }
+          if (execution?.simulated === true) {
+            try {
+              svc.preview(jobArgs)
+              return { ok: true, simulated: true, message: '模拟：不会提交生图任务，也不会向 QQ 发送图片' }
+            } catch (error) {
+              return { ok: false, message: error.message }
+            }
+          }
           let job
           try {
-            job = svc.enqueue(runner, {
-              kind: 'image', chatId: chat.chatId, requestId: who.requestId, actorId: who.actorId, parentJobId, personaSnapshot: hub.turnPersona?.(sessionId),
-              input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
-            })
+            job = svc.enqueue(runner, jobArgs)
           } catch (error) {
             return { ok: false, message: error.message }
           }

@@ -815,7 +815,7 @@ export function apply(ctx) {
     const tool = mods.buildTools({ chat, level, sessionId: 'sim' }).find((t) => t.name === b.name)
     if (!tool) return { ok: false, message: `这个场合没有 ${b.name} 这个工具` }
     hub.simulateTurn('sim', [userId])
-    const { result, sent } = await hub.capture(() => tool.execute(b.args && typeof b.args === 'object' ? b.args : {}, {}))
+    const { result, sent } = await hub.capture(() => tool.execute(b.args && typeof b.args === 'object' ? b.args : {}, { simulated: true }))
     return { ok: true, result, sent: sentLines(sent) }
   })
   route('/modules/panel', async (req, res) => {

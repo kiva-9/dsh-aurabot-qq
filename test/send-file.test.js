@@ -20,8 +20,6 @@ function tree(t) {
   writeFileSync(join(allowed, '.ssh', 'config'), 'x')
   writeFileSync(join(allowed, 'server.pem'), 'x')
   writeFileSync(join(outside, 'secret.txt'), 'nope')
-  symlinkSync(join(outside, 'secret.txt'), join(allowed, 'link.txt'))
-  symlinkSync(outside, join(allowed, 'linkdir'))
   return { root, allowed, outside, opts: { roots: [allowed], maxBytes: 1024 } }
 }
 const rejected = (fn, re) => assert.throws(fn, e => e.code === 'FILE_REJECTED' && re.test(e.message))
@@ -32,12 +30,22 @@ test('白名单内普通文件放行，返回真实路径', t => {
   assert.equal(r.size, 5)
 })
 
-test('越界、.. 穿越、符号链接逃逸都拒绝', t => {
+test('越界、.. 穿越、符号链接逃逸都拒绝', async t => {
   const f = tree(t)
   rejected(() => checkLocalFile(join(f.outside, 'secret.txt'), f.opts), /不在允许/)
   rejected(() => checkLocalFile(join(f.allowed, '..', 'outside', 'secret.txt'), f.opts), /不在允许/)
-  rejected(() => checkLocalFile(join(f.allowed, 'link.txt'), f.opts), /不在允许/)
-  rejected(() => checkLocalFile(join(f.allowed, 'linkdir', 'secret.txt'), f.opts), /不在允许/)
+  await t.test('目录链接无法逃出白名单', () => {
+    symlinkSync(f.outside, join(f.allowed, 'linkdir'), process.platform === 'win32' ? 'junction' : 'dir')
+    rejected(() => checkLocalFile(join(f.allowed, 'linkdir', 'secret.txt'), f.opts), /不在允许/)
+  })
+  await t.test('文件符号链接无法逃出白名单', t => {
+    try { symlinkSync(join(f.outside, 'secret.txt'), join(f.allowed, 'link.txt'), 'file') }
+    catch (error) {
+      if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) return t.skip('Windows 当前账号无创建文件符号链接权限')
+      throw error
+    }
+    rejected(() => checkLocalFile(join(f.allowed, 'link.txt'), f.opts), /不在允许/)
+  })
 })
 
 test('相对路径、不存在、目录、超限都拒绝', t => {
@@ -53,6 +61,13 @@ test('密钥类文件和敏感目录一律不发', t => {
   const f = tree(t)
   for (const path of ['.env', '.ssh/config', 'server.pem']) rejected(() => checkLocalFile(join(f.allowed, path), f.opts), /密钥/)
   rejected(() => checkLocalFile(join(f.allowed, 'ok.txt'), { ...f.opts, denied: [f.allowed] }), /密钥/)
+})
+
+test('敏感目录名即使使用大写也不能发送', t => {
+  const f = tree(t)
+  mkdirSync(join(f.allowed, '.DSH'))
+  writeFileSync(join(f.allowed, '.DSH', 'config.json'), 'private')
+  rejected(() => checkLocalFile(join(f.allowed, '.DSH', 'config.json'), f.opts), /密钥/)
 })
 
 test('文件名去掉路径和控制字符', () => {

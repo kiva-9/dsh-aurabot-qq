@@ -9,7 +9,7 @@ const line = (x) => `输入 ${count(x.inputTokens)} · 输出 ${count(x.outputTo
 
 function render(result, where) {
   if (!result.totals.calls) return `${where} · ${RANGE_LABEL[result.range]}：还没有可统计的模型调用记录。`
-  const coverage = `覆盖 ${count(result.totals.calls)} 次调用` + (result.totals.incompleteCalls ? `；其中 ${count(result.totals.incompleteCalls)} 次没有返回完整用量，不计入合计。` : '。')
+  const coverage = `覆盖 ${count(result.totals.calls)} 次调用` + (result.totals.incompleteCalls ? `；其中 ${count(result.totals.incompleteCalls)} 次没有返回完整用量，缺失字段未计入合计。` : '。')
   return [`${where} · ${RANGE_LABEL[result.range]}`, line(result.totals), coverage, ...result.buckets.map((b) => `${b.key}：${line(b)}`)].join('\n')
 }
 

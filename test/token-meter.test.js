@@ -122,6 +122,14 @@ test('qq_token_usage：默认当前聊天今天，输出没有金额和请求 ID
   assert.doesNotMatch(r.message, /元|¥|credits|req/i)
 })
 
+test('部分用量计入已知字段，并准确说明缺失字段', async t => {
+  const f = module(t)
+  f.call({ chatId: GROUP, startedAt: Date.now(), usage: { inputTokens: 7 } })
+  const result = await f.tool.execute({})
+  assert.match(result.message, /合计 7 tokens/)
+  assert.match(result.message, /缺失字段未计入合计/)
+})
+
 test('没有数据时明说', async t => {
   assert.match((await module(t).tool.execute({})).message, /还没有可统计/)
 })

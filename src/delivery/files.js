@@ -21,7 +21,7 @@ export function checkLocalFile(file, { roots, denied = [], maxBytes }) {
   const path = real(file)
   if (!path) throw reject('找不到这个文件')
   const parts = path.split(sep)
-  if (SENSITIVE_FILE.test(parts.at(-1)) || parts.some((part) => SENSITIVE_DIRS.has(part)) || denied.map(real).filter(Boolean).some((dir) => within(dir, path))) {
+  if (SENSITIVE_FILE.test(parts.at(-1)) || parts.some((part) => SENSITIVE_DIRS.has(part.toLowerCase())) || denied.map(real).filter(Boolean).some((dir) => within(dir, path))) {
     throw reject('这个文件可能含密钥或配置，不能发')
   }
   if (!roots.map(real).filter(Boolean).some((root) => within(root, path))) throw reject('这个文件不在允许发送的目录里')
