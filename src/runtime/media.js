@@ -31,7 +31,7 @@ export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, o
       const scope = makeScope({ account, chat: msg.chatId, category: m.kind === 'record' ? 'message' : 'image' })
       const id = storage.occurrences.add({
         messageId, chatId: msg.chatId, authorId: msg.userId, segIndex: m.index, kind: m.kind,
-        remote: { url: m.seg.data?.url || '', file: m.seg.data?.file || '' }, scope,
+        remote: { url: m.seg.data?.url || '', file: m.seg.data?.file || '', ...(m.forward ? { forward: m.forward } : {}) }, scope,
       })
       ids.push({ id, kind: m.kind, seg: m.seg })
       left.add(id)
