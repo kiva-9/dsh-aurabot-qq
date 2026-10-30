@@ -10,6 +10,8 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { parseMessageEvent } from './inbound.js'
+import { expandMentions, hasMention, stripAtTags } from './mentions.js'
+import { createFaces, textToSegments, stripFaceTags } from './faces.js'
 import { parseReply, bubbleDelay, wantsVoice, capItems, compactShortReplies } from './reply.js'
 import { publicReply } from './public-reply.js'
 import { decideGroupReply, policyFor, topicRelevance } from './group-policy.js'
@@ -38,6 +40,8 @@ export const WORKSPACE_TITLE = 'Aurabot · QQ'
 const SOURCE_KIND = 'aurabot'
 const RECENT_MEDIA_MS = 30 * 60_000
 const RECENT_MEDIA_MAX = 6
+const MEMBER_CACHE_MS = 10 * 60_000
+const MEMBER_RETRY_MS = 60_000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 音频文件的类型，认不出来就当 wav。 */
@@ -530,13 +534,51 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const quote = (replyId) => (replyId ? [{ type: 'reply', data: { id: String(replyId) } }] : [])
   const textItem = (text, replyId) => ({ kind: 'text', message: [...quote(replyId), { type: 'text', data: { text } }], note: (replyId ? '[引用] ' : '') + text.slice(0, 60) })
 
+  const faces = createFaces({ onebot, log })
+  const memberCache = new Map() // groupId → { at, members }；失败也记时间，别每句话都打网关
+  /** 群成员列表，缓存 10 分钟；拉不到时用旧的或空列表（调用方按「对不上」处理）。 */
+  async function membersOf(groupId) {
+    const cached = memberCache.get(groupId)
+    if (cached && Date.now() - cached.at < MEMBER_CACHE_MS) return cached.members
+    try {
+      const members = await onebot.call('get_group_member_list', { group_id: Number(groupId) }, { timeoutMs: 8000 })
+      if (!Array.isArray(members)) throw new Error('网关没给成员列表')
+      memberCache.set(groupId, { at: Date.now(), members })
+      return members
+    } catch (error) {
+      log.debug('拉群成员失败：', error.message)
+      const members = cached?.members || []
+      memberCache.set(groupId, { at: Date.now() - MEMBER_CACHE_MS + MEMBER_RETRY_MS, members })
+      return members
+    }
+  }
+
+  /** 一段文字 → QQ 消息段：<face:名字> 换系统表情；群里 @ 换真 @，别处的 <at:…> 留成文字。missed 收集没对上的 @。 */
+  async function textSegments(chatId, text, missed) {
+    const segs = textToSegments(text, faces.idOf)
+    if (!hasMention(text)) return segs
+    if (!chatId.startsWith('group:')) return expandMentions(segs, [], { missed: [] })
+    const groupId = chatId.slice(6)
+    const known = [getConfig().ownerQQ, ...(groupBuf.get(groupId) || []).map((x) => x.uid)].filter(Boolean)
+    return expandMentions(segs, await membersOf(groupId), { known, missed })
+  }
+
+  /** 带表情和 @ 的文字段；整段只有认不出的表情时返回 null。 */
+  async function richTextItem(chatId, text, replyId, missed = []) {
+    const segs = await textSegments(chatId, text, missed)
+    if (!segs.length) return null
+    return { kind: 'text', message: [...quote(replyId), ...segs], note: (replyId ? '[引用] ' : '') + text.slice(0, 60) }
+  }
+
   async function sendText(chatId, text, replyId, options = {}) {
-    const it = textItem(text, replyId)
+    const it = (await richTextItem(chatId, text, replyId)) || textItem(text, replyId)
     return sendItems(chatId, [it], options)
   }
 
   /** 文字转成语音段（先存成资产）。转不出来返回 null。 */
-  async function voiceItem(text, profile) {
+  async function voiceItem(raw, profile) {
+    const text = stripFaceTags(stripAtTags(raw))
+    if (!text) return null
     try {
       const { file, engine } = await tts.speak(text, profile)
       const buf = readFileSync(file)
@@ -716,13 +758,13 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     // 引用回复：她写的编号换成那条群消息的 QQ 消息 ID（语音条不能带引用，就不引用了）
     const refs = inGroup ? groupRefs.get(chatId.slice(6)) || {} : {}
     // 组成 outbox 段；戳一戳不是消息：在它的位置先把前面的段发掉再戳
-    const groups = [[]]
+    const groups = [[]], missedMentions = []
     for (const it of items) {
       const replyId = it.replyTo ? refs[it.replyTo] : undefined
       if (it.replyTo && !replyId) log.debug(`${chatId}：引用的编号 ${it.replyTo} 对不上，正常发`)
       let out = null
-      if (it.kind === 'text') out = textItem(it.value, replyId)
-      else if (it.kind === 'voice') out = cfg.voice.enabled ? (await voiceItem(it.value, { ...opts.persona?.layers?.voice, chatId, requestId: opts.requestId })) || textItem(it.value, replyId) : textItem(it.value, replyId)
+      if (it.kind === 'text') out = await richTextItem(chatId, it.value, replyId, missedMentions)
+      else if (it.kind === 'voice') out = (cfg.voice.enabled && await voiceItem(it.value, { ...opts.persona?.layers?.voice, chatId, requestId: opts.requestId })) || await richTextItem(chatId, it.value, replyId, missedMentions)
       else if (it.kind === 'sticker') out = stickerItem(it.value, replyId, chatId)
       else if (it.kind === 'image') out = await imageItem(it.value)
       else if (it.kind === 'poke') { if (!opts.simulate) groups.push('poke', []); continue }
@@ -754,7 +796,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
     }
     if (opts.simulate) return items
-    if (!confirmed.length) return { confirmed: false, complete: false, deliveries }
+    if (missedMentions.length) log.debug(`${chatId}：有 @ 没对上：${missedMentions.join('、')}`)
+    if (!confirmed.length) return { confirmed: false, complete: false, deliveries, missedMentions }
     if (inGroup) {
       const gid = chatId.slice(6)
       const said = (groupSaid.get(gid) || []).filter((t) => Date.now() - t < 3600_000)
@@ -762,7 +805,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       groupSaid.set(gid, said)
       groupEngaged.set(gid, Date.now() + ENGAGE_MS) // 在群里说了话 = 加入了话题
     }
-    const deliveredText = confirmed.map(i => i.kind === 'text' ? i.message.find(s => s.type === 'text')?.data.text || '' : i.kind === 'voice' ? i.fallbackText || '[语音]' : `[${i.kind}]`).join('\n')
+    const deliveredText = confirmed.map(i => i.kind === 'text' ? plainOf(i.message) : i.kind === 'voice' ? i.fallbackText || '[语音]' : `[${i.kind}]`).join('\n')
     logChat(chatId, 'bot', deliveredText)
     lastChatAt = Date.now()
     if (chatId === `private:${cfg.ownerQQ}`) lastBotToOwner = { at: Date.now(), text: deliveredText,
@@ -771,7 +814,12 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       personaId: opts.persona?.personaId, personaRevision: opts.persona?.revision, epoch: opts.epoch,
       sourceMessageIds: opts.sourceMessageIds || (opts.requestId ? storage.requests.get(opts.requestId)?.sourceMessageIds || [] : []),
       confirmed: true, messageIds: confirmed.map(i => i.platformMsgId) })
-    return { confirmed: true, complete: confirmed.length === expected, deliveries }
+    return { confirmed: true, complete: confirmed.length === expected, deliveries, missedMentions }
+  }
+
+  /** 发出去的消息段 → 流水里的文字（表情和 @ 留个占位，别丢掉分开的几段文字）。 */
+  function plainOf(message) {
+    return message.map(s => s.type === 'text' ? s.data.text : s.type === 'at' ? `@${s.data.qq} ` : s.type === 'face' ? `[${faces.nameOf(s.data.id) || '表情'}]` : '').join('')
   }
 
   // ---------- 盯 DSH 会话：一轮结束就发 ----------
@@ -964,7 +1012,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (cfg.botQQ && account !== String(cfg.botQQ)) return
     if (!historyTimeAllowed(storage, account, platformTimeMs(event.time))) return
     selfId = account
-    const msg = parseMessageEvent(event, account)
+    const msg = parseMessageEvent(event, account, { faceName: faces.nameOf })
     if (msg.userId === account) return
     // 先登记进主库：重连后网关重放的同一条消息（同一个 QQ 消息 ID）在这里挡掉
     const ing = storage.messages.ingest({
@@ -1136,7 +1184,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         const r = await onebot.call('get_forward_msg', { id }, { timeoutMs: 15000 })
         for (const node of (r?.messages || []).slice(0, 40)) {
           const who = node.sender?.card || node.sender?.nickname || String(node.sender?.user_id ?? node.user_id ?? '某人')
-          const m = parseMessageEvent({ message_type: 'private', user_id: node.sender?.user_id ?? node.user_id, message: node.message ?? node.content ?? [] }, selfId)
+          const m = parseMessageEvent({ message_type: 'private', user_id: node.sender?.user_id ?? node.user_id, message: node.message ?? node.content ?? [] }, selfId, { faceName: faces.nameOf })
           lines.push(`  ${who}：${(m.text || '（图片/表情）').slice(0, 120)}`)
         }
       } catch (error) {
@@ -1868,7 +1916,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     resetSessions,
     accountChanged: () => {
       resetSessions()
-      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames])map.clear()
+      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames,memberCache])map.clear()
       participation.reset()
       sentIds.clear();followups.clear();selfId='';lastChatAt=0;lastOwnerChatAt=0;lastBotToOwner={at:0,text:''}
     },

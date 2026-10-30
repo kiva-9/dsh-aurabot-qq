@@ -47,8 +47,9 @@ export default {
           const [kind, id] = String(target || '').split(':')
           const okList = kind === 'group' ? cfg.allow.groups : kind === 'private' ? [cfg.ownerQQ, ...cfg.allow.private] : []
           if (!okList.includes(String(id))) return { ok: false, message: '不在白名单里，不能发' }
-          await hub.deliver(`${kind}:${id}`, String(text || ''))
-          return { ok: true, message: '发出去了' }
+          const r = await hub.deliver(`${kind}:${id}`, String(text || ''))
+          const missed = [...new Set(r?.missedMentions || [])]
+          return { ok: true, message: '发出去了' + (missed.length ? `；这些 @ 没对上，只发成了文字：${missed.join('、')}` : '') }
         },
       }))
       return tools
