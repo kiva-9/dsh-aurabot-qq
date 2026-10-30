@@ -277,6 +277,7 @@ export function apply(ctx) {
     stickers,
     tts,
     buildTools: (where) => mods.buildTools(where),
+    toolsGeneration: () => mods?.generation?.() || 0,
     contextProviders: [(args) => mods.contextFor(args)],
     prepareContext: (args) => mods.prepareContext(args),
     getPlanner: () => use('tasks')?.planner || null,

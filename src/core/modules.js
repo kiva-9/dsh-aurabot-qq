@@ -309,8 +309,10 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   }
 
   // ---------- 启动 / 停止 ----------
+  let generation = 0 // 模块代际：每次启停 +1，会话下一轮按它重挂工具（热重载后工具名不变，闭包却换了）
   async function start(def, source, extra = {}) {
     if (disposed) return null
+    generation++
     const id = def.id
     const rec = { id, def, source, exports: null, offs: [], tools: [], contexts: [], rules: [], commands: [], dshTools: [], errors: [], pending: new Set(), controller: new AbortController(), startedAt: Date.now(), ...extra }
     // 设置里的密码字段不回传给面板
@@ -341,6 +343,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   /** 同步启动（内置模块的 setup 都是同步的，插件一加载就要能用）。 */
   function startSync(def) {
     if (disposed) return
+    generation++
     const id = def.id
     const rec = { id, def, source: 'builtin', exports: null, offs: [], tools: [], contexts: [], rules: [], commands: [], dshTools: [], errors: [], pending: new Set(), controller: new AbortController(), startedAt: Date.now() }
     live.set(id, rec)
@@ -359,6 +362,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   function stop(id, { quiet = false } = {}) {
     const rec = live.get(id)
     if (!rec) return false
+    generation++
     rec.stopped = true
     rec.controller.abort()
     live.delete(id)
@@ -690,6 +694,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
 
   return {
     boot, sync, reload, stop, dispose, status, create, fork, promptFor, panelSource,
+    generation: () => generation,
     use: exportsOf, has: (id) => live.has(id), running: (id) => live.get(id)?.source || null,
     emit, claim, filter, filterSync, buildTools, hookDiagnostics: hookRuntime.diagnostics,
     prepareContext: (args) => hookRuntime.prepare('context/prepare', args),

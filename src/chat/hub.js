@@ -78,14 +78,21 @@ function withMessageRef(tool) {
     },
   }
 }
-export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () => true, personaOf, replyer, stickers, tts, buildTools, contextProviders, prepareContext, getPlanner = () => null, onActivity, onDiagnostic, onRequestBatch, onUsage, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels }) {
+export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () => true, personaOf, replyer, stickers, tts, buildTools, contextProviders, prepareContext, getPlanner = () => null, onActivity, onDiagnostic, onRequestBatch, onUsage, memoryScore, onCommand, isMuted, moodEffects, localApi, hooks, availableModels, toolsGeneration }) {
   // 心情对行为的影响（表情 / 语音概率、回复快慢、插话积极程度），没接就是 1
   const mood = (chatId, options) => (typeof moodEffects === 'function' ? moodEffects(chatId, options) : null) || { sticker: 1, voice: 1, delay: 1, chatty: 1 }
   const mapFile = () => dataDir('sessions.json')
   const map = () => readJson(mapFile(), () => ({ chats: {} }))
   const saveMap = (m) => writeJson(mapFile(), m)
 
-  const mounted = new Map() // agent → { off: fn[] , chatId }；卸载时逐个移除宿主注册
+  const mounted = new Map() // sessionKey → { agent, offs: fn[], chatId, toolsKey }；卸载时逐个移除宿主注册
+  /** 撤掉一个会话挂上去的全部工具和上下文（宿主可能换了 agent 对象，所以按会话找，不按 agent 找）。 */
+  function unmount(sid) {
+    const registration = mounted.get(sid)
+    if (!registration) return
+    mounted.delete(sid)
+    for (const off of registration.offs) { try { if (typeof off === 'function') off() } catch (error) {} }
+  }
   let disposed = false
   const activeOperations = new Set()
   const track = (fn) => (...args) => {
@@ -227,8 +234,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       Date.now() - entry.createdAt >= (history.maxAgeMinutes || 480) * 60000)) {
       const old = dsh.agents?.get?.(sid) || dsh.agents?.get?.('session-' + sid)
       old?.cancel?.({ kind: 'hook', reason: '群会话隔离或历史预算轮换' })
-      for (const off of mounted.get(old)?.offs || []) { try { off?.() } catch {} }
-      mounted.delete(old)
+      unmount(sessionKey(sid))
       turnState.get(sessionKey(sid))?.controller?.abort()
       turnState.delete(sessionKey(sid)); sessionToChat.delete(sessionKey(sid))
       const reg = dsh.workspaceRegistry || dsh.get?.('workspaceRegistry')
@@ -341,12 +347,12 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     const budgeted = built.map(t => withBudget(t, sid))
     const tools = chat.kind === 'group' ? budgeted.map(withMessageRef) : budgeted
     const denied = (() => { try { return hooks?.deniedTools?.() || [] } catch (error) { return [] } })()
-    const toolsKey = tools.map((t) => t.name).sort().join(',') + '|' + denied.join(',')
-    const prev = mounted.get(agent)
-    // 工具清单变了（比如面板里开了生图）就整套重挂；没变就别动（改工具会让前缀缓存失效）
-    if (prev && prev.chatId === chat.chatId && prev.toolsKey === toolsKey) return
-    if (prev) for (const off of prev.offs) { try { if (typeof off === 'function') off() } catch (error) {} }
-    mounted.delete(agent)
+    // 代际号：模块热重载后工具名没变，但闭包是旧实例的，也要重挂
+    const toolsKey = tools.map((t) => t.name).sort().join(',') + '|' + denied.join(',') + `|gen:${Number(toolsGeneration?.() || 0)}`
+    const prev = mounted.get(sid)
+    // 工具清单或模块代际变了（比如面板里开了生图）、宿主换了 agent 就整套重挂；都没变就别动（改工具会让前缀缓存失效）
+    if (prev && prev.agent === agent && prev.chatId === chat.chatId && prev.toolsKey === toolsKey) return
+    unmount(sid)
     const offs = []
     if (level !== 'full') {
       offs.push(installSocialScope(agent, tools.map(t => t.name), () => !disposed && getConfig().enabled &&
@@ -384,7 +390,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     } catch (error) {
       log.debug('挂上下文失败：', error.message)
     }
-    mounted.set(agent, { chatId: chat.chatId, offs, toolsKey })
+    mounted.set(sid, { agent, chatId: chat.chatId, offs, toolsKey })
   }
 
   /** 一轮里插件工具的调用次数有上限：到了就告诉模型先把结果说给对方，别再调。 */
@@ -780,6 +786,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!chatId || !event) return
     const st = turnState.get(key) || { lastTurn: -1, text: '', senders: new Set() }
     turnState.set(key, st)
+    // 主人在 DSH 会话窗口直接打字：只有主人能操作 DSH，这一轮算主人说的（QQ 转进来的 source.kind 是 aurabot）
+    if(event.type==='user/message'){if(event.data?.source?.kind==='user')st.directOwner=true;return}
     if(event.type==='turn/start'){st.activeTurn=event.data?.turn;return}
     if(st.activeTurn!==undefined && event.data?.turn!==undefined && st.activeTurn!==event.data.turn)return
     if(event.type==='step/start')st.stepStartedAt=Date.now()
@@ -835,6 +843,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       st.text = ''
       st.senders = new Set()
       st.requests = []
+      st.directOwner = false
       st.system = null
       st.wantVoice = false
       if(control){release(chatId);return}
@@ -1618,7 +1627,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!reqs.length) {
       const st = turnState.get(sessionKey(sessionId))
       const s = [...(st?.senders || [])]
-      return s.length === 1 ? { actorId: s[0], requestId: null } : { error: '不知道是在替谁做' }
+      if (s.length === 1) return { actorId: s[0], requestId: null }
+      if (!s.length && (st?.directOwner || ownerPrivateChat(sessionId))) return { actorId: String(getConfig().ownerQQ), requestId: null }
+      return { error: '不知道是在替谁做' }
     }
     const ref = callRef.getStore()?.forMessage
     const chatId = chatOfSession(sessionId)
@@ -1655,19 +1666,25 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   /**
    * 这一轮提出请求的人是不是全是主人（群管、改资料、存表情等主人才能做的事用）。
    * 主人和别人混在同一轮里时不算：主人说一句「你好」不能替旁边群友的「把他禁言」授权。
-   * 没有请求记录时（后台任务、模拟测试）退回看这一轮的发言人。
+   * 没有请求记录时（后台任务、模拟测试）退回看这一轮的发言人；
+   * 发言人也没有时（重启后、旧 agent 闭包、面板直接打字）只有主人私聊才算主人，群聊和别人的私聊不放宽。
    */
   function turnSendersAllOwner(sessionId) {
     const st = turnState.get(sessionKey(sessionId))
-    if (!st) return false
     const cfg = getConfig()
-    if (st.requests?.length) {
+    if (st?.requests?.length) {
       if (st.requests.every((q) => isOwner(cfg, q.actorId))) return true
       // 主人和别人混在一轮：工具调用要写明在执行哪一条，那条必须是主人在这一轮里发的
       return ownerMessageRef(chatOfSession(sessionId), st.requests, callRef.getStore()?.forMessage)
     }
-    if (!st.senders.size) return false
+    if (st?.directOwner) return true
+    if (!st?.senders?.size) return ownerPrivateChat(sessionId)
     return [...st.senders].every((u) => isOwner(cfg, u))
+  }
+
+  function ownerPrivateChat(sessionId) {
+    const owner = String(getConfig().ownerQQ || '')
+    return !!owner && chatOfSession(sessionId) === `private:${owner}`
   }
 
   /** 编号 ref 对应的群消息是不是主人发的、而且属于这一轮主人的请求。 */
@@ -1686,7 +1703,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const turnHasOwner = turnSendersAllOwner
 
   function chatOfSession(sessionId) {
-    return sessionToChat.get(sessionKey(sessionId)) || ''
+    const key = sessionKey(sessionId)
+    if (!key) return ''
+    const live = sessionToChat.get(key)
+    if (live) return live
+    // 重启后第一条消息到来前内存是空的，回 sessions.json 找；只读不回填，不改变会话事件的路由
+    try {
+      for (const [chatId, entry] of Object.entries(map().chats)) if (sessionKey(entry.sessionId) === key) return chatId
+    } catch (error) {}
+    return ''
   }
 
   /**
@@ -1830,11 +1855,10 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       scheduler.dispose(); media.dispose()
       const wakeClosing=Promise.allSettled([wakeInbox.close(),proactiveInbox.close()])
       for (const key of [...typing.keys()]) stopTyping(key)
-      for (const [agent, registration] of mounted) {
-        try { agent.cancel?.({ kind: 'disposed' }, { keepInbox: false }) } catch (error) {}
-        for (const off of registration.offs) { try { off?.() } catch (error) {} }
+      for (const [sid, registration] of [...mounted]) {
+        try { registration.agent.cancel?.({ kind: 'disposed' }, { keepInbox: false }) } catch (error) {}
+        unmount(sid)
       }
-      mounted.clear()
       return Promise.allSettled([...activeOperations,wakeClosing])
     },
     noteToSession,
