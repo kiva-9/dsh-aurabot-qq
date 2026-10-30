@@ -759,11 +759,14 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     const refs = inGroup ? groupRefs.get(chatId.slice(6)) || {} : {}
     // 组成 outbox 段；戳一戳不是消息：在它的位置先把前面的段发掉再戳
     const groups = [[]], missedMentions = []
+    // 自动引用只落在第一条文字上：QQ 不支持「引用 + 语音」（发出去是空白气泡），模型自己写了引用时以它为准
+    const autoQuote = opts.autoReply && !items.some((i) => i.replyTo) && storage.messages.get(opts.autoReply.dbId)?.recalledAt == null ? items.find((i) => i.kind === 'text') : null
     for (const it of items) {
-      const replyId = it.replyTo ? refs[it.replyTo] : undefined
+      const replyId = it === autoQuote ? opts.autoReply.mid : it.replyTo ? refs[it.replyTo] : undefined
       if (it.replyTo && !replyId) log.debug(`${chatId}：引用的编号 ${it.replyTo} 对不上，正常发`)
       let out = null
       if (it.kind === 'text') out = await richTextItem(chatId, it.value, replyId, missedMentions)
+      if (out && it === autoQuote && !out.message.some((s) => s.type === 'at' && s.data.qq === opts.autoReply.uid)) out.message.splice(1, 0, { type: 'at', data: { qq: opts.autoReply.uid } }, { type: 'text', data: { text: ' ' } })
       else if (it.kind === 'voice') out = (cfg.voice.enabled && await voiceItem(it.value, { ...opts.persona?.layers?.voice, chatId, requestId: opts.requestId })) || await richTextItem(chatId, it.value, replyId, missedMentions)
       else if (it.kind === 'sticker') out = stickerItem(it.value, replyId, chatId)
       else if (it.kind === 'image') out = await imageItem(it.value)
@@ -882,7 +885,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       const epoch = st.epoch
       const persona = st.persona
       const requestId = st.requests?.[0]?.id ?? null
-      const requests=[...(st.requests||[])],control=st.plannerControl,context=st.plannerContext,controller=st.controller,part=st.participation
+      const requests=[...(st.requests||[])],control=st.plannerControl,context=st.plannerContext,controller=st.controller,part=st.participation,autoReply=st.autoReply
+      st.autoReply=null
       st.participation=null
       if(context&&!control)try {
         if(completed&&st.decisionId)getPlanner()?.finishDecision(context,st.decisionId,'reply')
@@ -916,7 +920,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
       // 发完再放开：发送期间来的消息也攒到下一段
       const shouldSend=()=>!disposed&&!controller?.signal.aborted&&(!context||getPlanner()?.shouldContinue(context)!==false)
-      track(deliver)(chatId, text, { wantVoice, userText: st.lastText || '', epoch, requestId, persona, shouldSend, signal: controller?.signal,
+      track(deliver)(chatId, text, { wantVoice, userText: st.lastText || '', epoch, requestId, persona, shouldSend, signal: controller?.signal, autoReply,
         requestIds: requests.map(q => q.id),
         sourceMessageIds: requests.flatMap(q=>q.sourceMessageIds) }).then(result=>{
         if(disposed)return
@@ -1264,7 +1268,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       `【群聊 ${name}】刚才新说的（${fresh.length} 条）${hint}\n${numbered.join('\n')}\n\n` +
       '只回应当前新消息；不要把别人对其他机器人的评价当成对你的评价。正常求助、纠错和修改反馈优先完成，不把先前调侃带成拒绝或挖苦。闲聊一般一两句，任务篇幅以完整成果为准。\n' +
       '大多数时候直接说就行。只有想专门接其中某一条、而直接说别人会看不出你在回谁时（比如那条已经被后面的话刷上去了、或者你在回某个人随口一提的事），才在那句话开头写 <reply:编号>，会以「引用回复」发出；一次最多引用一条。'
-    return { text, query, speakers }
+    return { text, query, speakers, autoReply: autoReplyTarget(entries) }
+  }
+
+  /** 这一段里只有一个人明确找她（@ 或引用她）时，回复自动引用他最新那条；多人时不猜。 */
+  function autoReplyTarget(entries) {
+    const direct = entries.filter(e => e.mode !== 'context' && (e.msg.mentioned || e.msg.repliedToBot))
+    const last = direct.at(-1)
+    if (!last || new Set(direct.map(e => String(e.actorId))).size !== 1) return null
+    return last.msg.messageId && last.msg.messageId !== '0' ? { mid: last.msg.messageId, uid: String(last.actorId), dbId: last.messageId } : null
   }
 
   // ---------- 调度：人常常一口气发好几句，等对方说完再一起交给她，别一句一回 ----------
@@ -1450,6 +1462,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     let content
     let query
     let speakers
+    let autoReply = null
     if (chat.kind === 'group') {
       const gid = chat.groupId
       const gp = await groupPrompt(chat, batch.mode, batch.entries)
@@ -1458,6 +1471,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       content = [{ type: 'text', text: gp.text }]
       query = gp.query
       speakers = gp.speakers
+      autoReply = gp.autoReply
     } else {
       content = [{ type: 'text', text: texts.join('\n') }]
       // 私聊：检索记忆时去掉「【私聊】某某(QQ)：」这个头
@@ -1497,7 +1511,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     await pushToSession(chat, content, actors[0], {
       wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests, persona,
       images: images.map(({ data, ...rest }) => rest),
-      participation:batch.participation,
+      participation:batch.participation, autoReply,
     })
   }
 
@@ -1574,6 +1588,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
     if (!opts.steer) { st.toolCalls = 0; st.controller?.abort(); st.controller = new AbortController(); st.plannerControl=null;st.decisionId=null;st.activeTurn=undefined;st.plannerContext=null;st.account=String(getConfig().botQQ);st.wakeId=opts.wakeId||null;st.turnId=opts.requests?.[0]?.id }
     if(!opts.steer)st.participation=opts.participation||null
+    // 插话时换了个人找她就不知道该引用谁了，不猜
+    st.autoReply = !opts.steer || st.autoReply?.uid === opts.autoReply?.uid ? opts.autoReply || null : null
     // 这一轮能按编号引用的图（插话时接着编号）
     if (!opts.steer) st.images = opts.images || []
     else if (opts.images?.length) st.images = [...(st.images || []), ...opts.images.map((im, i) => ({ ...im, n: (st.images?.length || 0) + i + 1 }))]
