@@ -1,5 +1,27 @@
 import { randomUUID } from 'node:crypto'
 
+export const RANGES = ['today', '7d', '30d', 'all']
+const DAY_MS = 86_400_000
+const SHANGHAI_MS = 8 * 3_600_000 // 中国没有夏令时，自然日按 UTC+8 算
+
+/** today / 7d / 30d（含今天的自然日）/ all → [from, to)。 */
+export function rangeWindow(range, now = Date.now()) {
+  if (!RANGES.includes(range)) throw new Error('range 不对')
+  const today = Math.floor((now + SHANGHAI_MS) / DAY_MS) * DAY_MS - SHANGHAI_MS
+  const from = range === 'all' ? 0 : today - ({ today: 0, '7d': 6, '30d': 29 })[range] * DAY_MS
+  return { from, to: now + 1 }
+}
+
+const GROUP_KEYS = { none: null, day: "strftime('%Y-%m-%d', started_at / 1000, 'unixepoch', '+8 hours')", model: "COALESCE(NULLIF(model, ''), '(unknown)')",
+  role: "COALESCE(NULLIF(role, ''), '(unknown)')", provider: "COALESCE(NULLIF(provider, ''), '(unknown)')" }
+// DSH 的 inputTokens 是未命中缓存的输入，缓存读取要单独加回；embedding 接口的 prompt_tokens 已含缓存，不能重复加。
+const TOKEN_COLUMNS = `COUNT(*) calls,
+  COALESCE(SUM(input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cached_tokens IS NOT NULL), 0) callsWithUsage,
+  COALESCE(SUM(usage_complete = 0 OR input_tokens IS NULL OR (service = 'llm' AND output_tokens IS NULL)), 0) incompleteCalls,
+  COALESCE(SUM(input_tokens), 0) inputTokens, COALESCE(SUM(output_tokens), 0) outputTokens, COALESCE(SUM(cached_tokens), 0) cachedTokens,
+  COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(CASE WHEN service = 'llm' THEN cached_tokens END), 0) totalTokens`
+const TOKEN_NOTE = '只统计服务返回的 token 用量；合计包含缓存读取，缺失值不计入合计，不做费用推算。'
+
 /** Local accounting evidence; never infers a currency amount from tokens or status. */
 export function createUsageLedger({storage,getAccount}) {
   const db=storage.db
@@ -9,6 +31,8 @@ export function createUsageLedger({storage,getAccount}) {
     duration_ms REAL,input_tokens REAL,output_tokens REAL,cached_tokens REAL,input_count REAL,input_chars REAL,
     credits REAL,amount REAL,currency TEXT)`)
   db.run('CREATE INDEX IF NOT EXISTS service_calls_request ON service_calls(account_id,request_id,started_at)')
+  db.run('CREATE INDEX IF NOT EXISTS service_calls_account_time ON service_calls(account_id,started_at)')
+  db.run('CREATE INDEX IF NOT EXISTS service_calls_chat_time ON service_calls(chat_id,started_at)')
   db.run('CREATE TABLE IF NOT EXISTS service_call_requests (call_id TEXT NOT NULL,request_id TEXT NOT NULL,PRIMARY KEY(call_id,request_id))')
   db.run(`CREATE TABLE IF NOT EXISTS service_call_outcomes(
     call_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,chat_id TEXT,status TEXT NOT NULL,error TEXT)`)
@@ -73,5 +97,15 @@ export function createUsageLedger({storage,getAccount}) {
     const taskItems=db.all(`SELECT a.id,j.chat_id chatId,j.request_id requestId,j.kind service,a.state status,a.billing,a.started_at startedAt,a.finished_at-a.started_at durationMs FROM job_attempts a JOIN jobs j ON j.id=a.job_id WHERE ${jw} ORDER BY a.started_at DESC LIMIT ?`,...args,Math.max(1,Math.min(200,Number(limit)||50)))
     return {totals:[...totals,...taskTotals],amounts,items:[...items,...taskItems].sort((a,b)=>b.startedAt-a.startedAt).slice(0,Math.max(1,Math.min(200,Number(limit)||50))),note:'仅记录服务返回的用量与金额；空值表示未提供，不能解释成免费。共享批次调用会关联各参与请求，但总账只计一次。后台调用可能不属于单个用户请求。'}
   }
-  return {record,report}
+  /** 只读汇总 token；不读金额。chatId 不传就是整个账号（含 chat_id 为空的后台调用）。 */
+  function aggregate({account=getAccount(),chatId,from=0,to=Date.now()+1,groupBy='none',range}={}) {
+    if(!(groupBy in GROUP_KEYS)) throw new Error('groupBy 不对')
+    const where='account_id=? AND started_at>=? AND started_at<?'+(chatId?' AND chat_id=?':''), args=[String(account),from,to,...(chatId?[String(chatId)]:[])]
+    const key=GROUP_KEYS[groupBy]
+    return {account:String(account),chatId:chatId||null,from,to,range,
+      totals:{...db.get(`SELECT ${TOKEN_COLUMNS} FROM service_calls WHERE ${where}`,...args)},
+      buckets:key?db.all(`SELECT ${key} key,${TOKEN_COLUMNS} FROM service_calls WHERE ${where} GROUP BY key ORDER BY key`,...args):[],
+      generatedAt:Date.now(),note:TOKEN_NOTE}
+  }
+  return {record,report,aggregate}
 }

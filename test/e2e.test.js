@@ -594,6 +594,22 @@ async function imageServer() {
   return imgSrv
 }
 
+test('模块工具模拟不创建后台生图任务或向 QQ 投递', async () => {
+  const base = await imageServer()
+  await fake.call('/save', { imageGen: { enabled: true, defaultProfile: 'sim-image', profiles: [{ id: 'sim-image', name: '模拟服务', protocol: 'openai', baseUrl: base, model: 'test-model', apiKey: 'img-key-123456', capabilities: { modes: ['text'], maxInputs: 0 } }] } })
+  await settle()
+  const jobsBefore = (await fake.call('/imagegen/jobs')).json().list.length
+  const callsBefore = imgCalls.length
+  const sendsBefore = sentTo('private', OWNER).length
+  const result = (await fake.call('/modules/tool', { as: 'owner', kind: 'private', name: 'qq_draw_image', args: { prompt: '模拟一只鲸鱼' } })).json()
+  assert.equal(result.ok, true)
+  assert.equal(result.result.simulated, true)
+  assert.match(result.result.message, /模拟.*不会提交生图任务/)
+  assert.equal((await fake.call('/imagegen/jobs')).json().list.length, jobsBefore)
+  assert.equal(imgCalls.length, callsBefore)
+  assert.equal(sentTo('private', OWNER).length, sendsBefore)
+})
+
 test('生图：主人让她画图 → 后台任务画好直接发出来；密钥不回传', async () => {
   const base = await imageServer()
   await fake.call('/save', { imageGen: { enabled: true, stylePrompt: '可爱风', defaultProfile: 'p1', profiles: [{ id: 'p1', name: '测试服务', protocol: 'openai', baseUrl: base, model: 'test-model', apiKey: 'img-key-123456', capabilities: { modes: ['text', 'reference', 'edit'], maxInputs: 4 } }] } })
@@ -754,4 +770,26 @@ test('#6 改资料：群里默认没有这些工具；调成「所有人」后�
   assert.equal(c.result.message, 'no such tool')
   assert.equal(mock.sent('set_qq_profile').length, n + 1)
   await fake.call('/save', { profilePerms: { qqNickname: 'owner' } })
+})
+
+test('#3 危险命令确认：接上 tools/pre-execute；主人回「确认」放行，这句不进聊天', async () => {
+  await settle()
+  const guard = [...fake.listeners.get('tools/pre-execute')][0]
+  assert.equal(typeof guard, 'function')
+  const seen = fake.turns.length
+  mock.push(priv(OWNER, text('在吗')))
+  const { sessionId } = await until(() => fake.turns.slice(seen).find((turn) => /在吗/.test(turn.userText)))
+  await settle()
+  const exec = { name: process.platform === 'win32' ? 'pwsh' : 'bash', arguments: { command: 'rm -rf /' }, agent: { session: { id: sessionId } }, signal: new AbortController().signal }
+  const allow = async () => ({ kind: 'allow' })
+  assert.equal((await guard(exec, allow)).kind, 'allow', '默认关：不问')
+  await fake.call('/save', { security: { dangerConfirm: true } })
+  const turns = fake.turns.length
+  const pending = guard(exec, allow)
+  await until(() => sentTo('private', OWNER).some((c) => /危险命令确认/.test(JSON.stringify(c.params.message))))
+  mock.push(priv(OWNER, text('确认')))
+  assert.equal((await pending).kind, 'allow')
+  await sleep(300)
+  assert.equal(fake.turns.length, turns, '确认消息不会叫醒模型')
+  await fake.call('/save', { security: { dangerConfirm: false } })
 })

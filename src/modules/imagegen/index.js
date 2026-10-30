@@ -7,6 +7,7 @@ import { MODE_LABEL, ROLES } from '../../providers/image/common.js'
 import { toImageBuffer } from '../../local/local.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { randomUUID } from 'node:crypto'
+import { createAvatarReferences } from '../../features/qq-profile.js'
 
 const ROLE_HINT = { base: '底图（在它上面改）', identity: '人物长相参考', style: '风格参考', composition: '构图参考' }
 
@@ -18,7 +19,8 @@ export default {
   tab: 'imagegen',
   files: ['jobs/image.js', 'jobs/runner.js', 'providers/image/index.js', 'providers/image/common.js', 'providers/image/openai.js', 'providers/image/gemini.js', 'providers/image/comfyui.js', 'providers/image/http.js'],
   setup(api) {
-    const { hub, local, storage, http } = api.core
+    const { hub, local, storage, http, onebot } = api.core
+    const avatars = createAvatarReferences({ hub, onebot, storage, fetchAvatar: api.core.fetchAvatar, log: api.log })
     const memory = api.lazy('memory')
     const search = api.lazy('search')
     const retrieval = api.lazy('retrieval')
@@ -43,7 +45,8 @@ export default {
         name: 'qq_draw_image',
         description: '画图并发到当前 QQ 聊天里（后台画，画好自动发出来，这一轮回一句「在画了」就行）。' +
           '要照着这段里的图画或改图时，用 images 按「【这段里的图】」里的编号引用，并说明每张当什么用：base 底图（在它上面改）、identity 人物长相参考、style 风格参考、composition 构图参考。' +
-          '要在你刚才给这个人画的那张上接着改，用 continue_last。不要拿别人发的图给另一个人当参考。',
+          '要在你刚才给这个人画的那张上接着改，用 continue_last。不要拿别人发的图给另一个人当参考。' +
+          '有人说「用我头像的形象画」时设 use_avatar:true；主人指定本群某人时用 avatar.qq。',
         properties: {
           prompt: str('画面描述：主体、动作、场景、风格；改图时写要改成什么样'),
           images: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer', description: '图编号' }, role: { type: 'string', enum: ['base', 'identity', 'style', 'composition'] } }, required: ['n', 'role'] }, description: '可选，引用这段里的图' },
@@ -52,9 +55,11 @@ export default {
           reference_candidates: { type: 'array', maxItems: 3, items: { type: 'object', properties: { resultId: str('搜索结果 ID'), candidateId: str('已经审核的候选图片 ID') }, required: ['resultId', 'candidateId'] }, description: '可选，只能使用 qq_reference_candidates 返回的 verified 候选；未确认时先澄清，不跳过审核' },
           history_references: { type:'array',maxItems:8,items:{type:'object',properties:{occurrenceId:str('recall_images 返回的历史图片出现 ID'),role:{type:'string',enum:['base','identity','style','composition']}},required:['occurrenceId','role']},description:'可选，使用已明确选择的历史图片；引用提交前会重新核验范围、作者和撤回状态' },
           size: str('可选，比如 1024x1024 / 768x1024 / 1024x768'),
+          use_avatar: { type: 'boolean', description: '可选，用这个请求者自己的 QQ 头像当人物长相参考' },
+          avatar: { type: 'object', description: '可选，比 use_avatar 更具体：qq 只有主人能填且须是本群成员，role 默认 identity', properties: { qq: str('QQ 号'), role: { type: 'string', enum: ['identity', 'style', 'base'] } } },
         },
         required: ['prompt'],
-        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references }) => {
+        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references, use_avatar, avatar }, execution) => {
           if (!allowed(sessionId)) return { ok: false, message: '画图只给主人画哦' }
           const who = hub.turnActor(sessionId)
           if (who.error) return { ok: false, message: who.error }
@@ -87,6 +92,14 @@ export default {
             if (String(im.actorId) !== String(who.actorId)) return { ok: false, message: `图${im.n} 是 ${im.nick} 发的，不能拿来给别人画` }
             refs.push({ n: im.n, assetId: im.assetId, occurrenceId: im.occurrenceId, sourceMessageId: im.dbMessageId, generatedJobId: im.generatedJobId || null, role: want.role, reason: `对方指定的图${im.n}（${im.source === 'quote' ? '引用' : '附图'}）` })
           }
+          if (use_avatar === true || avatar) {
+            const role = avatar?.role || 'identity'
+            if (!['identity', 'style', 'base'].includes(role)) return { ok: false, message: '头像的用途只能是 identity、style 或 base' }
+            // 拿不到就不画：不能悄悄换成网图或随便生成一张脸
+            const ref = await avatars.resolve({ chat, sessionId, qq: avatar?.qq, role })
+            if (!ref.ok) return { ok: false, message: ref.message }
+            refs.push({ assetId: ref.assetId, role, reason: `QQ ${ref.qq} 的头像`, avatar: { qq: ref.qq, assetId: ref.assetId } })
+          }
           let parentJobId = null
           const quotedParent = refs.find((r) => r.role === 'base' && r.generatedJobId)
           if (quotedParent && !cont) {
@@ -107,12 +120,21 @@ export default {
           if (!refs.length && pool.some((im) => String(im.actorId) === String(who.actorId) && im.state !== 'ready')) return { ok: false, message: '这个请求的图片还未就绪或下载失败，请等待或明确是否只需文生图，不能忽略输入图' }
           const roles = refs.map((r) => r.role)
           const mode = !refs.length ? 'text' : roles.includes('base') ? 'edit' : 'reference'
+          const jobArgs = {
+            kind: 'image', chatId: chat.chatId, requestId: who.requestId, actorId: who.actorId, parentJobId, personaSnapshot: hub.turnPersona?.(sessionId),
+            input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
+          }
+          if (execution?.simulated === true) {
+            try {
+              svc.preview(jobArgs)
+              return { ok: true, simulated: true, message: '模拟：不会提交生图任务，也不会向 QQ 发送图片' }
+            } catch (error) {
+              return { ok: false, message: error.message }
+            }
+          }
           let job
           try {
-            job = svc.enqueue(runner, {
-              kind: 'image', chatId: chat.chatId, requestId: who.requestId, actorId: who.actorId, parentJobId, personaSnapshot: hub.turnPersona?.(sessionId),
-              input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
-            })
+            job = svc.enqueue(runner, jobArgs)
           } catch (error) {
             return { ok: false, message: error.message }
           }

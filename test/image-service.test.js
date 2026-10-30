@@ -58,6 +58,16 @@ test('缺失输入图、空提示词和多个底图不能悄悄变成文生图',
   assert.equal(s.runner.list().length, 0); assert.equal(s.calls.length, 0)
 })
 
+test('生图预检复用正式任务的验证，但不登记任务或请求服务', t => {
+  const s = setup(t)
+  const args = { kind: 'image', chatId: 'private:10', actorId: '10', input: { prompt: 'cat', mode: 'text', refs: [] } }
+  assert.doesNotThrow(() => s.service.preview(args))
+  assert.throws(() => s.service.preview({ ...args, input: { ...args.input, drawSelf: true } }), /人设快照/)
+  assert.throws(() => s.service.preview({ ...args, input: { ...args.input, size: 'invalid' } }), /尺寸/)
+  assert.equal(s.runner.list().length, 0)
+  assert.equal(s.calls.length, 0)
+})
+
 test('参考图scope和账号变化在收费请求前拒绝', async (t) => {
   const s = setup(t)
   const a = s.storage.assets.put(image, { mime: 'image/jpeg' })

@@ -169,7 +169,8 @@ export interface MemoryApi {
   recall(query: string, options: RecallOptions): RecallHit[]
   recalls(options: {scope: Scope}): Array<Scoped & {at: number; query: string; hits: Array<{id: string; score: number; why: string[]}>}>
   recentEvents(options: {scope: Scope; hours?: number; limit?: number}): MemoryFact[]
-  contextFor(chat: Chat, sessionId: string, options: {scope: Scope; about?: string | string[]; query?: string; context?: string}): string
+  contextFor(chat: Chat, sessionId: string, options: {scope: Scope; about?: string | string[]}): string
+  recallHint(chat: Chat, queryText: string, prevText?: string, options?: {scope: Scope; about?: string | string[]}): string
   topicScore(text: string, options: RecallOptions): number
   update(id: string, patch: Partial<FactFields>, meta: AuditMeta & {expectedRevision: number}): any
   correct(id: string, replacement: FactFields & EvidenceInput, meta: AuditMeta & {expectedRevision: number}): any
@@ -294,6 +295,17 @@ export interface RetrievalApi {
   assertReferences(references: any[], context: RequestContext): any[]
   dispose(): Promise<void>
 }
+export interface TokenUsageCounts {
+  calls: number; callsWithUsage: number; incompleteCalls: number
+  inputTokens: number; outputTokens: number; cachedTokens: number; totalTokens: number
+}
+export interface TokenMeterApi {
+  summary(options?: {range?: 'today' | '7d' | '30d' | 'all'; chatId?: string; groupBy?: 'none' | 'day' | 'model' | 'role' | 'provider'; now?: number}): {
+    account: string; chatId: string | null; from: number; to: number; range: string
+    totals: TokenUsageCounts; buckets: Array<TokenUsageCounts & {key: string}>; generatedAt: number; note: string
+  }
+}
+
 export interface TaskApi {
   planner: any
   authorize(context: RequestContext): any
@@ -362,6 +374,8 @@ export interface Api {
   reply(msg: Message, text: string): Promise<any>
   sendImage(chatId: ChatId | string, src: string): Promise<any>
   sendSegments(chatId: ChatId | string, segments: Segment[], note?: string): Promise<any>
+  sendFile(chatId: ChatId | string, file: string, name?: string): Promise<any>
+  sendVoiceFile(chatId: ChatId | string, file: string, note?: string): Promise<any>
   onebot(action: string, params?: any, options?: {timeoutMs?: number}): Promise<any>
   isOwner(userId: string | number): boolean
   ask(options: string | {system?: string; text: string; maxTokens?: number}): Promise<string>

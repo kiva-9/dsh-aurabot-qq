@@ -7,6 +7,7 @@
 import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { connect } from 'node:net'
 import { join } from 'node:path'
 import { registerSecret } from '../core/redact.js'
 
@@ -71,6 +72,51 @@ export function readOneBotEndpoint(dir, uin) {
   return out
 }
 
+/** OneBot 地址 → { host, port }；解析不了返回 null。 */
+export function endpointHostPort(url) {
+  try {
+    const u = new URL(url)
+    const port = Number(u.port) || (/^(https|wss):$/.test(u.protocol) ? 443 : 80)
+    return { host: u.hostname.replace(/^\[|\]$/g, ''), port }
+  } catch (error) {
+    return null
+  }
+}
+
+/** 这个端口现在有没有人在听。 */
+export function portOpen({ host, port }, { timeoutMs = 800 } = {}) {
+  return new Promise((resolve) => {
+    const socket = connect({ host, port })
+    const done = (open) => { socket.destroy(); resolve(open) }
+    socket.setTimeout(timeoutMs, () => done(false))
+    socket.once('connect', () => done(true))
+    socket.once('error', () => done(false))
+  })
+}
+
+/** 真问一次 get_login_info：端口开着不代表 OneBot 活着。 */
+export async function gatewayHealthy(endpoint, { fetchImpl = fetch, timeoutMs = 1500 } = {}) {
+  if (!endpoint?.httpUrl) return false
+  try {
+    const headers = { 'content-type': 'application/json', ...(endpoint.httpToken ? { authorization: `Bearer ${endpoint.httpToken}` } : {}) }
+    const r = await fetchImpl(endpoint.httpUrl.replace(/\/$/, '') + '/get_login_info', { method: 'POST', headers, body: '{}', signal: AbortSignal.timeout(timeoutMs) })
+    const j = await r.json()
+    return j?.status === 'ok' || j?.retcode === 0
+  } catch (error) {
+    return false
+  }
+}
+
+/** 等端口释放；等到了返回 true，超时返回 false。 */
+export async function waitPortFree(hostPort, { timeoutMs = 20000, intervalMs = 500 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (!(await portOpen(hostPort))) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+}
+
 // SnowLuma 认不出号时 uin 可能是 null、'' 或 '0'（注入后才会有真号），都当「认不出」
 const uinOf = (p) => {
   const u = String(p?.account?.uin ?? p?.uin ?? '').trim()
@@ -115,7 +161,7 @@ export function generatePassword() {
   return `Ab${b.slice(0, 16)}#9!`
 }
 
-export function createSnowLumaManager({ getConfig, log, savePassword }) {
+export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs = 20000 }) {
   let child = null
   let childPid = 0
   let token = ''
@@ -181,6 +227,15 @@ export function createSnowLumaManager({ getConfig, log, savePassword }) {
     const inst = detectInstall(cfg().dir)
     if (!inst.installed) return { ok: false, message: inst.reason }
     if (await running()) return { ok: true, message: 'SnowLuma 已经在运行' }
+    // 控制台没起来不代表 OneBot 没起来；上个进程没退干净时新实例会抢不到端口，只有 WebUI 没有 OneBot
+    const endpoint = readOneBotEndpoint(cfg().dir, getConfig().botQQ)
+    if (await gatewayHealthy(endpoint)) return { ok: true, message: 'OneBot 网关已经在运行，直接复用' }
+    const hostPort = endpointHostPort(endpoint.httpUrl || endpoint.wsUrl)
+    if (hostPort && await portOpen(hostPort)) {
+      log.info(`OneBot 端口 ${hostPort.port} 还被占着，等它释放`)
+      if (!(await waitPortFree(hostPort, { timeoutMs: portWaitMs }))) log.warn(`OneBot 端口 ${hostPort.port} 一直被占着，可能是别的程序；仍然尝试启动 SnowLuma`)
+      else if (await gatewayHealthy(endpoint)) return { ok: true, message: 'OneBot 网关已经在运行，直接复用' }
+    }
     const exe = inst.nodeExe || process.execPath
     const env = { ...process.env, SNOWLUMA_HOOK_AUTOLOAD: '0', SNOWLUMA_UPDATE_CHECK: '0' }
     delete env.SNOWLUMA_HOOK_AUTOLOAD_ALL

@@ -10,7 +10,7 @@ const items = value => array(value) && value.every(v => object(v) && ['text','vo
   (v.kind === 'poke' || text(v.value) || (v.kind === 'sticker' && object(v.value))) &&
   (v.kind !== 'image' || /^(https?:\/\/|asset:)/i.test(v.value)))
 const segments = value => array(value) && value.every(v => object(v) && text(v.type) && object(v.data) &&
-  (!v.data.file || /^(https?:\/\/|asset:|base64:\/\/)/i.test(v.data.file)))
+  (v.type === 'file' || !v.data.file || /^(https?:\/\/|asset:|base64:\/\/)/i.test(v.data.file)))
 const selection = value => object(value) && Object.keys(value).every(k => ['provider','model','reasoningEffort','reasoning','effort'].includes(k))
 
 const spec = (mode, stage, validate, extra = {}) => Object.freeze({ apiVersion: 2, mode, stage, timeoutMs: 5000, failure: 'continue', canAbort: mode !== 'observe', validate, ...extra })

@@ -224,5 +224,5 @@ export function createFakeDsh({ brain }) {
     return { status, headers: responseHeaders, raw: () => out, json: () => JSON.parse(out) }
   }
 
-  return { ctx, routes, variables, agents, workspaces, turns, logs, call, dispose: () => Promise.allSettled(disposers.splice(0).reverse().map((d) => { try { return d() } catch (e) { return Promise.reject(e) } })) }
+  return { ctx, listeners, routes, variables, agents, workspaces, turns, logs, call, dispose: () => Promise.allSettled(disposers.splice(0).reverse().map((d) => { try { return d() } catch (e) { return Promise.reject(e) } })) }
 }

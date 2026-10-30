@@ -280,6 +280,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       isOwner: (userId) => String(userId) === String(getConfig().ownerQQ),
       sendImage: guard('发送图片', (chatId, src) => core.hub.sendImage(String(chatId), src)),
       sendSegments: guard('发送消息段', (chatId, segs, note) => core.hub.sendSegments(String(chatId), segs, note || `[${id}]`)),
+      sendFile: guard('发送文件', (chatId, file, name) => core.hub.sendFile(String(chatId), file, name)),
+      sendVoiceFile: guard('发送语音文件', (chatId, file, note) => core.hub.sendVoiceFile(String(chatId), file, note)),
       ask: guard('模型调用', (opts) => core.ask(typeof opts === 'string' ? { text: opts } : opts)),
       think: guard('后台决策', (prompt, opts = {}) => core.hub.runSystemTurn(`ext-${id}`, opts.title || def.name || id, String(prompt), opts)),
       onebot: guard('OneBot操作', (action, params, opts) => core.onebot.call(action, params, opts)),
@@ -309,8 +311,10 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   }
 
   // ---------- 启动 / 停止 ----------
+  let generation = 0 // 模块代际：每次启停 +1，会话下一轮按它重挂工具（热重载后工具名不变，闭包却换了）
   async function start(def, source, extra = {}) {
     if (disposed) return null
+    generation++
     const id = def.id
     const rec = { id, def, source, exports: null, offs: [], tools: [], contexts: [], rules: [], commands: [], dshTools: [], errors: [], pending: new Set(), controller: new AbortController(), startedAt: Date.now(), ...extra }
     // 设置里的密码字段不回传给面板
@@ -341,6 +345,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   /** 同步启动（内置模块的 setup 都是同步的，插件一加载就要能用）。 */
   function startSync(def) {
     if (disposed) return
+    generation++
     const id = def.id
     const rec = { id, def, source: 'builtin', exports: null, offs: [], tools: [], contexts: [], rules: [], commands: [], dshTools: [], errors: [], pending: new Set(), controller: new AbortController(), startedAt: Date.now() }
     live.set(id, rec)
@@ -359,6 +364,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   function stop(id, { quiet = false } = {}) {
     const rec = live.get(id)
     if (!rec) return false
+    generation++
     rec.stopped = true
     rec.controller.abort()
     live.delete(id)
@@ -690,6 +696,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
 
   return {
     boot, sync, reload, stop, dispose, status, create, fork, promptFor, panelSource,
+    generation: () => generation,
     use: exportsOf, has: (id) => live.has(id), running: (id) => live.get(id)?.source || null,
     emit, claim, filter, filterSync, buildTools, hookDiagnostics: hookRuntime.diagnostics,
     prepareContext: (args) => hookRuntime.prepare('context/prepare', args),

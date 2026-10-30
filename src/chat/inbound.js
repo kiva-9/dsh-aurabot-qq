@@ -22,6 +22,7 @@ export function isStickerSegment(seg) {
 /**
  * @param {object} event OneBot 消息事件
  * @param {string|number} selfId 机器人 QQ
+ * @param {{faceName?: (id: string) => string|undefined}} [options] 系统表情编号 → 名字
  * @returns {{
  *   kind: 'private'|'group', chatId: string, userId: string, groupId: string,
  *   nickname: string, role: string, messageId: string, text: string,
@@ -30,7 +31,7 @@ export function isStickerSegment(seg) {
  * }}
  * media 按原消息里的顺序列出图片 / 表情 / 语音，index 是在原消息段里的位置（登记出现记录用）。
  */
-export function parseMessageEvent(event, selfId) {
+export function parseMessageEvent(event, selfId, { faceName } = {}) {
   const self = String(selfId || event.self_id || '')
   const kind = event.message_type === 'group' ? 'group' : 'private'
   const userId = String(event.user_id ?? event.sender?.user_id ?? '')
@@ -60,7 +61,7 @@ export function parseMessageEvent(event, selfId) {
         replyId = String(d.id ?? '')
         break
       case 'face':
-        texts.push(d.raw?.faceText || '[表情]')
+        { const name = faceName?.(d.id); texts.push(name ? `[${name}]` : d.raw?.faceText || '[表情]') }
         break
       case 'image':
       case 'mface':
