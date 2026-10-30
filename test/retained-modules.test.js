@@ -18,7 +18,8 @@ function fixture(t, module) {
     speakUp: { awakeFrom: 0, awakeTo: 24 }, profilePerms: { biliSign: 'all', biliAvatar: 'all' } })
   const builders = [], callbacks = [], routes = new Map(), commands = [], eventHandlers = new Map(), events = [], mood = [], memory = []
   let turn, chatId = 'group:22'
-  const hub = { turnActor: () => turn, turnHasOwner: () => true, turnSendersAllOwner: () => true,
+  const recent = []
+  const hub = { recentMedia: (chat, user) => recent.filter((x) => x.chatId === chat && (!user || x.userId === user)), turnActor: () => turn, turnHasOwner: () => true, turnSendersAllOwner: () => true,
     chatOfSession: () => chatId, personaFor: () => ({ personaId: 'fish', layers: { identity: { name: '鱼' } } }),
     scopeFor: (chat) => ({ account: cfg.botQQ, chat, persona: 'fish' }),
     sendVoiceFile: () => assert.fail('本测试禁止真实 QQ'), sendText: () => assert.fail('本测试禁止真实 QQ') }
@@ -38,7 +39,7 @@ function fixture(t, module) {
   const tools = () => builders.flatMap((b) => b({ sessionId: 'sid', chat: { chatId, kind: chatId.split(':')[0], userId: chatId.slice(8) } })).filter(Boolean)
   const tool = (name) => tools().find((x) => x.name === name)
   t.after(() => { callbacks.forEach((f) => f()); storage.close(); rmSync(dir, { recursive: true, force: true }) })
-  return { api, service, actor, tool, cfg, hub, storage, routes, commands, eventHandlers, events, mood, memory, setTurn: (value) => { turn = value } }
+  return { api, service, actor, tool, cfg, hub, recent, storage, routes, commands, eventHandlers, events, mood, memory, setTurn: (value) => { turn = value } }
 }
 
 test('翻唱工具不借用同轮主人身份；明确 turnActor 后绑定 request/chat/persona/epoch', async (t) => {
@@ -96,7 +97,7 @@ test('B站每个手动工具传当前 scope；混合群聊的非主人不能借�
 test('B站 last 头像不能借用同群其他请求者的图片；owner 档资料权限按 turnActor', async (t) => {
   const f = fixture(t, biliModule)
   f.service.setAvatar = () => assert.fail('不能借用别人的图')
-  f.eventHandlers.get('message')({ chatId: 'group:22', userId: '20000002', images: [{ data: { url: 'https://example.com/other.png' } }] })
+  f.recent.push({ chatId: 'group:22', userId: '20000002', seg: { data: { url: 'https://example.com/other.png' } } })
   f.actor('10000001')
   assert.equal((await f.tool('bili_set_avatar').execute({ image: 'last' })).ok, false)
   f.cfg.profilePerms.biliSign = 'owner'

@@ -133,6 +133,17 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
     get: (id) => rowOccurrence(db.get('SELECT * FROM asset_occurrences WHERE id = ?', id)),
     ofMessage: (messageId) => db.all('SELECT * FROM asset_occurrences WHERE message_id = ? ORDER BY seg_index', messageId).map(rowOccurrence),
     pending: (limit = 50) => db.all("SELECT * FROM asset_occurrences WHERE state = 'pending' ORDER BY created_at LIMIT ?", limit).map(rowOccurrence),
+    /** 这个聊天最近的图片和表情（旧的在前）：按账号隔离，撤回的不算。 */
+    recent(chatId, { account, since = 0, limit = 6 }) {
+      const rows = db.all(`SELECT o.seg_index, o.kind, o.author_id, o.message_id, o.remote_json, o.created_at, m.account_id, m.segments_json
+        FROM asset_occurrences o JOIN messages m ON m.id = o.message_id
+        WHERE o.chat_id = ? AND m.account_id = ? AND o.kind IN ('image', 'sticker') AND o.created_at >= ? AND m.recalled_at IS NULL
+        ORDER BY o.created_at DESC, o.seg_index DESC LIMIT ?`, chatId, String(account), since, limit)
+      return rows.reverse().map((r) => ({
+        seg: fromJson(r.segments_json, [])[r.seg_index] || { type: 'image', data: fromJson(r.remote_json, {}) },
+        userId: r.author_id, messageId: r.message_id, account: r.account_id, at: r.created_at, sticker: r.kind === 'sticker',
+      }))
+    },
   }
 
   // ---------- 会话代次 ----------

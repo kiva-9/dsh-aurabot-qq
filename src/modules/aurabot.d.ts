@@ -169,7 +169,8 @@ export interface MemoryApi {
   recall(query: string, options: RecallOptions): RecallHit[]
   recalls(options: {scope: Scope}): Array<Scoped & {at: number; query: string; hits: Array<{id: string; score: number; why: string[]}>}>
   recentEvents(options: {scope: Scope; hours?: number; limit?: number}): MemoryFact[]
-  contextFor(chat: Chat, sessionId: string, options: {scope: Scope; about?: string | string[]; query?: string; context?: string}): string
+  contextFor(chat: Chat, sessionId: string, options: {scope: Scope; about?: string | string[]}): string
+  recallHint(chat: Chat, queryText: string, prevText?: string, options?: {scope: Scope; about?: string | string[]}): string
   topicScore(text: string, options: RecallOptions): number
   update(id: string, patch: Partial<FactFields>, meta: AuditMeta & {expectedRevision: number}): any
   correct(id: string, replacement: FactFields & EvidenceInput, meta: AuditMeta & {expectedRevision: number}): any

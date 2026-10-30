@@ -34,6 +34,19 @@ export default {
       if(scope.persona) for(const subject of subjects) void memory.buildProfile(String(subject),{scope}).catch(error=>api.log.warn('人物资料等待重建：',error.message))
       return memory.contextFor({...args.chat,scope},args.sessionId)
     })
+    // Failure policy of the prompt hook is abort: a recall problem must not drop the user's message.
+    api.on?.('prompt',(content,info) => {
+      try {
+        if (!info?.queryText || info.chat?.kind === 'system') return content
+        const scope = resolveScope({chat:info.chat,sessionId:info.sessionId,persona:info.persona,account:getAccount()})
+        if (!memory.canProcess(scope)) return content
+        const hint = memory.recallHint({...info.chat,scope},info.queryText,info.prevText,{scope,about:info.speakers?.length ? info.speakers : info.chat.userId || info.senderId})
+        return hint ? [{type:'text',text:hint},...content] : content
+      } catch (error) {
+        api.log.warn('当轮记忆提示没生成：',error.message)
+        return content
+      }
+    })
     api.every(60_000,async () => {
       if (api.config().memory?.enabled === false) return
       // Rehydrate persisted scopes after restart; no global transcript scan or deletion.

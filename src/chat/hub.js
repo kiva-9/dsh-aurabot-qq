@@ -36,6 +36,8 @@ const LEGACY_WORKSPACE = 'C:\\Aurabot\\qq-chats'
 export const WORKSPACE_DIR = process.env.AURABOT_WORKSPACE || (existsSync(LEGACY_WORKSPACE) ? LEGACY_WORKSPACE : join(homedir(), 'Aurabot', 'qq-chats'))
 export const WORKSPACE_TITLE = 'Aurabot · QQ'
 const SOURCE_KIND = 'aurabot'
+const RECENT_MEDIA_MS = 30 * 60_000
+const RECENT_MEDIA_MAX = 6
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 /** 音频文件的类型，认不出来就当 wav。 */
@@ -112,7 +114,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const groupEngaged = new Map() // groupId → 加入话题到什么时候（毫秒）
   const ENGAGE_MS = 3 * 60_000
   const groupNames = new Map()
-  const recentMedia = new Map() // chatId → [{ seg, userId, at, sticker }] 最近发来的图片和表情
   const followups = createFollowupTracker({ windowMs: () => (getConfig().conversation?.followupSeconds || 90) * 1000 })
   const sentIds = new Map() // [account, chatId, platformMsgId] → 发送确认时间
   const sentKey = (account, chatId, id) => JSON.stringify([String(account), chatId, String(id)])
@@ -998,12 +999,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       log.debug(`忽略 ${msg.chatId}（${allowed.reason}）`)
       return
     }
-    // 最近发来的图片 / 表情记几张（「把刚才那张存下来」时用）
-    if (msg.stickers.length || msg.images.length) {
-      const list = (recentMedia.get(msg.chatId) || []).filter((x) => now - x.at < 30 * 60_000)
-      for (const seg of [...msg.stickers, ...msg.images]) list.push({ seg, userId: msg.userId, messageId: dbId, account: String(cfg.botQQ), at: now, sticker: msg.stickers.includes(seg) })
-      recentMedia.set(msg.chatId, list.slice(-6))
-    }
     // 主人命令（/silent /active …）：总开关关着也处理，回复直接发
     if (onCommand && isOwner(cfg, msg.userId)) {
       try {
@@ -1502,7 +1497,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (disposed) return
     if (hooks?.prompt) {
       try {
-        const next = await hooks.prompt(content, { chat, senderId, ...opts })
+        // 这一句还没记进 lastText，此刻的 lastText 就是上一句（短句检索记忆时用）
+        const sessionId = map().chats[chat.chatId]?.sessionId
+        const next = await hooks.prompt(content, { chat, senderId, ...opts, sessionId, prevText: turnState.get(sessionKey(sessionId))?.lastText || '' })
         if (next === null) {
           log.info(`${chat.chatId}：扩展模块决定这次不交给她`)
           if (!opts.steer) release(chat.chatId) // 插话被拦下时，当前这一轮还在跑，不能放开
@@ -1811,8 +1808,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
 
   return {
-    /** 这个聊天最近发来的图片 / 表情（新的在后面），可选只要某人发的 */
-    recentMedia: (chatId, userId) => (recentMedia.get(String(chatId)) || []).filter((x) => !userId || x.userId === String(userId)),
+    /** 这个聊天 30 分钟内最近 6 个图片 / 表情（新的在后面），可选只要某人发的。查出现记录，重启不丢。 */
+    recentMedia: (chatId, userId) => storage.occurrences.recent(String(chatId), { account: String(getConfig().botQQ), since: Date.now() - RECENT_MEDIA_MS, limit: RECENT_MEDIA_MAX })
+      .filter((x) => !userId || x.userId === String(userId)),
     capture,
     simulateTurn,
     onMessage: track(onMessage),
@@ -1870,7 +1868,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     resetSessions,
     accountChanged: () => {
       resetSessions()
-      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames,recentMedia])map.clear()
+      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames])map.clear()
       participation.reset()
       sentIds.clear();followups.clear();selfId='';lastChatAt=0;lastOwnerChatAt=0;lastBotToOwner={at:0,text:''}
     },

@@ -9,6 +9,9 @@ const NICK_MAX = 36
 const SIGN_MAX = 80
 
 /** 头像来源只收 http(s) 网址或「last」（这个聊天里最近一张图）；本地路径一律不收，免得被人拿去读电脑上的文件。 */
+/** 最近媒体里最新一张普通图片的网址（表情不算）。 */
+export const lastImageUrl = (media) => media.filter((x) => !x.sticker && /^https?:\/\//i.test(x.seg?.data?.url || '')).at(-1)?.seg.data.url
+
 export function avatarSource(input, lastUrl) {
   const s = String(input || '').trim()
   if (!s || /^(last|刚才|上一张|最近)/i.test(s)) return lastUrl ? { ok: true, file: lastUrl } : { ok: false, message: '这个聊天里还没人发过图' }
@@ -23,15 +26,6 @@ export default {
   description: '听人的话改自己的 QQ 昵称（qq_set_nickname）、个性签名（qq_set_signature）、头像（qq_set_avatar）；权限在「权限」页',
   setup(api) {
     const { hub, onebot } = api.core
-    const lastImage = new Map() // chatId → 最近一张图的网址
-
-    api.on('message', (msg) => {
-      const seg = (msg.images || []).slice(-1)[0]
-      const url = seg?.data?.url
-      if (url && /^https?:\/\//i.test(url)) lastImage.set(msg.chatId, url)
-      return false
-    })
-
     // 统一套路：dryRun 只说不做；执行前再按最新配置查一遍权限
     const guarded = (key, chat, sessionId, run) => async (args) => {
       const cfg = api.config()
@@ -78,7 +72,7 @@ export default {
         properties: { image: str('图片网址（http/https），或 last 表示刚才发的那张图') },
         required: ['image'],
         execute: guarded('qqAvatar', chat, sessionId, async ({ image }, c) => {
-          const src = avatarSource(image, lastImage.get(hub.chatOfSession(sessionId) || chat.chatId))
+          const src = avatarSource(image, lastImageUrl(hub.recentMedia(hub.chatOfSession(sessionId) || chat.chatId)))
           if (!src.ok) return src
           if (c.dryRun) return { ok: true, message: `试运行：本来要把 QQ 头像换成：${src.file}` }
           await onebot.call('set_qq_avatar', { file: src.file }, { timeoutMs: 30000 })

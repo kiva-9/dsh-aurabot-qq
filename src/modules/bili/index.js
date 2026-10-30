@@ -3,7 +3,7 @@
 import { createBili } from '../../bili/duty.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { profileToolVisible, profilePermits } from '../../chat/access.js'
-import { avatarSource } from '../profile/index.js'
+import { avatarSource, lastImageUrl } from '../profile/index.js'
 import { compilePersona } from '../../persona/compiler.js'
 
 export default {
@@ -15,12 +15,6 @@ export default {
   files: ['bili/duty.js', 'bili/api.js'],
   setup(api) {
     const { hub, storage, ask } = api.core
-    const lastImage = new Map()
-    api.on('message', (msg) => {
-      const url = (msg.images || []).slice(-1)[0]?.data?.url
-      if (url && /^https?:\/\//i.test(url)) lastImage.set(msg.chatId, { url, actorId: String(msg.userId) })
-      return false
-    })
     const bili = createBili({ getConfig: api.config, hub, storage, memory: api.lazy('memory'), log: api.log,
       think: async (prompt, ctx) => {
         if (typeof ask !== 'function') throw new Error('B站只读推理接口不可用')
@@ -79,8 +73,7 @@ export default {
           const ctx = turn(chat, sessionId)
           const p = profilePermits(c, 'biliAvatar', chat, ctx.actorId === String(c.ownerQQ))
           if (!p.ok) return p
-          const last = lastImage.get(chat.chatId)
-          const src = avatarSource(image, last?.actorId === ctx.actorId ? last.url : undefined)
+          const src = avatarSource(image, lastImageUrl(hub.recentMedia(chat.chatId, ctx.actorId)))
           if (!src.ok) return src
           return bili.setAvatar(src.file, { ...ctx, authorize: () => profilePermits(api.config(), 'biliAvatar', chat, ctx.actorId === String(api.config().ownerQQ)).ok })
         },
