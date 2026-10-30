@@ -17,5 +17,6 @@ import bili from './bili/index.js'
 import song from './song/index.js'
 import profile from './profile/index.js'
 import contacts from './contacts/index.js'
+import tokenMeter from './token-meter/index.js'
 
-export const BUILTINS = [stickers, voice, mood, memory, learning, retrieval, mediaMemory, search, qqTools, groupAdmin, imagegen, speakup, bili, song, tasks, profile, contacts]
+export const BUILTINS = [stickers, voice, mood, memory, learning, retrieval, mediaMemory, search, qqTools, groupAdmin, imagegen, speakup, bili, song, tasks, tokenMeter, profile, contacts]

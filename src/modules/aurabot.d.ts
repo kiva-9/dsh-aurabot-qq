@@ -295,6 +295,17 @@ export interface RetrievalApi {
   assertReferences(references: any[], context: RequestContext): any[]
   dispose(): Promise<void>
 }
+export interface TokenUsageCounts {
+  calls: number; callsWithUsage: number; incompleteCalls: number
+  inputTokens: number; outputTokens: number; cachedTokens: number; totalTokens: number
+}
+export interface TokenMeterApi {
+  summary(options?: {range?: 'today' | '7d' | '30d' | 'all'; chatId?: string; groupBy?: 'none' | 'day' | 'model' | 'role' | 'provider'; now?: number}): {
+    account: string; chatId: string | null; from: number; to: number; range: string
+    totals: TokenUsageCounts; buckets: Array<TokenUsageCounts & {key: string}>; generatedAt: number; note: string
+  }
+}
+
 export interface TaskApi {
   planner: any
   authorize(context: RequestContext): any

@@ -260,6 +260,7 @@ modules[id].enabled 与功能配置是两层开关；模块加载不等于服务
 | mood | state/current/label/nudge/reset/observe/judge/effects/contextLine/stop；account/chat/persona 必填。关键词判断默认开启、模型判断默认关闭；只影响短期表达，明确请求/承诺不受阻断 |
 | learning | list/get/upsert/update/transition/history/evidence/sources/enqueue/learn/checkpoint/select/contextFor/stop；表达/黑话分开。learnEnabled/useEnabled 默认 false，私聊学习默认禁止 |
 | retrieval | prepareContext/contextFor/recall/queryImages/materializeReference/assertReferences/health/status/dispose；默认关闭，启动不自动 probe 付费模型，面板显式探测后开放对应通道 |
+| token-meter | summary({range,chatId?,groupBy?})；range 为 today/7d/30d/all，自然日按 Asia/Shanghai。只读 service_calls，不含金额；totalTokens 含缓存读取。GET /token-meter/summary |
 | tasks | planner 与请求授权、wait/stop/listTasks/cancelTask 等；GET /tasks/list、POST /tasks/cancel，面板传 chatId |
 | stickers | list/get/selectForReply/collect/addFromBuffer/approve/reject/disable/remove/queueStatus/reconcileSync/stop 等，必须有聊天范围。本地保存、审核、分析、QQ 收藏同步各有状态 |
 | voice | speak(text,profile) → Promise<{file,engine}>；外部 OpenAI 兼容 TTS/固定 HTTP，默认 provider:none，本地脚本另行开启 |
