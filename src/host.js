@@ -22,7 +22,8 @@ import { createHub, WORKSPACE_DIR } from './chat/hub.js'
 import { createLocal, fileOf, toImageBuffer } from './local/local.js'
 import { createGroupRoles } from './chat/group-roles.js'
 import { defaultModel, askModel, observeModelUsage, modelReasoning, modelVision, clearReasoningCache, clearVisionCache } from './core/llm.js'
-import { mimeOf } from './chat/inbound.js'
+import { mimeOf, segmentsOf } from './chat/inbound.js'
+import { createDangerGuard } from './security/danger.js'
 import { dataDir, ensureDir } from './core/store.js'
 import { createUpdateChecker, changelogSection } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
@@ -144,6 +145,7 @@ export function apply(ctx) {
   let loginOk = false
   let wrongAccount = ''
   let hub = null
+  let dangerGuard = null
   let outboxRecovered = false
   let connectionRevision = 0, hostDisposed = false, modulesReady = false
   const diagnostics = createDiagnostics({ storage, getConfig, modules: () => mods, hub: () => hub, version: VERSION })
@@ -155,9 +157,14 @@ export function apply(ctx) {
     if (hostDisposed || !loginOk || !hub || !modulesReady) return
     if (ev.self_id && String(ev.self_id) !== String(cfg.botQQ)) return
     mods?.emit('onebot', ev)
-    if (ev.post_type === 'message') hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+    if (ev.post_type === 'message') {
+      // 危险命令确认：主人的「确认 / 取消」在这里截住，不进聊天上下文，也不叫醒模型
+      if (ev.message_type === 'private' && dangerGuard?.handleReply(`private:${ev.user_id}`, ev.user_id, plainText(ev), { at: Number(ev.time) * 1000 || undefined })) return
+      hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+    }
     else if (ev.post_type === 'notice' && ev.notice_type === 'notify' && ev.sub_type === 'poke') hub.onPoke(ev).catch((error) => log.error('处理戳一戳出错：', error.message))
   }
+  const plainText = (ev) => segmentsOf(ev).filter((seg) => seg.type === 'text').map((seg) => String(seg.data?.text ?? '')).join('')
   function drainLoginBuffer() {
     if (!loginOk || !hub || !modulesReady || hostDisposed) return
     for (const ev of loginBuffer.splice(0)) dispatchEvent(ev)
@@ -386,6 +393,15 @@ export function apply(ctx) {
   booted.then(() => { if (hostDisposed) return; modulesReady = true; drainLoginBuffer(); hub.recoverPlannerWakes(); bridge.refresh() })
 
   // ---------- 盯会话：一轮结束就发回 QQ ----------
+  dangerGuard = createDangerGuard({ getConfig, log: logger.child('危险命令'),
+    deliver: (chatId, text) => hub.sendText(chatId, text),
+    chatOfSession: (sessionId) => hub.chatOfSession(sessionId) })
+  ctx.effect(() => {
+    let off
+    try { off = ctx.on('tools/pre-execute', (exec, next) => dangerGuard.preExecute(exec, next)) }
+    catch (error) { log.warn('这个版本的 DSH 接不上危险命令确认，这项保护没有生效：', error.message) }
+    return () => { off?.(); dangerGuard.dispose() }
+  }, 'aurabot: 危险命令确认')
   ctx.effect(() => {
     const off = ctx.on('session/event', (session, event) => {
       try {

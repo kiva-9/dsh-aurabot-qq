@@ -755,3 +755,25 @@ test('#6 改资料：群里默认没有这些工具；调成「所有人」后�
   assert.equal(mock.sent('set_qq_profile').length, n + 1)
   await fake.call('/save', { profilePerms: { qqNickname: 'owner' } })
 })
+
+test('#3 危险命令确认：接上 tools/pre-execute；主人回「确认」放行，这句不进聊天', async () => {
+  await settle()
+  const guard = [...fake.listeners.get('tools/pre-execute')][0]
+  assert.equal(typeof guard, 'function')
+  const seen = fake.turns.length
+  mock.push(priv(OWNER, text('在吗')))
+  const { sessionId } = await until(() => fake.turns.slice(seen).find((turn) => /在吗/.test(turn.userText)))
+  await settle()
+  const exec = { name: process.platform === 'win32' ? 'pwsh' : 'bash', arguments: { command: 'rm -rf /' }, agent: { session: { id: sessionId } }, signal: new AbortController().signal }
+  const allow = async () => ({ kind: 'allow' })
+  assert.equal((await guard(exec, allow)).kind, 'allow', '默认关：不问')
+  await fake.call('/save', { security: { dangerConfirm: true } })
+  const turns = fake.turns.length
+  const pending = guard(exec, allow)
+  await until(() => sentTo('private', OWNER).some((c) => /危险命令确认/.test(JSON.stringify(c.params.message))))
+  mock.push(priv(OWNER, text('确认')))
+  assert.equal((await pending).kind, 'allow')
+  await sleep(300)
+  assert.equal(fake.turns.length, turns, '确认消息不会叫醒模型')
+  await fake.call('/save', { security: { dangerConfirm: false } })
+})

@@ -23,6 +23,7 @@ export const DEFAULTS = {
   ownerName: '主人',
   ownerLevel: 'full', // full | social | chat
   profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' }, // 改资料类操作的权限：off 关 / owner 仅主人私聊 / all 所有人
+  security: { dangerConfirm: false }, // 危险终端命令先在 QQ 问主人（只覆盖 bash / pwsh，不是沙箱）
   toolCallsPerTurn: 6, // 一轮里最多调用几次插件工具（防止模型反复自我唤醒、烧额度）；DSH 自带的电脑工具不算
   conversation: { maxTurns: 48, maxContextTokens: 48000, maxAgeMinutes: 480, followupSeconds: 90 },
   longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
@@ -232,6 +233,7 @@ export function normalize(raw) {
   c.mood.baseline = num(c.mood.baseline, 60, 30, 80)
   c.mood.judgeIntervalMs = num(c.mood.judgeIntervalMs, 60000, 1000, 86400000)
   c.learning = learningSettings(c)
+  c.security.dangerConfirm = c.security.dangerConfirm === true
   c.schemaVersion = 2
   c.policyRevision = Math.max(0, Math.floor(Number(c.policyRevision)||0))
   c.memory.shareGroups = normalizeShareGroups(c.memory.shareGroups)

@@ -1050,6 +1050,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const overrides = draft.group.overrides || {}
       const [newGid, setNewGid] = useState('')
       return h('div', { className: 'ab-grid' },
+        h(Card, { title: '危险命令确认', right: f.sw('security.dangerConfirm'), desc: '打开后，主人私聊里她要执行删根目录、格式化、关机、下载后直接执行这类终端命令时，会先在 QQ 问你，回复「确认」才执行，60 秒没回就拦下。只检查 bash / pwsh 的命令原文，挡不住编码或脚本文件绕过，不能当沙箱用。' }),
         h(Card, { title: '连发合并', right: f.sw('merge.enabled'), desc: '人常常一口气发好几句。打开后她会等对方说完再一起回，而不是一句一回。' },
           h(Row, { label: '对方停顿多久算说完' }, f.range('merge.waitSec', 0.5, 10, 0.5, (v) => v + ' 秒')),
           h(Row, { label: '最多等多久', hint: '对方一直在发也最多等这么久' }, f.range('merge.maxSec', 2, 30, 1, (v) => v + ' 秒')),
