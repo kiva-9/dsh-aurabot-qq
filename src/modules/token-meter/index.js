@@ -28,6 +28,11 @@ export default {
       return usage.aggregate({ chatId, from, to, groupBy, range })
     }
 
+    /** 面板用同窗口的总计、模型和趋势；不传 chatId 就是整个账号。 */
+    function dashboard(options = {}) {
+      return usage.dashboard(options)
+    }
+
     const inAllowList = (chatId, cfg) => {
       const [kind, id] = String(chatId).split(':')
       return (kind === 'group' ? cfg.allow.groups : kind === 'private' ? [cfg.ownerQQ, ...cfg.allow.private] : []).includes(id)
@@ -62,6 +67,17 @@ export default {
       return { ok: true, ...summary({ range, chatId: q.chatId || undefined, groupBy }) }
     })
 
-    return { summary }
+    api.route('/token-meter/dashboard', (req) => {
+      if (req.method !== 'GET') return { ok: false, message: '只接受 GET' }
+      const q = http.query(req)
+      try {
+        return { ok: true, ...dashboard({ range: q.range === undefined ? '7d' : q.range, startDate: q.startDate, endDate: q.endDate, chatId: q.chatId || undefined }) }
+      } catch (error) {
+        if (error instanceof RangeError) return { ok: false, message: error.message }
+        throw error
+      }
+    })
+
+    return { summary, dashboard }
   },
 }
