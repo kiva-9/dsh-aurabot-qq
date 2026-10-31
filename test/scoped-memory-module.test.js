@@ -15,12 +15,12 @@ function fixture(t) {
   const dir=mkdtempSync(join(tmpdir(),'aurabot-memory-module-'))
   const storage=createStorage({file:join(dir,'test.sqlite'),filesDir:join(dir,'assets')})
   t.after(()=>{storage.close();rmSync(dir,{recursive:true,force:true})})
-  const routes=new Map(),contexts=[],tools=[],timers=[]
+  const routes=new Map(),contexts=[],tools=[],timers=[],events=new Map()
   const hub={selfId:'bot',turnPersona:()=>({personaId:'fish'}),lastTextOf:()=> '咖啡',prevTextOf:()=>'',speakersOf:()=>['user'],
     chatLogDays:()=>{throw new Error('must never read old chat logs')},deleteChatLog:()=>{throw new Error('must never delete chat logs')}}
   const api={core:{storage,hub,http:{query:req=>req,body:async req=>req}},config:()=>({memory:{enabled:true}}),dsh:{},log:{warn(){}},
-    route:(p,h)=>routes.set(p,h),context:f=>contexts.push(f),tool:f=>tools.push(f),every:(_ms,f)=>timers.push(f)}
-  return {storage,dir,routes,contexts,tools,timers,api,hub}
+    route:(p,h)=>routes.set(p,h),context:f=>contexts.push(f),tool:f=>tools.push(f),every:(_ms,f)=>timers.push(f),on:(event,fn)=>events.set(event,fn)}
+  return {storage,dir,routes,contexts,tools,timers,events,api,hub}
 }
 test('module tab and reload list use exact existing files; API rejects missing scopes',async t=>{
   const f=fixture(t);memoryModule.setup(f.api)
@@ -75,7 +75,8 @@ test('hub turnPersona scopes profiles, while tool writes and extraction scopes s
   memory.create(payload())
   await memory.buildProfile('user',{scope:{...S,persona:'fish'}})
   const args={chat:{kind:'group',chatId:S.chat,userId:'user'},sessionId:'s1'}
-  assert.match(f.contexts[0](args),/咖啡/)
+  assert.equal(f.contexts[0](args),'')
+  assert.match(f.events.get('prompt/prepared')([{type:'text',text:'原文'}],args)[0].text,/咖啡/)
   assert.deepEqual(memory.registeredScopes(),[S])
   const message=f.storage.messages.ingest({account:S.account,chatId:S.chat,eventKind:'message',authorId:'user',text:'我喜欢茶',segments:[]})
   f.hub.turnActor=()=>({actorId:'user',requestId:'request1'})

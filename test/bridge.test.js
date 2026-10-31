@@ -45,6 +45,52 @@ function fixture(t, { result = delivery(['delivered']), reply = '后台生成的
   return { bridge, cfg, hub, fake, sends, turns }
 }
 
+test('bridge disposal revokes retained tools and prevents a late think result from sending', async t => {
+  const f = fixture(t)
+  let release
+  f.hub.runSystemTurn = () => new Promise(resolve => { release = resolve })
+  f.bridge.refresh()
+  const retained = f.fake.ctx.globalTools.get('aurabot_qq_send')
+  const thinking = f.bridge.ops.think({ prompt: '生成回复', to: TARGET })
+  await Promise.resolve()
+  await f.bridge.dispose()
+  release('迟到的回复')
+  assert.equal((await thinking).ok, false)
+  assert.equal((await retained.execute({ text: '停用后的调用' })).ok, false)
+  assert.equal((await f.bridge.ops.call({ module: 'any', method: 'any' })).ok, false)
+  assert.equal(f.sends.length, 0)
+  assert.equal(f.fake.ctx.globalTools.size, 0)
+  f.bridge.refresh()
+  assert.equal(f.fake.ctx.globalTools.size, 0)
+})
+
+test('bridge rechecks the destination after an asynchronous think completes', async t => {
+  const f = fixture(t)
+  let release
+  f.hub.runSystemTurn = () => new Promise(resolve => { release = resolve })
+  const thinking = f.bridge.ops.think({ prompt: '生成回复', to: 'group:777' })
+  await Promise.resolve()
+  f.cfg.allow.groups = []
+  release('迟到的回复')
+  assert.equal((await thinking).ok, false)
+  assert.equal(f.sends.length, 0)
+})
+
+test('bridge disposal waits for async global tool unregister', async t => {
+  const f = fixture(t)
+  let release, finished = false
+  const gate = new Promise(resolve => { release = resolve })
+  f.fake.ctx.tools.register = () => async () => { await gate; finished = true }
+  f.bridge.refresh()
+  let settled = false
+  const closing = f.bridge.dispose().then(() => { settled = true })
+  await Promise.resolve()
+  assert.equal(settled, false)
+  release()
+  await closing
+  assert.equal(finished, true)
+})
+
 for (const [states, status, partial] of [
   [['delivered', 'delivered'], 'delivered', false],
   [['pending'], 'pending', false], [['sending'], 'pending', false],
@@ -243,7 +289,7 @@ test('bridge 宿主回归：fake DSH + 本机 OneBot + 真实 outbox', async (t)
     speakUp: { enabled: false }, mood: { enabled: false }, memory: { enabled: false }, learning: { enabled: false },
     modules: Object.fromEntries(['stickers', 'voice', 'mood', 'memory', 'learning', 'retrieval', 'search', 'imagegen', 'speakup', 'bili', 'song'].map((id) => [id, { enabled: false }])),
   }))
-  fake = createFakeDsh({ brain: async (call) => { calls.push(call); return nextReply } })
+  fake = createFakeDsh({ brain: async (call) => { const chatId = host.hub.chatOfSession(call.agent.id); calls.push({ ...call, chatId, level: host.hub.sessions()[chatId]?.level }); return nextReply } })
   host = (await import('../src/host.js')).apply(fake.ctx)
   await host.ready
   assert.equal((await fake.call('/onebot/reconnect')).json().ok, true)
@@ -315,8 +361,10 @@ test('bridge 宿主回归：fake DSH + 本机 OneBot + 真实 outbox', async (t)
       transports.set(nextReply, transport)
       const result = (await fake.call('/open/think', { prompt: '生成一段回复', to: TARGET, noTools: false }, headers)).json()
       const call = calls.at(-1)
-      assert.equal(host.hub.chatOfSession(call.agent.id), 'system:bridge')
-      assert.equal(host.hub.sessions()['system:bridge'].level, 'chat')
+      assert.ok(call.chatId.startsWith('system:bridge:'))
+      assert.equal(call.level, 'chat')
+      assert.equal(host.hub.chatOfSession(call.agent.id), '', 'completed ticket loses its live mapping')
+      assert.equal(host.hub.sessions()[call.chatId], undefined)
       assert.deepEqual(call.toolNames, [])
       assert.equal(call.agent.tools.size, 0)
       assert.equal(result.reply, nextReply)

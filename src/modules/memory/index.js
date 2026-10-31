@@ -32,7 +32,22 @@ export default {
       memory.enqueue(factScope)
       const subjects=[...new Set([args.chat.userId,...(hub?.speakersOf?.(args.sessionId) || [])])].filter(Boolean).slice(0,4)
       if(scope.persona) for(const subject of subjects) void memory.buildProfile(String(subject),{scope}).catch(error=>api.log.warn('人物资料等待重建：',error.message))
-      return memory.contextFor({...args.chat,scope},args.sessionId)
+      // Profile selection depends on the current speakers; the host system
+      // context must not accumulate one snapshot per turn.
+      return ''
+    })
+    api.on?.('prompt/prepared', (content, info) => {
+      try {
+        if (info.chat?.kind === 'system') return content
+        const scope = resolveScope({ chat: info.chat, sessionId: info.sessionId, persona: info.persona, account: getAccount() })
+        if (!memory.canProcess(scope)) return content
+        const profile = memory.contextFor({ ...info.chat, scope }, info.sessionId,
+          { scope, about: info.speakers?.length ? info.speakers : info.chat.userId || info.senderId })
+        return profile ? [{ type: 'text', text: profile }, ...content] : content
+      } catch (error) {
+        api.log.warn('当轮人物资料没生成：', error.message)
+        return content
+      }
     })
     // Failure policy of the prompt hook is abort: a recall problem must not drop the user's message.
     api.on?.('prompt',(content,info) => {

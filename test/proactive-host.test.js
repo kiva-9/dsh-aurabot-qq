@@ -104,7 +104,7 @@ before(async () => {
   fake = createFakeDsh({ brain: async (call) => {
     const entry = [...scripts.values()].find((s) => call.text.includes(s.marker))
     assert.ok(entry, `必须显式设置 fake 模型脚本：${call.text}`)
-    entry.calls.push(call)
+    entry.calls.push({ ...call, chatId: host.hub.chatOfSession(call.agent.id) })
     await entry.release.promise
     return entry.reply
   } })
@@ -142,8 +142,9 @@ test('主动消息：专用 system/noTools 回合，只有真实回执才能更�
   transports.set(reply, transport)
   const previous = structuredClone(host.hub.lastBotToOwner), input = enqueue(entry.marker)
   const call = await until('主动 system 回合开始', () => entry.calls[0])
-  assert.equal(host.hub.chatOfSession(call.agent.id), SYSTEM_CHAT)
-  assert.equal(host.hub.sessions()[SYSTEM_CHAT].level, 'chat')
+  assert.ok(call.chatId.startsWith(SYSTEM_CHAT + ':'))
+  assert.equal(host.hub.chatOfSession(call.agent.id), call.chatId)
+  assert.equal(host.hub.sessions()[call.chatId].level, 'chat')
   assert.deepEqual(call.toolNames, [])
   assert.equal(call.agent.tools.size, 0)
   assert.equal(host.hub.sessions()[CHAT], undefined, '没有把主动 prompt 注入主人聊天会话')
@@ -179,7 +180,8 @@ test('主动消息：主人聊天正在运行时排队，主回合释放后才�
   await finishMain(main)
   await done(input)
   assert.equal(entry.calls.length, 1)
-  assert.equal(host.hub.chatOfSession(entry.calls[0].agent.id), SYSTEM_CHAT)
+  assert.ok(entry.calls[0].chatId.startsWith(SYSTEM_CHAT + ':'))
+  assert.equal(host.hub.chatOfSession(entry.calls[0].agent.id), '', 'completed background ticket is detached')
   assert.equal(outgoing().length, before + 1)
 })
 

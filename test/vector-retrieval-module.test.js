@@ -103,20 +103,24 @@ test('builtin setup stays synchronous; disabled creates no worker/outbox/index a
   for (const file of retrieval.files) assert.ok((await stat(resolve('src', file))).isFile(), file)
 })
 
-test('real module hook warms synchronous context; source tombstones, scope, epoch and config disable invalidate it', async t => {
+test('real module hook injects prepared evidence only into this turn; tombstones, scope and epoch invalidate it', async t => {
   const f = await fixture(t)
   const row = f.fact('小明喜欢咖啡'), chat = { chatId: S.chat, kind: 'group' }
   assert.equal(f.api.status().lastError, null)
   await f.modules.prepareContext({ chat, chatId: S.chat, sessionId: 's', text: '咖啡', account: 'bot', persona: '' })
-  const text = f.modules.contextFor({ chat, sessionId: 's' })
-  assert.equal(typeof text, 'string'); assert.match(text, /小明喜欢咖啡/); assert.ok(!text.includes('[object Promise]'))
-  assert.equal(f.modules.contextFor({ chat: { ...chat, chatId: P.chat }, sessionId: 's' }), '')
-  f.memory.remove(row.id, meta(S))
+  const content = [{ type: 'text', text: '原文' }]
+  const prompt = (chat, text = '咖啡') => f.modules.filter('prompt/prepared', content, { chat, sessionId: 's', text })
+  const result = await prompt(chat)
+  assert.match(result[0].text, /小明喜欢咖啡/); assert.equal(result[1].text, '原文')
   assert.equal(f.modules.contextFor({ chat, sessionId: 's' }), '')
+  assert.deepEqual(await prompt({ ...chat, chatId: P.chat }), content)
+  assert.deepEqual(await prompt(chat, '不匹配的查询'), content)
+  f.memory.remove(row.id, meta(S))
+  assert.deepEqual(await prompt(chat), content)
   f.fact('新的咖啡事实')
   await f.modules.prepareContext({ chat, chatId: S.chat, sessionId: 's', text: '咖啡', account: 'bot', persona: '' })
   f.storage.epochs.bump(S.chat)
-  assert.equal(f.modules.contextFor({ chat, sessionId: 's' }), '')
+  assert.deepEqual(await prompt(chat), content)
   f.cfg.retrieval.enabled = false
   await f.api.ensureReady()
   assert.equal(f.api.status().ready, false)
@@ -135,9 +139,27 @@ test('slow foreground embedding yields lexical evidence within budget and record
   try {
     await f.modules.prepareContext({ chat: { chatId: S.chat, kind: 'group' }, chatId: S.chat, sessionId: 'bounded', text: '咖啡', account: 'bot', persona: '', requestId: 'foreground-request' })
     assert.ok(performance.now() - started < 2000, 'front reply must not await provider timeout')
-    assert.match(f.modules.contextFor({ chat: { chatId: S.chat }, sessionId: 'bounded' }), /小明喜欢咖啡/)
+    const out = await f.modules.filter('prompt/prepared', [{ type: 'text', text: '原文' }], { chat: { chatId: S.chat }, sessionId: 'bounded', text: '咖啡' })
+    assert.match(out[0].text, /小明喜欢咖啡/)
     assert.ok(f.usage.some(u => u.requestId === 'foreground-request' && u.chatId === S.chat))
   } finally { release.resolve(); f.state.hold = null }
+})
+
+test('twenty prepared retrieval turns contain only current-query evidence and no system snapshots', async t => {
+  const f = await fixture(t)
+  f.fact('小明喜欢咖啡'); f.fact('小明喜欢登山')
+  const chat = { chatId: S.chat, kind: 'group' }
+  for (let i = 0; i < 20; i++) {
+    const query = i % 2 ? '登山' : '咖啡'
+    await f.modules.prepareContext({ chat, chatId: S.chat, sessionId: 'twenty', text: query, account: 'bot', persona: '' })
+    const output = await f.modules.filter('prompt/prepared', [{ type: 'text', text: `本轮 ${i}` }], { chat, sessionId: 'twenty', text: query })
+    assert.equal(output.length, 2)
+    assert.match(output[0].text, new RegExp(query))
+    assert.doesNotMatch(output[0].text, new RegExp(i % 2 ? '咖啡' : '登山'))
+    assert.equal(output[1].text, `本轮 ${i}`)
+    assert.equal(f.modules.contextFor({ chat, sessionId: 'twenty' }), '')
+  }
+  assert.equal(f.state.requests.length, 0, 'no embedding or model service was called')
 })
 
 test('history image refs return provenance, recheck actor/shareGroups/recall and never expose a filesystem path', async t => {

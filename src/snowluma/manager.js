@@ -161,7 +161,7 @@ export function generatePassword() {
   return `Ab${b.slice(0, 16)}#9!`
 }
 
-export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs = 20000 }) {
+export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs = 20000, spawnImpl = spawn }) {
   let child = null
   let childPid = 0
   let token = ''
@@ -256,7 +256,7 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
       token = ''
     }
     try {
-      child = spawn(exe, ['./index.mjs'], { cwd: inst.dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: false })
+      child = spawnImpl(exe, ['./index.mjs'], { cwd: inst.dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: false })
     } catch (error) {
       return { ok: false, message: `启动失败：${error.message}` }
     }
@@ -275,6 +275,12 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
     child.stdout?.on('data', relay)
     child.stderr?.on('data', relay)
     const me = child
+    let spawnError = null
+    me.once('error', (error) => {
+      spawnError = error
+      log.warn(`SnowLuma 启动失败：${error.message}`)
+      if (child === me) { child = null; childPid = 0 }
+    })
     me.on('exit', (code) => {
       log.warn(`SnowLuma 退出了（code ${code}）`)
       // 重置密码时旧进程晚一步退出：别把刚启动的新进程也当成退出了
@@ -286,7 +292,8 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
     for (let i = 0; i < 30; i++) {
       await new Promise((r) => setTimeout(r, 1000))
       if (await running()) return { ok: true, message: '已启动' }
-      if (!child) return { ok: false, message: 'SnowLuma 启动后马上退出了（看日志里的 SnowLuma 段）' }
+      if (spawnError) return { ok: false, message: `启动失败：${spawnError.message}` }
+      if (child !== me) return { ok: false, message: 'SnowLuma 启动后马上退出了（看日志里的 SnowLuma 段）' }
     }
     return { ok: false, message: '等了 30 秒控制台还没起来' }
   }

@@ -3,6 +3,7 @@
 // 只做看和评论，不碰改资料、关注、私信这类账号层面的操作。
 
 import { createHash } from 'node:crypto'
+import { createSearchHttp } from '../search/net.js'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
 const MIXIN = [46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 34, 44, 52]
@@ -54,7 +55,9 @@ export function sniffImageType(buf) {
   return ''
 }
 
-export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
+export function createBiliApi({ getCookie, log, fetchImpl = fetch, readPublic }) {
+  const publicHttp = createSearchHttp({ allowAnyPort: true })
+  const readMedia = readPublic || ((url, options) => publicHttp.read(url, { ...options, maxRedirects: 4, retries: 0 }))
   let wbi = null // { img, sub, at }
   let buvid = ''
 
@@ -135,6 +138,7 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     return {
       bvid: d.bvid, aid: d.aid, cid: d.cid, title: d.title, desc: String(d.desc || '').slice(0, 600), author: d.owner?.name, authorMid: d.owner?.mid,
       play: d.stat?.view || 0, like: d.stat?.like || 0, reply: d.stat?.reply || 0, pubdate: (d.pubdate || 0) * 1000, duration: d.duration, tname: d.tname,
+      pages: (d.pages || []).map(p => ({ cid: p.cid, page: p.page, duration: p.duration, part: p.part })),
     }
   }
 
@@ -146,13 +150,27 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
       const pick = list.find((s) => /zh|中文/.test(s.lan + s.lan_doc)) || list[0]
       if (!pick?.subtitle_url) return ''
       const url = pick.subtitle_url.startsWith('//') ? 'https:' + pick.subtitle_url : pick.subtitle_url
-      const r = await fetchImpl(url, { headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/' }, signal: AbortSignal.timeout(15000) })
-      const j = await r.json()
+      const r = await readMedia(url, { maxBytes: 1024 * 1024, timeoutMs: 15000, headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/' } })
+      const j = JSON.parse(r.body.toString('utf8'))
       return (j.body || []).map((x) => x.content).join(' ')
     } catch (error) {
       log?.debug('拿字幕失败：', error.message)
       return ''
     }
+  }
+
+  async function videoShots({ bvid, aid, cid }) {
+    const query = new URLSearchParams({ ...(bvid ? { bvid } : { aid: String(aid) }), cid: String(cid), index: '1' })
+    const d = await req('https://api.bilibili.com/x/player/videoshot?' + query)
+    return { images: (d.image || []).map(url => url.startsWith('//') ? 'https:' + url : url), index: d.index || [], imgXLen: d.img_x_len, imgYLen: d.img_y_len }
+  }
+
+  async function playurl({ bvid, aid, cid }) {
+    const d = await req(await signed('https://api.bilibili.com/x/player/wbi/playurl', { ...(bvid ? { bvid } : { avid: aid }), cid, qn: 32, fnval: 16, fourk: 0 }))
+    const streams = (d.dash?.video || []).map(v => ({ url: v.baseUrl || v.base_url, bandwidth: v.bandwidth, codecs: v.codecs }))
+      .filter(v => /^https?:\/\//i.test(v.url || '')).sort((a, b) => (Number(a.bandwidth) || 0) - (Number(b.bandwidth) || 0))
+    return { url: streams[0]?.url || (d.durl?.length === 1 ? d.durl[0].url : '') || '',
+      segments: (d.durl || []).map(v => ({ url: v.url, length: v.length, size: v.size })) }
   }
 
   /** 热门评论：[{rpid, name, mid, text, like, replies}] */
@@ -162,10 +180,15 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
   }
 
   /** 发评论；root/parent 不传就是一级评论。要登录。 */
-  async function postComment(aid, message, { root, parent } = {}) {
+  async function searchUsers(keyword) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/web-interface/wbi/search/type', { search_type: 'bili_user', keyword, page: 1 }))
+    return (d.result || []).map(x => ({ name: stripHtml(x.uname), mid: String(x.mid || '') }))
+  }
+  async function postComment(aid, message, { root, parent, mentions } = {}) {
     const csrf = parseCookie(getCookie()).bili_jct
     if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
-    const d = await req('https://api.bilibili.com/x/v2/reply/add', { method: 'POST', form: { type: 1, oid: aid, message, plat: 1, csrf, ...(root ? { root, parent: parent || root } : {}) } })
+    const d = await req('https://api.bilibili.com/x/v2/reply/add', { method: 'POST', form: { type: 1, oid: aid, message, plat: 1, csrf, ...(mentions && Object.keys(mentions).length ? { at_name_to_mid: JSON.stringify(mentions) } : {}), ...(root ? { root, parent: parent || root } : {}) } })
     return { rpid: d.rpid }
   }
 
@@ -174,6 +197,13 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     const csrf = parseCookie(getCookie()).bili_jct
     if (!csrf) throw new Error('没登录 B 站')
     await req('https://api.bilibili.com/x/web-interface/archive/like', { method: 'POST', form: { aid, like: 1, csrf } })
+  }
+
+  async function postDanmaku({ aid, cid, progress, text }) {
+    const csrf = parseCookie(getCookie()).bili_jct
+    if (!csrf) throw new Error('没登录 B 站')
+    const d = await req('https://api.bilibili.com/x/v2/dm/post', { method: 'POST', form: { type: 1, oid: cid, pid: aid, progress, msg: text, color: 16777215, fontsize: 25, mode: 1, rnd: Math.floor(Date.now() / 1000), csrf } })
+    return { id: d.dmid_str || d.dmid }
   }
 
   /** 改自己的个性签名（B 站上限 70 字）。要登录。 */
@@ -187,13 +217,11 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
   async function setFace(imageUrl) {
     const csrf = parseCookie(getCookie()).bili_jct
     if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
-    const r = await fetchImpl(imageUrl, { headers: { 'user-agent': UA }, signal: AbortSignal.timeout(20000) })
-    if (r.ok === false || (typeof r.status === 'number' && (r.status < 200 || r.status >= 300))) throw new Error('图片下载失败：HTTP ' + r.status)
-    let type = String(r.headers?.get?.('content-type') || '').split(';')[0].trim()
-    const buf = Buffer.from(await r.arrayBuffer())
+    const r = await readMedia(imageUrl, { maxBytes: FACE_MAX, timeoutMs: 20000, headers: { 'user-agent': UA } })
+    const buf = Buffer.from(r.body)
     if (!buf.length) throw new Error('图片是空的')
     if (buf.length > FACE_MAX) throw new Error('图片超过 2MB，B 站不收')
-    if (!/^image\//i.test(type)) type = sniffImageType(buf)
+    const type = sniffImageType(buf)
     if (!type) throw new Error('这个网址不是图片')
     const fd = new FormData()
     fd.append('dopost', 'save')
@@ -218,5 +246,5 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     return r.headers.get('location') || ''
   }
 
-  return { nav, search, popular, view, subtitle, comments, postComment, likeVideo, setSign, setFace, replyFeed, resolveShort }
+  return { nav, search, searchUsers, popular, view, videoShots, playurl, subtitle, comments, postComment, postDanmaku, likeVideo, setSign, setFace, replyFeed, resolveShort }
 }

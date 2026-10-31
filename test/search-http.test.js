@@ -167,6 +167,22 @@ test('redirects revalidate DNS, block private hops/downgrades/loops, and preserv
   await assert.rejects(http.read('https://public.example/downgrade'), code('REDIRECT_BLOCKED'))
 })
 
+test('cross-origin media redirects retain safe CDN headers but strip credentials and custom secrets', async () => {
+  await mockHttp().read('http://public.example/redirect-public', { headers: {
+    authorization: 'Bearer secret', cookie: 'session=secret', 'x-api-key': 'secret',
+    referer: 'https://www.bilibili.com/', 'user-agent': 'AurabotTest', range: 'bytes=0-255',
+  } })
+  const first = seen.findLast(r => r.path === '/redirect-public')
+  const second = seen.at(-1)
+  assert.equal(first.headers.authorization, 'Bearer secret')
+  assert.equal(second.headers.authorization, undefined)
+  assert.equal(second.headers.cookie, undefined)
+  assert.equal(second.headers['x-api-key'], undefined)
+  assert.equal(second.headers.referer, 'https://www.bilibili.com/')
+  assert.equal(second.headers['user-agent'], 'AurabotTest')
+  assert.equal(second.headers.range, 'bytes=0-255')
+})
+
 test('DNS is pinned once per hop; rebinding cannot cause a second lookup at connect', async () => {
   let calls = 0
   let connects = 0

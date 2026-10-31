@@ -32,6 +32,7 @@ function harness(t) {
     start: (mod) => f.track(mod.setup(api)),
     get: (path, query = {}) => routes.get(path)({ method: 'GET', query }),
     post: (path, body = {}) => routes.get(path)({ method: 'POST', body }),
+    prepared: args => (events.get('prompt/prepared') || []).reduce((content, fn) => fn(content, args), [{ type: 'text', text: '原文' }]),
     event: (a) => { for (const fn of events.get('activity') || []) fn(a) },
     configEvent: cfg => { for(const fn of events.get('config') || []) fn(cfg) },
   }
@@ -159,9 +160,9 @@ test('panel can explicitly list read-only shared entries while sources and write
   assert.deepEqual((await f.get('/learning/sources', { ...viewer, kind: 'jargon' })).items, [])
   assert.equal((await f.get('/learning/evidence', { ...viewer, id: item.id })).code, 'NOT_FOUND')
   assert.equal((await f.post('/learning/disable', { scope: viewer, id: item.id, expectedRevision: item.revision })).code, 'NOT_FOUND')
-  assert.match(f.contexts[0]({ chat: { chatId: viewer.chat }, sessionId: 's2' }), /"shared":true/)
+  assert.match(f.prepared({ chat: { chatId: viewer.chat }, sessionId: 's2' })[0].text, /"shared":true/)
   f.cfg.memory.shareGroups = []
-  assert.equal(f.contexts[0]({ chat: { chatId: viewer.chat }, sessionId: 's2' }), '')
+  assert.deepEqual(f.prepared({ chat: { chatId: viewer.chat }, sessionId: 's2' }), [{ type: 'text', text: '原文' }])
 })
 test('events resolve msg.chatId and hub.personaFor; stale identity and system contexts are ignored', async t => {
   const f = harness(t), mood = f.start(moodModule), learning = f.start(learningModule)
@@ -204,17 +205,32 @@ test('context hook uses only approved records and selected chat; model calls wai
   const f = harness(t), l = f.start(learningModule), ids = sources(f)
   let item = l.upsert(S, 'jargon', candidate(ids))
   const args = { chat: { chatId: S.chat }, sessionId: 's1' }
-  assert.equal(f.contexts[0](args), '')
+  assert.deepEqual(f.prepared(args), [{ type: 'text', text: '原文' }])
   assert.equal(f.calls.length, 0)
   item = l.transition(S, item.id, 'approved', { expectedRevision: item.revision })
-  assert.match(f.contexts[0](args), /暂时放松/)
-  assert.equal(f.contexts[0]({ chat: { chatId: 'group:2' }, sessionId: 's2' }), '')
+  assert.match(f.prepared(args)[0].text, /暂时放松/)
+  assert.deepEqual(f.prepared({ chat: { chatId: 'group:2' }, sessionId: 's2' }), [{ type: 'text', text: '原文' }])
+  assert.equal(f.contexts.length, 0, 'turn-dependent learning is not retained in system context')
   assert.equal(f.calls.length, 0)
   await f.timers[0]()
   assert.equal(f.calls.length, 2)
   assert.equal(l.checkpoint(S, 'jargon').outcome, 'no_info')
   assert.equal(l.checkpoint(S, 'expression').outcome, 'no_info')
   assert.equal(l.get(S, item.id).status, 'approved')
+})
+
+test('twenty learning turns supply only current prompt text, never accumulating system context', t => {
+  const f = harness(t), l = f.start(learningModule), ids = sources(f)
+  let item = l.upsert(S, 'jargon', candidate(ids))
+  item = l.transition(S, item.id, 'approved', { expectedRevision: item.revision })
+  for (let i = 0; i < 20; i++) {
+    const output = f.prepared({ chat: { chatId: S.chat }, sessionId: 's1', text: '摸鱼', requestId: `turn-${i}` })
+    assert.equal(output.length, 2)
+    assert.match(output[0].text, /暂时放松/)
+    assert.equal(output[1].text, '原文')
+    assert.equal(f.contexts.length, 0)
+  }
+  assert.equal(f.calls.length, 0)
 })
 test('module disposal aborts pending work and drains model tasks before storage closes', async t => {
   const f = harness(t), gate = deferred(), l = f.start(learningModule); sources(f)

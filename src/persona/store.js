@@ -34,6 +34,16 @@ export function normalizeLayers(raw = {}) {
     policy: { mood: po.mood !== false, learnExpressions: po.learnExpressions !== false, useExpressions: po.useExpressions !== false },
     tags: list(l.tags, 12).map((t) => t.slice(0, 20)),
   }
+  // Missing individual overrides inherit the global voice policy.
+  if (vo.rvc && typeof vo.rvc === 'object' && !Array.isArray(vo.rvc)) {
+    const r = vo.rvc, next = {}
+    if (typeof r.enabled === 'boolean') next.enabled = r.enabled
+    if (typeof r.voice === 'string' && r.voice.trim()) next.voice = str(r.voice.trim(), 200)
+    if (r.pitch !== '' && r.pitch != null && typeof r.pitch !== 'boolean' && Number.isFinite(Number(r.pitch))) next.pitch = Math.max(-24, Math.min(24, Number(r.pitch)))
+    if (['original', 'error'].includes(r.fallback)) next.fallback = r.fallback
+    if (r.timeoutMs !== '' && r.timeoutMs != null && typeof r.timeoutMs !== 'boolean' && Number.isFinite(Number(r.timeoutMs))) next.timeoutMs = Math.max(1000, Math.min(300000, Number(r.timeoutMs)))
+    if (Object.keys(next).length) out.voice.rvc = next
+  }
   if (l.legacy && typeof l.legacy === 'object' && str(l.legacy.body).trim()) out.legacy = { body: str(l.legacy.body, 60000) }
   return out
 }

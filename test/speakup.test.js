@@ -115,3 +115,16 @@ test('调度未接通明确不可用；enqueue 不确定也保留预算、不自
   assert.equal(f.s.state().events[0].state, 'unknown')
   assert.equal(f.queued.length, 1)
 })
+
+test('explicit targets remain scoped and revocation cancels queued work', async t => {
+  const f = setup(t)
+  f.cfg.speakUp.targets = ['group:22']
+  f.cfg.allow.groups.push('22')
+  f.hub.scopeFor = chat => ({ account: f.cfg.botQQ, chat, persona: 'fish' })
+  assert.equal((await f.s.fire('manual', { target: 'private:10000001' })).code, 'SCOPE_REQUIRED')
+  assert.equal((await f.s.fire('manual', { target: 'group:22' })).accepted, true)
+  assert.equal(f.queued[0].chatId, 'group:22')
+  assert.equal(f.queued[0].shouldSend(), true)
+  f.cfg.speakUp.targets = ['private:10000001']
+  assert.equal(f.queued[0].shouldSend(), false)
+})

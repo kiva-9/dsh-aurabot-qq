@@ -1,6 +1,7 @@
 // 内置模块：生图。她能画图、照着参考图画、改图（多个生图服务：OpenAI 兼容 / Gemini / ComfyUI / 自己配的 HTTP，或「本地接口」的画图脚本）。
 // 画图是后台任务：聊天这一轮马上回「在画了」，画好直接发出来；取消只能取消自己的。
 
+import { canUseArtwork, artworkList, resolveArtwork } from '../../image/gallery.js'
 import { createJobRunner, STATE_LABEL, ACTIVE } from '../../jobs/runner.js'
 import { createImageService } from '../../jobs/image.js'
 import { MODE_LABEL, ROLES } from '../../providers/image/common.js'
@@ -38,7 +39,10 @@ export default {
     const enabled = () => svc.profiles().length > 0 && (api.config().imageGen.enabled || local.active('image'))
 
     /** 生图前的权限：只给主人画时，这一轮提出请求的人得是主人。 */
-    const allowed = (sessionId) => !api.config().imageGen.ownerOnly || hub.turnSendersAllOwner(sessionId)
+    const allowed = (sessionId) => {
+      const mixed = new Set((hub.turnRequests?.(sessionId) || []).map(r => String(r.actorId))).size > 1
+      return !(api.config().imageGen.ownerOnly || mixed) || hub.turnSendersAllOwner(sessionId)
+    }
 
     api.tool(({ chat, sessionId }) => (enabled() && chat.kind !== 'system' ? [
       defineTool({
@@ -55,12 +59,14 @@ export default {
           reference_candidates: { type: 'array', maxItems: 3, items: { type: 'object', properties: { resultId: str('搜索结果 ID'), candidateId: str('已经审核的候选图片 ID') }, required: ['resultId', 'candidateId'] }, description: '可选，只能使用 qq_reference_candidates 返回的 verified 候选；未确认时先澄清，不跳过审核' },
           history_references: { type:'array',maxItems:8,items:{type:'object',properties:{occurrenceId:str('recall_images 返回的历史图片出现 ID'),role:{type:'string',enum:['base','identity','style','composition']}},required:['occurrenceId','role']},description:'可选，使用已明确选择的历史图片；引用提交前会重新核验范围、作者和撤回状态' },
           size: str('可选，比如 1024x1024 / 768x1024 / 1024x768'),
+          shape: str('可选：方图、竖图或横图'),
+          artwork_id: str('可选：当前聊天画廊中明确选定的作品 ID，作为修改底图'),
           use_avatar: { type: 'boolean', description: '可选，用这个请求者自己的 QQ 头像当人物长相参考' },
           avatar: { type: 'object', description: '可选，比 use_avatar 更具体：qq 只有主人能填且须是本群成员，role 默认 identity', properties: { qq: str('QQ 号'), role: { type: 'string', enum: ['identity', 'style', 'base'] } } },
         },
         required: ['prompt'],
-        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references, use_avatar, avatar }, execution) => {
-          if (!allowed(sessionId)) return { ok: false, message: '画图只给主人画哦' }
+        execute: async ({ prompt, images, continue_last: cont, size, draw_self, reference_candidates, history_references, use_avatar, avatar, shape, artwork_id }, execution) => {
+          if (!allowed(sessionId)) return { ok: false, message: '生图权限不足，或这一轮含其他人的请求；请主人单独发起' }
           const who = hub.turnActor(sessionId)
           if (who.error) return { ok: false, message: who.error }
           const pool = hub.turnImages(sessionId)
@@ -101,16 +107,25 @@ export default {
             refs.push({ assetId: ref.assetId, role, reason: `QQ ${ref.qq} 的头像`, avatar: { qq: ref.qq, assetId: ref.assetId } })
           }
           let parentJobId = null
+          if (artwork_id) {
+            const personaId = hub.turnPersona?.(sessionId)?.personaId
+            const selected = resolveArtwork(artwork_id, runner.get, { account: api.config().botQQ, chatId: chat.chatId, actorId: who.actorId, personaId })
+            if (!selected || !storage.assets.get(selected.assetId) || refs.some(r => r.role === 'base'))
+              return { ok: false, message: '作品不存在或不属于当前聊天、请求者和角色，或需要明确选择唯一底图' }
+            refs.unshift({ assetId: selected.assetId, galleryId: selected.id, personaId, role: 'base', reason: `画廊作品 ${selected.id}` })
+            parentJobId = selected.job.id
+          }
           const quotedParent = refs.find((r) => r.role === 'base' && r.generatedJobId)
           if (quotedParent && !cont) {
             const parent = runner.get(quotedParent.generatedJobId)
-            if (parent?.chatId === chat.chatId && parent.actorId === String(who.actorId)) {
+            if (canUseArtwork(parent, { account: api.config().botQQ, chatId: chat.chatId, actorId: who.actorId, personaId: hub.turnPersona?.(sessionId)?.personaId }) && parent.output.assetIds.includes(quotedParent.assetId)) {
               parentJobId = parent.id
               for (const ref of parent.input.refs || []) if (ref.role !== 'base' && !refs.some((r) => r.assetId === ref.assetId && r.role === ref.role)) refs.push({ ...ref, reason: '沿用被引用任务的参考图' })
             }
           }
           if (cont) {
-            const last = runner.list({ chatId: chat.chatId, actorId: who.actorId, states: ['delivered'], limit: 1 })[0]
+            const scope = { account: api.config().botQQ, chatId: chat.chatId, actorId: who.actorId, personaId: hub.turnPersona?.(sessionId)?.personaId }
+            const last = runner.list({ chatId: chat.chatId, actorId: who.actorId, states: ['delivered'], limit: 100 }).find(j => canUseArtwork(j, scope))
             if (!last?.output?.assetIds?.length) return { ok: false, message: '你最近没让我画过图，没有能接着改的' }
             if (last.output.assetIds.length !== 1 || refs.some((r) => r.role === 'base')) return { ok: false, message: '有多张底图可选，请明确引用要修改的那张图' }
             refs.unshift({ assetId: last.output.assetIds[0], role: 'base', reason: `接着改任务 ${last.id} 画的图` })
@@ -122,7 +137,7 @@ export default {
           const mode = !refs.length ? 'text' : roles.includes('base') ? 'edit' : 'reference'
           const jobArgs = {
             kind: 'image', chatId: chat.chatId, requestId: who.requestId, actorId: who.actorId, parentJobId, personaSnapshot: hub.turnPersona?.(sessionId),
-            input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
+            input: { prompt: String(prompt || ''), mode, refs, drawSelf: draw_self === true, size: size || '', shape: shape || '', waitUntil: Date.now() + api.config().imageGen.waitInputSec * 1000 },
           }
           if (execution?.simulated === true) {
             try {
@@ -157,6 +172,18 @@ export default {
         },
       }),
       defineTool({
+        name: 'qq_artwork_gallery', description: '查看当前聊天、当前角色和请求者自己的已送达作品，使用作品 ID 继续修改。',
+        properties: {}, execute: async () => {
+          const who = hub.turnActor(sessionId)
+          if (who.error) return { ok: false, message: who.error }
+          const personaId = hub.turnPersona?.(sessionId)?.personaId
+          if (!personaId) return { ok: false, message: '当前角色不可用' }
+          const items = artworkList(runner.list({ chatId: chat.chatId, actorId: who.actorId, states: ['delivered'], limit: 100 }),
+            { account: api.config().botQQ, chatId: chat.chatId, actorId: who.actorId, personaId })
+          return { ok: true, items }
+        },
+      }),
+      defineTool({
         name: 'qq_image_jobs',
         description: '看看这个人最近的画图任务进行到哪了。',
         properties: {},
@@ -172,6 +199,41 @@ export default {
 
     // ---------- 面板 ----------
     const jobView = (j) => ({ ...j, stateLabel: STATE_LABEL[j.state], modeLabel: MODE_LABEL[j.input.mode] || j.input.mode, lineage: svc.lineage(j.id), attempts: runner.attempts(j.id), delivery: hub.outbox?.summary(`image:${j.id}`) })
+    const galleryScope = (chatId, personaId) => {
+      const cfg = api.config(), chat = String(chatId || ''), p = hub.personaFor?.(chat)
+      const permitted = chat === `private:${cfg.ownerQQ}` || (chat.startsWith('group:') ? (cfg.allow?.groups || []).includes(chat.slice(6)) : (cfg.allow?.private || []).includes(chat.slice(8)))
+      if (!/^(private|group):\d+$/.test(chat) || !permitted || !p || p.error || !p.personaId || (personaId && p.personaId !== personaId)) return null
+      return { account: String(cfg.botQQ), chatId: chat, actorId: String(cfg.ownerQQ), personaId: p.personaId }
+    }
+    const galleryAsset = (id, scope) => {
+      const selected = scope && resolveArtwork(id, runner.get, scope), asset = selected && storage.assets.get(selected.assetId)
+      return asset?.state === 'stored' && /^image\/(png|jpeg|gif|webp|bmp)$/.test(asset.mime) ? { ...selected, asset } : null
+    }
+    api.route('/imagegen/gallery', async req => {
+      const q = http.query(req), scope = galleryScope(q.chatId, q.personaId)
+      if (!scope) return { ok: false, code: 'SCOPE_REQUIRED', message: '当前聊天或人设不可用' }
+      let beforeAt = Number.MAX_SAFE_INTEGER, beforeId = '\uffff'
+      if (q.before) {
+        const match = /^(\d{1,16}):([\w-]{1,120})$/.exec(String(q.before))
+        if (!match || !Number.isSafeInteger(Number(match[1]))) return { ok: false, code: 'INVALID_CURSOR', message: '图库分页参数无效' }
+        beforeAt = Number(match[1]); beforeId = match[2]
+      }
+      // Filter before pagination, so other accounts/personas cannot hide this scope's items.
+      const rows = storage.db.all(`SELECT id, created_at FROM jobs WHERE kind = 'image' AND state = 'delivered' AND chat_id = ? AND actor_id = ?
+        AND json_extract(input_json, '$.accountId') = ? AND json_extract(input_json, '$.persona.personaId') = ?
+        AND (created_at < ? OR (created_at = ? AND id < ?)) ORDER BY created_at DESC, id DESC LIMIT 31`,
+      scope.chatId, scope.actorId, scope.account, scope.personaId, beforeAt, beforeAt, beforeId)
+      const jobs = rows.slice(0, 30).map(r => runner.get(r.id)).filter(Boolean)
+      const items = artworkList(jobs, scope).filter(x => galleryAsset(x.id, scope))
+      const tail = rows[29]
+      return { ok: true, scope, items, nextCursor: rows.length > 30 && tail ? `${tail.created_at}:${tail.id}` : null }
+    })
+    api.route('/imagegen/gallery/asset', async (req, res) => {
+      const q = http.query(req), selected = galleryAsset(q.id, galleryScope(q.chatId, q.personaId))
+      if (!selected) return { ok: false, message: '作品不存在或不在当前范围' }
+      const { readFileSync } = await import('node:fs')
+      http.send(res, 200, readFileSync(storage.assets.pathOf(selected.asset)), selected.asset.mime)
+    })
     api.route('/imagegen/profiles', async () => ({ ok: true, list: svc.profiles().map((p) => svc.profileInfo(p)) }))
     api.route('/imagegen/jobs', async (req) => {
       const q = http.query(req)
@@ -200,17 +262,22 @@ export default {
             if(!retrieval.materializeReference)throw new Error('历史图片检索模块未启用')
             return {...await retrieval.materializeReference(r,{...context,personaId:hub.personaFor?.(chatId)?.personaId||''}),role:r.role,reason:'面板指定的历史图片'}
           }
+          if (r.galleryId) {
+            const scope = galleryScope(chatId, r.personaId), selected = galleryAsset(r.galleryId, scope)
+            if (!selected) throw new Error('图库作品已失效或不属于当前账号、聊天和人设')
+            return { assetId: selected.assetId, galleryId: selected.id, personaId: scope.personaId, role: r.role, reason: `图库作品 ${selected.id}` }
+          }
           return { assetId: String(r.assetId || ''), role: r.role, reason: '面板指定' }
         }))
       } catch (error) { return { ok: false, message: error.message } }
       if (b.parentJobId) {
         const parent = runner.get(String(b.parentJobId))
-        if (!parent || parent.chatId !== chatId || !parent.output.assetIds?.some((id) => refs.some((r) => r.assetId === id && r.role === 'base'))) return { ok: false, message: '后续编辑必须引用同一聊天中父任务的生成图片' }
+        if (!canUseArtwork(parent, galleryScope(chatId) || {}) || !parent.output.assetIds?.some((id) => refs.some((r) => r.assetId === id && ['base', 'identity'].includes(r.role)))) return { ok: false, message: '后续编辑必须引用当前账号、聊天、请求者和人设的已送达作品' }
         for (const ref of parent.input.refs || []) if (ref.role !== 'base' && !refs.some((r) => r.assetId === ref.assetId && r.role === ref.role)) refs.push({ ...ref, reason: '沿用上次任务的参考图' })
       }
       const mode = b.maskAssetId ? 'mask' : !refs.length ? 'text' : refs.some((r) => r.role === 'base') ? 'edit' : 'reference'
       try {
-        const job = svc.enqueue(runner, { kind: 'image', chatId, actorId: api.config().ownerQQ, parentJobId: b.parentJobId || null, input: { prompt: String(b.prompt || ''), mode, refs, drawSelf: b.drawSelf === true, size: b.size || '', maskAssetId: b.maskAssetId || null, profileId: b.profileId || null, waitUntil: Date.now() + 30000 } })
+        const job = svc.enqueue(runner, { kind: 'image', chatId, actorId: api.config().ownerQQ, parentJobId: b.parentJobId || null, input: { prompt: String(b.prompt || ''), mode, refs, drawSelf: b.drawSelf === true, size: b.size || '', shape: b.shape || '', maskAssetId: b.maskAssetId || null, profileId: b.profileId || null, waitUntil: Date.now() + 30000 } })
         runner.kick()
         return { ok: true, job: jobView(job), message: '开始画了' }
       } catch (error) { return { ok: false, message: error.message } }

@@ -24,9 +24,13 @@ export const DEFAULTS = {
   ownerLevel: 'full', // full | social | chat
   profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner' }, // 改资料类操作的权限：off 关 / owner 仅主人私聊 / all 所有人
   files: { enabled: false, maxMB: 50, dirs: [] }, // 发文件：默认关；除 QQ 工作区外只能发 dirs 里的（绝对路径）
+  incomingFiles: { enabled: false },
+  ignoredSenderQQs: [],
+  crossChatHistory: [],
+  approvalNotify: false,
   security: { dangerConfirm: false }, // 危险终端命令先在 QQ 问主人（只覆盖 bash / pwsh，不是沙箱）
   toolCallsPerTurn: 6, // 一轮里最多调用几次插件工具（防止模型反复自我唤醒、烧额度）；DSH 自带的电脑工具不算
-  conversation: { maxTurns: 48, maxContextTokens: 48000, maxAgeMinutes: 480, followupSeconds: 90 },
+  conversation: { maxTurns: 48, maxContextTokens: 48000, maxAgeMinutes: 480, followupSeconds: 90, seedHistory: false },
   longTasks: false, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   allow: { private: [], groups: [] }, // 主人永远能私聊，不用写进白名单
   snowluma: {
@@ -60,13 +64,15 @@ export const DEFAULTS = {
     profiles: [],
     defaultProfile: '',
     size: '1024x1024',
+    shape: '',
+    observeGenerated: false,
     stylePrompt: '', // 每次生图自动加在前面的风格描述
     ownerOnly: true, // 只有主人能让她画
     quota: { perUserPerDay: 20, perChatPerDay: 100, perProviderPerDay: 500, ownerUnlimited: true },
     waitInputSec: 30, // 参考图还没下载好时最多等多久
   },
   persona: { current: 'dafeiyu' },
-  group: { ...DEFAULT_GROUP_POLICY, overrides: {} },
+  group: { ...DEFAULT_GROUP_POLICY, ignoreAtOthers: true, overrides: {} },
   participation: { ...DEFAULT_PARTICIPATION_CONFIG },
   mediaMemory: { ...DEFAULT_MEDIA_MEMORY },
   voice: {
@@ -81,6 +87,7 @@ export const DEFAULTS = {
     groupAutoChance: 0, // 群聊默认保留文字；明确请求及 voice 标记仍生效
     autoMaxChars: 80,
     asr: true, // 听语音
+    rvc: { enabled: false, voice: '', pitch: 0, fallback: 'original', timeoutMs: 120000 },
   },
   stickers: {
     enabled: true,
@@ -88,6 +95,7 @@ export const DEFAULTS = {
     autoReview: true, // 新素材经完整模型分析明确 approve 后自动可用。
     autoChance: 0.35, // 文字回复自动配一张表情的概率
     collect: true, // 偷表情
+    collectMode: 'auto',
     fromGroups: true,
     fromPrivate: true,
     maxPerHour: 20,
@@ -114,8 +122,17 @@ export const DEFAULTS = {
     maxRepliesPerDay: 6,
     shareToOwner: true, // 看到好玩的私聊分享给主人
     like: false, // 顺手点赞
+    danmakuEnabled: false,
+    maxDanmakuPerDay: 0,
+    visionEnabled: false,
+    visionFrames: 3,
+    ffmpegPath: '',
+    ownerName: '',
+    ownerMid: '',
   },
   speakUp: {
+    targets: [],
+    mode: 'ordinary',
     enabled: true, // 只在和主人的私聊里主动找你，群里不会
     idleMinutes: 40,
     minIntervalMinutes: 60,
@@ -206,7 +223,17 @@ export function normalize(raw) {
   c.chatModels = normalizeChatModels(c.chatModels)
   c.profilePerms = Object.fromEntries(PROFILE_PERM_KEYS.map((k) => [k, PROFILE_PERM_LEVELS.includes(c.profilePerms?.[k]) ? c.profilePerms[k] : profilePermDefault(k)]))
   c.allow = { private: qqList(c.allow.private), groups: qqList(c.allow.groups) }
+  c.incomingFiles = { enabled: c.incomingFiles?.enabled === true }
+  c.ignoredSenderQQs = qqList(c.ignoredSenderQQs)
+  c.approvalNotify = c.approvalNotify === true
+  c.conversation.seedHistory = c.conversation.seedHistory === true
+  c.crossChatHistory = (Array.isArray(c.crossChatHistory) ? c.crossChatHistory : []).filter(p => p && /^(private|group):\d+$/.test(p.fromChatId) && /^(private|group):\d+$/.test(p.targetChatId) && /^\d+$/.test(String(p.account || '')) && typeof p.persona === 'string' && p.persona.length <= 200).slice(0, 100).map(p => ({ enabled: p.enabled === true, account: String(p.account), persona: p.persona, fromChatId: p.fromChatId, targetChatId: p.targetChatId }))
+  c.speakUp.targets = [...new Set((Array.isArray(c.speakUp.targets) ? c.speakUp.targets : []).map(String).filter(id => /^(private|group):\d+$/.test(id)))].slice(0, 50)
+  c.speakUp.mode = c.speakUp.mode === 'purpose' ? 'purpose' : 'ordinary'
+  c.imageGen.shape = ['square', 'portrait', 'landscape', 'wide'].includes(c.imageGen.shape) ? c.imageGen.shape : ''
+  c.imageGen.observeGenerated = c.imageGen.observeGenerated === true
   const g = c.group
+  g.ignoreAtOthers = g.ignoreAtOthers !== false
   g.wakeWords = (Array.isArray(g.wakeWords) ? g.wakeWords : String(g.wakeWords || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.interjectChance = num(g.interjectChance, 0.15, 0, 1)
   g.cooldownSec = num(g.cooldownSec, 90, 0, 86400)
@@ -219,9 +246,12 @@ export function normalize(raw) {
   c.voice.autoChance = num(c.voice.autoChance, 0.15, 0, 1)
   c.voice.groupAutoChance = num(c.voice.groupAutoChance, 0, 0, 1)
   c.voice.autoMaxChars = num(c.voice.autoMaxChars, 80, 1, 500)
+  const rvc = isObj(c.voice.rvc) ? c.voice.rvc : {}
+  c.voice.rvc = { enabled: rvc.enabled === true, voice: String(rvc.voice || '').slice(0, 200), pitch: num(rvc.pitch, 0, -24, 24), fallback: rvc.fallback === 'error' ? 'error' : 'original', timeoutMs: num(rvc.timeoutMs, 120000, 1000, 300000) }
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
   c.stickers.libraryScope = c.stickers.libraryScope === 'chat' ? 'chat' : 'account'
   c.stickers.autoReview = bool(c.stickers.autoReview, true)
+  c.stickers.collectMode = ['auto', 'ask', 'owner'].includes(c.stickers.collectMode) ? c.stickers.collectMode : 'auto'
   c.stickers.maxPerHour = num(c.stickers.maxPerHour, 20, 0, 200)
   c.stickers.maxLibrary = num(c.stickers.maxLibrary, 300, 20, 2000)
   c.speakUp.idleMinutes = num(c.speakUp.idleMinutes, 40, 5, 1440)
@@ -252,6 +282,13 @@ export function normalize(raw) {
   b.maxAgeDays = num(b.maxAgeDays, 60, 0, 3650)
   b.maxCommentsPerDay = num(b.maxCommentsPerDay, 3, 0, 50)
   b.maxRepliesPerDay = num(b.maxRepliesPerDay, 6, 0, 100)
+  b.danmakuEnabled = b.danmakuEnabled === true
+  b.maxDanmakuPerDay = Math.floor(num(b.maxDanmakuPerDay, 0, 0, 100))
+  b.visionEnabled = b.visionEnabled === true
+  b.visionFrames = Math.floor(num(b.visionFrames, 3, 1, 3))
+  b.ffmpegPath = String(b.ffmpegPath || '').trim()
+  b.ownerName = String(b.ownerName || '').trim().slice(0, 80)
+  b.ownerMid = /^\d{1,20}$/.test(String(b.ownerMid || '')) ? String(b.ownerMid) : ''
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
   delete c.mood.maxInjectPerDay // 旧版的「每天最多提醒几次」，现在心情明显时每轮都会带上
   c.snowluma.webuiPort = num(c.snowluma.webuiPort, 5099, 1, 65535)

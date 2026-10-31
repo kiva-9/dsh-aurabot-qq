@@ -73,6 +73,12 @@ export function textToSegments(text, idOf) {
 /** 去掉文字里的 <face:…> 标签（系统表情关着时用）。 */
 export const stripFaceTags = (text) => String(text ?? '').replace(FACE_TAG, '').replace(/[ \t]{2,}/g, ' ').trim()
 
+/** Remove pictographs from speech only; the original message remains intact. */
+export const speakableText = (text) => String(text ?? '')
+  .replace(/<\/?(?:face|at|voice|sticker|poke|reply|image|record|file)(?::[^>]*)?\s*>/gi, '')
+  .replace(/(?:\p{Regional_Indicator}{2}|[#*0-9]\uFE0F?\u20E3|(?![©®™])\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*)/gu, '')
+  .replace(/[\uFE0E\uFE0F\u200D]/g, '').replace(/[ \t]{2,}/g, ' ').trim()
+
 /** 系统表情对照：先用常用的，第一次用到时再去网关拉完整目录（一天刷新一次）。 */
 export function createFaces({ onebot, log } = {}) {
   let index = COMMON_INDEX

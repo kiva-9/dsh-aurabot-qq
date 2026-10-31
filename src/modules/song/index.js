@@ -70,7 +70,8 @@ export default {
       required: ['song'],
       execute: async ({ song: name, track, artist, corrects_job_id, pitch }) => {
         const who = turn(chat, sessionId)
-        if (api.config().song.ownerOnly && who.actorId !== String(api.config().ownerQQ)) return { ok: false, message: '只有主人能点歌' }
+        const mixed = new Set((hub.turnRequests?.(sessionId) || []).map(r => String(r.actorId))).size > 1
+        if ((api.config().song.ownerOnly && who.actorId !== String(api.config().ownerQQ)) || ((api.config().song.ownerOnly || mixed) && !hub.turnSendersAllOwner(sessionId))) return { ok: false, message: '这一轮含其他人的请求，请主人单独发起翻唱' }
         return song.request({ song: name, track, artist, correctsJobId: corrects_job_id, pitch, ...who })
       },
     }) : []))

@@ -1,5 +1,7 @@
 # Aurabot · 住在 QQ 里的大肥鱼
 
+本版本包含 Issue #16 的选择性移植实现，处于实机验收前阶段；范围、开关和验证清单见 [实现交接](docs/AUDIT16-IMPLEMENTATION.md)。
+
 **2.0.0-rc.1，候选版本。** Aurabot 是 DeepSeek Harness（DSH）插件，经 SnowLuma / OneBot v11 连接独立 QQ 号，提供聊天、人设、范围化记忆，以及可选的语音、表情、搜索、生图和翻唱。
 
 本次本机整合状态（2026-10-29）：**原版全量备份已校验，候选版本已安装到实际 DSH**。指定 Magpie 模型、Cloudflare BGE-M3、GRSAI 生图与参考再生成、StepFun TTS、本地 SenseVoice、Tavily 搜索与正文提取，以及主人私聊的文字/图片/语音投递已有真实验证。范围隔离、故障恢复和面板编辑保存另有自动化与界面测试；完整结果和未覆盖的场景见 [验证记录](docs/VALIDATION-2026-10-29.md)。

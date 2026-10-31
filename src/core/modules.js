@@ -169,6 +169,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   let watching = null
   let disposed = false
   const stopping = new Set()
+  const loadEpoch = new Map()
+  const loadCanceled = Symbol('load-canceled')
   const hookRuntime = createHookRuntime({ listeners, live, epochs: core.storage?.epochs, note, isDisposed: () => disposed })
 
   const modCfg = (id) => getConfig().modules?.[id] || {}
@@ -193,7 +195,13 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         throw error
       }
     }
-    const track = (off) => { if (typeof off === 'function') rec.offs.push(off); return off }
+    const track = (off) => {
+      if (typeof off !== 'function') return off
+      if (rec.stopped || disposed) {
+        try { pendingCleanup(rec, off()) } catch (error) { log.warn(`模块「${id}」清理失败：`, error.message) }
+      } else rec.offs.push(off)
+      return off
+    }
     // 内置模块和替换它的版本用原来的路径（内置的面板页照常能用）；新模块放在 /ext/模块id/ 下
     const prefix = builtinDefs.has(id) ? '' : `/ext/${id}`
     const def = rec.def
@@ -265,11 +273,14 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         return track(() => clearTimeout(t))
       },
       route: (path, handler) => {
+        // A setup that resumes after stop must never replace the new instance's route.
+        if (rec.stopped || disposed) return () => {}
         const full = '/aurabot/api' + prefix + (String(path).startsWith('/') ? path : '/' + path)
         const cur = routes.get(full)
         if (cur && cur.id !== id && live.has(cur.id)) throw new Error(`接口 ${full} 已经被模块「${cur.id}」占了`)
-        routes.set(full, { id, handler: guard(`接口 ${path}`, handler) })
-        return track(() => { if (routes.get(full)?.id === id) routes.delete(full) })
+        const item = { id, record: rec, handler: guard(`接口 ${path}`, handler) }
+        routes.set(full, item)
+        return track(() => { if (routes.get(full) === item) routes.delete(full) })
       },
       onDispose: (fn) => track(fn),
       // ---- 常用操作的捷径（都是 core 里的东西包了一层）----
@@ -285,7 +296,15 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       ask: guard('模型调用', (opts) => core.ask(typeof opts === 'string' ? { text: opts } : opts)),
       think: guard('后台决策', (prompt, opts = {}) => core.hub.runSystemTurn(`ext-${id}`, opts.title || def.name || id, String(prompt), opts)),
       onebot: guard('OneBot操作', (action, params, opts) => core.onebot.call(action, params, opts)),
-      dshTool: (tool) => { rec.dshTools.push(tool); core.bridge?.refresh(); return () => { remove(rec.dshTools, tool); core.bridge?.refresh() } },
+      dshTool: (tool) => {
+        if (rec.stopped || disposed) return () => {}
+        const item = { ...tool, execute: (...args) => rec.stopped || disposed
+          ? { ok: false, message: '模块已停用' }
+          : tool.execute.apply(tool, args) }
+        rec.dshTools.push(item)
+        core.bridge?.refresh()
+        return () => { remove(rec.dshTools, item); core.bridge?.refresh() }
+      },
     }
     return api
   }
@@ -293,6 +312,21 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   function remove(list, item) {
     const i = list.indexOf(item)
     if (i >= 0) list.splice(i, 1)
+  }
+
+  // Disposers can asynchronously register further late disposers. Keep all of
+  // them in the record until settled, and drain repeatedly rather than waiting
+  // only for the snapshot taken when stop() began.
+  function pendingCleanup(rec, value) {
+    const done = Promise.resolve(value).catch(error => {
+      log.warn(`模块「${rec.id}」清理失败：`, error?.message || error)
+    })
+    rec.pending.add(done)
+    done.then(() => rec.pending.delete(done))
+    return done
+  }
+  async function drainPending(rec) {
+    while (rec.pending.size) await Promise.allSettled([...rec.pending])
   }
 
   function note(id, label, error) {
@@ -313,7 +347,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   // ---------- 启动 / 停止 ----------
   let generation = 0 // 模块代际：每次启停 +1，会话下一轮按它重挂工具（热重载后工具名不变，闭包却换了）
   async function start(def, source, extra = {}) {
-    if (disposed) return null
+    if (disposed) return loadCanceled
     generation++
     const id = def.id
     const rec = { id, def, source, exports: null, offs: [], tools: [], contexts: [], rules: [], commands: [], dshTools: [], errors: [], pending: new Set(), controller: new AbortController(), startedAt: Date.now(), ...extra }
@@ -327,17 +361,34 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     }
     live.set(id, rec)
     errors.delete(id)
+    let finishSetup
+    const setupFinished = new Promise(resolve => { finishSetup = resolve })
+    rec.pending.add(setupFinished)
     try {
       const api = makeApi(id, source, rec)
       const r = def.setup(api)
-      rec.exports = (r && typeof r.then === 'function' ? await r : r) ?? {}
-      if (disposed || rec.stopped) { await rec.exports.dispose?.(); return null }
+      const setup = Promise.resolve(r)
+      rec.pending.add(setup)
+      try { rec.exports = (await setup) ?? {} } finally { rec.pending.delete(setup) }
+      if (disposed || rec.stopped || live.get(id) !== rec || !isEnabled(id) || (source === 'user' && !isUserOn())) {
+        if (live.get(id) === rec) stop(id, { quiet: true })
+        else await rec.exports.dispose?.()
+        return loadCanceled
+      }
       log.info(`模块「${def.name || id}」${source === 'user' ? '（自己写的）' : ''}已启动`)
       emit('module/start', id)
     } catch (error) {
-      stop(id, { quiet: true })
-      errors.set(id, { message: String(error && error.message ? error.message : error).slice(0, 800), at: Date.now(), source })
-      log.warn(`模块「${def.name || id}」启动失败：`, error.message)
+      // A rejected setup belonging to an already stopped instance must not
+      // publish an error against a replacement instance with the same id.
+      if (!rec.stopped && live.get(id) === rec) {
+        stop(id, { quiet: true })
+        errors.set(id, { message: String(error && error.message ? error.message : error).slice(0, 800), at: Date.now(), source })
+        log.warn(`模块「${def.name || id}」启动失败：`, error.message)
+      } else return loadCanceled
+    } finally {
+      rec.pending.delete(setupFinished)
+      if (rec.stopped) await drainPending(rec)
+      finishSetup()
     }
     return live.get(id)
   }
@@ -362,21 +413,20 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   }
 
   function stop(id, { quiet = false } = {}) {
+    loadEpoch.set(id, (loadEpoch.get(id) || 0) + 1)
     const rec = live.get(id)
     if (!rec) return false
     generation++
     rec.stopped = true
     rec.controller.abort()
     live.delete(id)
-    const pending = [...rec.pending]
-    for (const off of rec.offs.reverse()) { try { pending.push(Promise.resolve(off())) } catch (error) { log.warn(`模块「${id}」清理失败：`, error.message) } }
-    try { pending.push(Promise.resolve(rec.exports?.dispose?.())) } catch (error) { log.warn(`模块「${id}」清理失败：`, error.message) }
-    for (const [path, r] of routes) if (r.id === id) routes.delete(path)
-    for (const [ev, list] of listeners) listeners.set(ev, list.filter((x) => x.id !== id))
+    for (const off of rec.offs.reverse()) { try { pendingCleanup(rec, off()) } catch (error) { log.warn(`模块「${id}」清理失败：`, error.message) } }
+    try { pendingCleanup(rec, rec.exports?.dispose?.()) } catch (error) { log.warn(`模块「${id}」清理失败：`, error.message) }
+    for (const [path, r] of routes) if (r.record === rec) routes.delete(path)
+    for (const [ev, list] of listeners) listeners.set(ev, list.filter((x) => x.record !== rec))
     if (rec.dshTools.length) core.bridge?.refresh()
     if (!quiet) { log.info(`模块「${rec.def.name || id}」已停下`); emit('module/stop', id) }
-    const done = Promise.allSettled(pending).then((results) => {
-      for (const r of results) if (r.status === 'rejected') log.warn(`模块「${id}」清理失败：`, r.reason?.message || r.reason)
+    const done = drainPending(rec).then(() => {
       stopping.delete(done)
       return true
     })
@@ -407,13 +457,16 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   }
 
   async function startUser(u) {
+    const epoch = loadEpoch.get(u.id) || 0
     let def
     let stamp = 0
     try {
       ({ def, stamp } = await importUser(u))
+      if (disposed || (loadEpoch.get(u.id) || 0) !== epoch || wanted(u.id, isUserOn() ? scanUser() : []) !== 'user' || live.has(u.id) || stampOf(u.dir) !== stamp) return loadCanceled
       const why = checkDef(def, u.id)
       if (why) throw new Error(why)
     } catch (error) {
+      if (disposed || (loadEpoch.get(u.id) || 0) !== epoch || wanted(u.id, isUserOn() ? scanUser() : []) !== 'user') return loadCanceled
       errors.set(u.id, { message: String(error.message || error).slice(0, 800), at: Date.now(), source: 'user', fallback: builtinDefs.has(u.id) })
       log.warn(`模块「${u.id}」加载失败：`, error.message)
       userSeen.set(u.id, { ...u, stamp: stampOf(u.dir) })
@@ -428,6 +481,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       const m = modCfg(u.id)
       if (!m.forkedFrom) setConfig({ ...getConfig(), modules: { ...getConfig().modules, [u.id]: { ...m, forkedFrom: b.version || version } } })
     }
+    if (disposed || (loadEpoch.get(u.id) || 0) !== epoch || wanted(u.id, isUserOn() ? scanUser() : []) !== 'user') return loadCanceled
     return start(def, 'user', extra)
   }
 
@@ -456,11 +510,13 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   }
 
   /** 按配置和文件夹的现状，把该开的开、该关的关、改过的重新加载。 */
-  let syncing = null
+  let syncing = null, syncAgain = false
   function sync() {
     if (disposed) return Promise.resolve()
-    if (syncing) return syncing
+    if (syncing) { syncAgain = true; return syncing }
     syncing = (async () => {
+      do {
+      syncAgain = false
       const users = isUserOn() ? scanUser() : []
       const ids = new Set([...builtinDefs.keys(), ...users.map((u) => u.id), ...live.keys()])
       for (const id of ids) {
@@ -472,6 +528,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         if (want === 'builtin') {
           if (rec && rec.source === 'builtin') continue
           if (rec) await stop(id)
+          if (disposed) return
+          if (wanted(id, isUserOn() ? scanUser() : []) !== 'builtin') { syncAgain = true; continue }
           if (errors.get(id)?.source === 'builtin' && !rec) continue // 内置的启动失败过，别每 3 秒重试
           startSync(builtinDefs.get(id))
           continue
@@ -482,23 +540,26 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         if (rec && rec.source === 'user' && !changed) continue
         if (!changed && (!rec || rec.fallback)) continue // 上次加载失败、文件也没改：等改了再试
         if (rec) await stop(id, { quiet: true })
+        if (disposed) return
+        if (wanted(id, isUserOn() ? scanUser() : []) !== 'user') { syncAgain = true; continue }
         if (seen && changed) log.info(`模块「${id}」文件改了，重新加载`)
         const ok = await startUser(u)
         // 替换版加载失败：先用回内置的，免得这项功能直接没了
-        if (!ok && builtinDefs.has(id)) {
+        if (!ok && !disposed && !live.has(id) && wanted(id, isUserOn() ? scanUser() : []) && builtinDefs.has(id)) {
           startSync(builtinDefs.get(id))
           const back = live.get(id)
           if (back) { back.fallback = true; log.warn(`模块「${id}」：你的版本没加载成功，先用内置的`) }
         }
       }
       for (const id of [...userSeen.keys()]) if (!users.some((u) => u.id === id)) { userSeen.delete(id); if (errors.get(id)?.source === 'user') errors.delete(id) }
+      } while (syncAgain && !disposed)
     })().finally(() => { syncing = null })
     return syncing
   }
 
   /** 强制重新加载一个模块（面板「重新加载」）。 */
   async function reload(id) {
-    if (live.has(id)) await stop(id, { quiet: true })
+    await stop(id, { quiet: true }) // also invalidate an import that has not installed a record yet
     errors.delete(id)
     userSeen.delete(id)
     await sync()

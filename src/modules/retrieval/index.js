@@ -178,16 +178,22 @@ export default {
       }
       return state.service.prepareContext({ ...input, scope, epoch, isCurrent })
     }
-    function contextFor(chat, sessionId) {
+    function contextFor(chat, sessionId, options = {}) {
       try {
         if (!active || !config().enabled || chat?.kind === 'system') return ''
         activeStill(active)
         const scope = hostScope({ chat, sessionId }), epoch = storage.epochs.current(scope.chat)
-        return active.service.contextFor(chat, sessionId, { scope, epoch })
+        return active.service.contextFor(chat, sessionId, { scope, epoch, ...(options.query !== undefined ? { query: options.query } : {}) })
       } catch { return '' }
     }
     api.prepareContext?.(input => track(prepareContext(input)), { timeoutMs: 2500 })
-    api.context(({ chat, sessionId }) => contextFor(chat, sessionId))
+    // Prepare uses this turn's query and must complete before this filter; do
+    // not put changing search results into the retained system context.
+    api.on('prompt/prepared', (content, { chat, sessionId, text }) => {
+      if (typeof text !== 'string') return content
+      const hint = contextFor(chat, sessionId, { query: text })
+      return hint ? [{ type: 'text', text: hint }, ...content] : content
+    })
     api.tool(({ chat, sessionId }) => {
       if (!config().enabled || chat.kind === 'system') return []
       const tool = (name, description, properties, required, run) => {

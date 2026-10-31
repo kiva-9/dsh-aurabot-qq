@@ -436,6 +436,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     // ---------------- 标签页 ----------------
     const TABS = [
       { id: 'overview', label: '概览' },
+      { id: 'new-features', label: '聊天与功能设置' },
       { id: 'connect', label: '连接' },
       { id: 'persona', label: '人格' },
       { id: 'access', label: '权限' },
@@ -713,6 +714,34 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     const blankLayers = () => ({ identity: { name: '', callOwner: '', core: '' }, behavior: { proactivity: 'normal', text: '' }, style: { text: '', examples: [], banned: [] }, appearance: { text: '', referenceAssetIds: [] }, voice: { voice: '', speed: 1 }, policy: { mood: true, learnExpressions: true, useExpressions: true }, tags: [] })
     const scopeLabel = (s) => (s === 'global' ? '全局默认' : s === 'kind:group' ? '所有群默认' : s === 'kind:private' ? '所有私聊默认' : s.replace(/^chat:group:/, '群 ').replace(/^chat:private:/, '私聊 '))
 
+    function PolishLayer({ section, text, onChoose, toast }) {
+      const [candidate,setCandidate] = useState('')
+      const [source,setSource] = useState('')
+      return h('div',{className:'ab-grid',style:{gap:6,margin:'8px 0'}},
+        h(Btn,{small:true,kind:'ghost',disabled:!String(text||'').trim(),onClick:async()=>{const original=String(text||'');const r=await post('/persona/polish',{text:original,section:section.split('.')[0]});if(r.ok===false || typeof r.text!=='string') return toast(r.message||'润色失败','err');setSource(original);setCandidate(r.text)}},'AI 润色此层'),
+        candidate ? h('div',{className:'ab-grid ab-g2'},
+          h('div',null,h('b',null,'当前文本'),h('pre',{className:'ab-pre'},source)),
+          h('div',null,h('b',null,'建议文本'),h('pre',{className:'ab-pre'},candidate),h(Btn,{small:true,disabled:String(text||'')!==source,onClick:()=>{onChoose(candidate);setCandidate('')}},'采用到草稿'),h(Btn,{small:true,kind:'ghost',onClick:()=>setCandidate('')},'保留原文'),String(text||'')!==source?h('p',{className:'ab-note warn'},'原文已变化，请重新生成建议。'):null)) : null)
+    }
+
+    function PersonaRvc({ voice, onChange }) {
+      const rvc = voice?.rvc || {}
+      const change = (key, value) => {
+        const next = { ...rvc }, updated = { ...(voice || {}) }
+        if (value === undefined) delete next[key]; else next[key] = value
+        if (Object.keys(next).length) updated.rvc = next; else delete updated.rvc
+        onChange(updated)
+      }
+      return h('div', { className: 'ab-grid', style: { gap: 4, marginTop: 10 } },
+        h('div', { className: 'ab-small ab-muted' }, '此人格的 RVC 覆盖（留空或选择跟随全局时继承语音设置；发布后生效）'),
+        h(Row, { label: 'RVC 模式' }, h(Select, { value: rvc.enabled === true ? 'on' : rvc.enabled === false ? 'off' : '',
+          options: [{value:'',label:'跟随全局'},{value:'on',label:'开启'},{value:'off',label:'关闭'}], onChange: v => change('enabled', v ? v === 'on' : undefined) })),
+        h(Row, { label: 'RVC 音色' }, h('input', { className:'ab-input', value:rvc.voice ?? '', placeholder:'留空跟随全局', onChange:e => change('voice', e.target.value || undefined) })),
+        h(Row, { label: 'RVC 音高' }, h('input', { className:'ab-input sm', type:'number', min:-24, max:24, value:rvc.pitch ?? '', placeholder:'跟随全局', onChange:e => change('pitch', e.target.value === '' ? undefined : Number(e.target.value)) })),
+        h(Row, { label: '转换失败' }, h(Select, { value:rvc.fallback || '', options:[{value:'',label:'跟随全局'},{value:'original',label:'使用原声'},{value:'error',label:'报告失败'}], onChange:v => change('fallback',v || undefined) })),
+        h(Row, { label: '转换超时（毫秒）' }, h('input', { className:'ab-input sm', type:'number', min:1000, max:300000, value:rvc.timeoutMs ?? '', placeholder:'跟随全局', onChange:e => change('timeoutMs', e.target.value === '' ? undefined : Number(e.target.value)) })))
+    }
+
     function Persona({ st, toast, reload }) {
       const [list, setList] = useState(null)
       const [bindings, setBindings] = useState([])
@@ -725,6 +754,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [view, setView] = useState('edit') // edit / history / preview
       const [creating, setCreating] = useState(null) // { id, name }
       const loadSeq = useRef(0)
+      const editSeq = useRef(0)
+      const selectedRef = useRef(sel)
+      selectedRef.current = sel
 
       const loadList = async () => {
         const r = await get('/persona/list')
@@ -732,11 +764,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const loadCard = async (id) => {
         const seq = ++loadSeq.current // 切卡时丢掉迟到的加载结果
+        const beforeEdit = editSeq.current
         const r = await get('/persona/full?id=' + encodeURIComponent(id))
         if (seq !== loadSeq.current) return
         if (!r.ok || !r.persona) { setCard(null); setForm(null); return }
         setCard(r.persona)
         setRevs(r.revisions || [])
+        if (beforeEdit !== editSeq.current) return // 请求等待期间用户继续编辑，保留编辑框
         const layers = clone((r.persona.draft || r.persona.published || {}).layers || blankLayers())
         setForm({ name: r.persona.name, layers })
         setDirty(false)
@@ -747,32 +781,43 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const pick = (id) => {
         if (id === sel) return
         if (dirty && !confirm('这张卡有没保存的改动，切走会丢掉。继续？')) return
+        selectedRef.current = id
+        editSeq.current++
         setView('edit')
         setSel(id)
       }
-      const setL = (path, v) => { setForm({ ...form, layers: setPath(form.layers, path, v) }); setDirty(true) }
+      const setL = (path, v) => { editSeq.current++; setForm({ ...form, layers: setPath(form.layers, path, v) }); setDirty(true) }
       const L = (path) => getPath(form.layers, path)
-      const handle = async (r, okMsg) => {
+      const handle = async (r, okMsg, beforeEdit = editSeq.current, savedEdits = false) => {
         if (r.ok) {
           if (okMsg || r.message) toast(okMsg || r.message, 'ok')
           await loadList()
-          if (r.persona) { setCard(r.persona); setForm({ name: r.persona.name, layers: clone((r.persona.draft || r.persona.published).layers) }); setDirty(false) }
+          if (r.persona && r.persona.id === selectedRef.current) {
+            setCard(r.persona)
+            if (beforeEdit === editSeq.current && (!dirty || savedEdits)) { setForm({ name: r.persona.name, layers: clone((r.persona.draft || r.persona.published).layers) }); setDirty(false) }
+          }
           return true
         }
         if (r.code === 'STALE') toast('这张卡在别处改过了：点「重新载入」看最新的（你的改动还在编辑框里，可以先复制出来）', 'err')
         else toast(r.message || '没成功', 'err')
         return false
       }
-      const saveDraft = async () => handle(await post('/persona/draft', { id: card.id, name: form.name, layers: form.layers, editRevision: card.editRevision }), '草稿存好了（还没生效，点「发布」才生效）')
+      const saveDraft = async () => {
+        const beforeEdit = editSeq.current
+        return handle(await post('/persona/draft', { id: card.id, name: form.name, layers: form.layers, editRevision: card.editRevision }), '草稿存好了（还没生效，点「发布」才生效）', beforeEdit, true)
+      }
       const publish = async () => {
         let c = card
         if (dirty) {
+          const beforeEdit = editSeq.current
           const r = await post('/persona/draft', { id: card.id, name: form.name, layers: form.layers, editRevision: card.editRevision })
-          if (!(await handle(r))) return
+          if (!(await handle(r, '', beforeEdit, true))) return
+          if (beforeEdit !== editSeq.current) { toast('保存期间又有编辑，已保留新改动；请检查后再发布', 'err'); return }
           c = r.persona
         }
-        await handle(await post('/persona/publish', { id: c.id, editRevision: c.editRevision }), '发布了，下一轮回复起生效')
-        loadCard(c.id)
+        const beforeEdit = editSeq.current
+        await handle(await post('/persona/publish', { id: c.id, editRevision: c.editRevision }), '发布了，下一轮回复起生效', beforeEdit, true)
+        if (beforeEdit === editSeq.current) loadCard(c.id)
       }
       const used = (id) => bindings.filter((b) => b.personaId === id).map((b) => b.scope)
 
@@ -796,10 +841,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 const layers = blankLayers()
                 layers.identity.name = creating.name
                 const r = await post('/persona/create', { id: creating.id, name: creating.name, layers })
-                if (await handle(r, '建好了，填好内容再发布')) { setCreating(null); setSel(creating.id) }
+                if (await handle(r, '建好了，填好内容再发布')) { setCreating(null); if (dirty) toast('新卡已建立，当前未保存的编辑已保留'); else setSel(creating.id) }
               } }, '新建'))) : h('div', { className: 'ab-flex' },
             h(Btn, { kind: 'ghost', onClick: () => setCreating({ id: 'persona-' + Date.now().toString(36), name: '新人设' }) }, '＋ 新建'),
-            h(ImportPersona, { toast, onDone: async (id) => { await loadList(); setSel(id) } })),
+            h(ImportPersona, { toast, onDone: async (id) => { await loadList(); if (dirty) toast('导入完成，当前未保存的编辑已保留'); else setSel(id) } })),
           h('label', { className: 'ab-small ab-muted', style: { display: 'block', marginTop: 6 } }, h('input', { type: 'checkbox', checked: showArchived, onChange: (e) => setShowArchived(e.target.checked) }), ' 显示已归档的卡'),
           h(PersonaBindings, { st, list: list || [], bindings, toast, onChange: (b) => { setBindings(b); reload() } }),
           h(AvatarCard, { st, toast, reload }),
@@ -812,33 +857,36 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         card.archivedAt ? h('div', { className: 'ab-note' }, '这张卡已归档，不能改也不能绑定。', h(Btn, { small: true, onClick: async () => handle(await post('/persona/unarchive', { id: card.id }), '取消归档了') }, '取消归档'), ' ',
           h(Btn, { small: true, kind: 'danger', onClick: async () => { if (!confirm('彻底删除这张卡和它的所有版本？删除后不能恢复。')) return; const r = await post('/persona/remove', { id: card.id }); if (r.ok) { toast('删掉了'); setSel(st.config.persona.current); loadList() } else toast(r.message, 'err') } }, '彻底删除')) : null,
         view === 'edit' ? h('div', null,
-          h(Row, { label: '卡片名字' }, h('input', { className: 'ab-input', value: form.name, onChange: (e) => { setForm({ ...form, name: e.target.value }); setDirty(true) } })),
+          h(Row, { label: '卡片名字' }, h('input', { className: 'ab-input', value: form.name, onChange: (e) => { editSeq.current++; setForm({ ...form, name: e.target.value }); setDirty(true) } })),
           h(Row, { label: '标签', hint: '逗号隔开，只用来分类' }, h(ListArea, { value: L('tags') || [], onChange: (v) => setL('tags', v), placeholder: '甜美，粘人' })),
           legacy ? h('div', { className: 'ab-psec' },
             h('h4', null, '旧版原文'),
             h('p', { className: 'ab-desc' }, '这张卡是从旧版人格原样导入的：整篇正文就是全部设定。下面的分层内容（如果填了）会补在原文后面。'),
             h('textarea', { className: 'ab-textarea', style: { minHeight: 260 }, value: legacy.body, onChange: (e) => setL('legacy.body', e.target.value) }),
             h('div', { className: 'ab-muted ab-small' }, legacy.body.length + ' 字')) : null,
-          h('div', { className: 'ab-psec' },
+          h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #4978bc', paddingLeft: 12 } },
             h('h4', null, '她是谁'),
             h(Row, { label: '名字', hint: '她怎么称呼自己' }, h('input', { className: 'ab-input', value: L('identity.name') || '', onChange: (e) => setL('identity.name', e.target.value) })),
             h(Row, { label: '怎么叫主人', hint: '留空就用「权限」页里的称呼' }, h('input', { className: 'ab-input', value: L('identity.callOwner') || '', onChange: (e) => setL('identity.callOwner', e.target.value) })),
-            h('textarea', { className: 'ab-textarea', style: { minHeight: 110 }, placeholder: '身份、关系、稳定的性格……', value: L('identity.core') || '', onChange: (e) => setL('identity.core', e.target.value) })),
-          h('div', { className: 'ab-psec' },
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 110 }, placeholder: '身份、关系、稳定的性格……', value: L('identity.core') || '', onChange: (e) => setL('identity.core', e.target.value) }), h(PolishLayer, { section: 'identity.core', text: L('identity.core') || '', onChoose: v => setL('identity.core', v), toast })),
+          h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #469782', paddingLeft: 12 } },
             h('h4', null, '平时怎么做'),
             h(Row, { label: '主动程度', hint: '仍然受「聊天」页的频率限制' }, h(Seg, { value: L('behavior.proactivity'), options: PROACTIVITY, onChange: (v) => setL('behavior.proactivity', v) })),
-            h('textarea', { className: 'ab-textarea', style: { minHeight: 80 }, placeholder: '群里什么时候接话、什么时候追问……', value: L('behavior.text') || '', onChange: (e) => setL('behavior.text', e.target.value) })),
-          h('div', { className: 'ab-psec' },
+            h('textarea', { className: 'ab-textarea', style: { minHeight: 80 }, placeholder: '群里什么时候接话、什么时候追问……', value: L('behavior.text') || '', onChange: (e) => setL('behavior.text', e.target.value) }), h(PolishLayer, { section: 'behavior.text', text: L('behavior.text') || '', onChoose: v => setL('behavior.text', v), toast })),
+          h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #bd8250', paddingLeft: 12 } },
             h('h4', null, '说话方式'),
             h('textarea', { className: 'ab-textarea', style: { minHeight: 80 }, placeholder: '用词、句子长短、口头禅……', value: L('style.text') || '', onChange: (e) => setL('style.text', e.target.value) }),
+            h(PolishLayer, { section: 'style.text', text: L('style.text') || '', onChoose: v => setL('style.text', v), toast }),
             h(Row, { label: '示例', hint: '一行一句她会说的话' }, h(ListArea, { value: L('style.examples') || [], onChange: (v) => setL('style.examples', v), placeholder: '哼 谁要你夸' })),
             h(Row, { label: '别说的话', hint: '一行一个' }, h(ListArea, { value: L('style.banned') || [], onChange: (v) => setL('style.banned', v), placeholder: '综上所述' }))),
-          h('div', { className: 'ab-psec' },
+          h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #a57bb6', paddingLeft: 12 } },
             h('h4', null, '样子与声音'),
             h('textarea', { className: 'ab-textarea', style: { minHeight: 70 }, placeholder: '外观描述（画她自己时也会用到）', value: L('appearance.text') || '', onChange: (e) => setL('appearance.text', e.target.value) }),
+            h(PolishLayer, { section: 'appearance.text', text: L('appearance.text') || '', onChoose: v => setL('appearance.text', v), toast }),
             h(Row, { label: '音色', hint: '留空用「语音」页的默认音色' }, h('input', { className: 'ab-input', value: L('voice.voice') || '', onChange: (e) => setL('voice.voice', e.target.value) })),
-            h(Row, { label: '语速' }, h(Range, { min: 0.5, max: 2, step: 0.1, value: L('voice.speed') || 1, onChange: (v) => setL('voice.speed', v), fmt: (v) => Number(v).toFixed(1) + '×' }))),
-          h('div', { className: 'ab-psec' },
+            h(Row, { label: '语速' }, h(Range, { min: 0.5, max: 2, step: 0.1, value: L('voice.speed') || 1, onChange: (v) => setL('voice.speed', v), fmt: (v) => Number(v).toFixed(1) + '×' })),
+            h(PersonaRvc, { voice: L('voice'), onChange: v => setL('voice', v) })),
+          h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #bb7182', paddingLeft: 12 } },
             h('h4', null, '情绪与学习'),
             h(Row, { label: '有心情起伏' }, h(Switch, { on: L('policy.mood') !== false, onChange: (v) => setL('policy.mood', v) })),
             h(Row, { label: '学群友的说话方式', hint: '只学，不一定用' }, h(Switch, { on: L('policy.learnExpressions') !== false, onChange: (v) => setL('policy.learnExpressions', v) })),
@@ -846,7 +894,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-flex', style: { marginTop: 12, flexWrap: 'wrap' } },
             h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (dirty && !confirm('丢掉编辑框里没保存的改动？')) return; loadCard(card.id) } }, '重新载入'),
             card.draft && card.published ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('丢掉草稿，回到线上的第 ' + card.published.revision + ' 版？')) return; handle(await post('/persona/discard', { id: card.id, editRevision: card.editRevision }), '草稿丢掉了') } }, '丢弃草稿') : null,
-            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const nid = card.id + '-copy'; const r = await post('/persona/duplicate', { id: card.id, newId: nid }); if (await handle(r, '复制了一张')) setSel(nid) } }, '复制一张'),
+            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const nid = card.id + '-copy'; const r = await post('/persona/duplicate', { id: card.id, newId: nid }); if (await handle(r, '复制了一张')) { if (dirty) toast('复制完成，当前未保存的编辑已保留'); else setSel(nid) } } }, '复制一张'),
             h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await get('/persona/export?id=' + encodeURIComponent(card.id)); if (!r.ok) return toast(r.message, 'err'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.card, null, 2)], { type: 'application/json' })); a.download = card.id + '.persona.json'; a.click() } }, '导出'),
             !card.archivedAt ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('归档这张卡？归档后不能改也不能绑定，随时可以取消归档。')) return; const r = await post('/persona/archive', { id: card.id, editRevision: card.editRevision }); if (r.code === 'IN_USE') toast('还绑定在：' + r.scopes.map(scopeLabel).join('、') + '。先在左边「绑定」里换成别的卡', 'err'); else handle(r, '归档了') } }, '归档') : null,
             h('div', { className: 'ab-spacer' }),
@@ -1456,6 +1504,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('a',{href:API+'/sticker/image?'+new URLSearchParams({id:it.id,...stickerChatParams(chatId)}),target:'_blank',rel:'noreferrer'},'打开完整原图 / 动画'),
           ...[['name','名字'],['description','画面描述'],['ocr','图中文字'],['tags','标签'],['emotions','情绪'],['suitable','适用情境'],['unsuitable','不适用情境']].map(([key,label])=>h(Row,{key,label},h('input',{className:'ab-input wide',value:draft[key],disabled:locked,'aria-label':'表情'+label,onChange:e=>change(key,e.target.value)}))),
           h(Btn,{small:true,disabled:locked,onClick:save},'保存表情信息'),
+          h(Row,{label:'仅手动发送',hint:'保留收藏，但自动配图不会使用'},h('input',{type:'checkbox',checked:!!it.manualOnly,disabled:locked,'aria-label':'仅手动发送',onChange:e=>act('/sticker/edit',{...body,patch:{manualOnly:e.target.checked}})})),
           it.analysis?.evidence?.coverage==='sampled_partial'?h('p',{className:'ab-note warn'},'自动取样 '+(it.frames?.length||0)+' 帧，仅为部分动画内容；不能代表完整动画。'):null,it.analysis?.error?h('p',{className:'ab-note warn'},'识别：'+it.analysis.error):null,it.qq?.error?h('p',{className:'ab-note warn'},'QQ 同步：'+it.qq.error):null,
           it.qq?.state==='unidentified'?h('div',{className:'ab-flex'},h('input',{className:'ab-input',placeholder:'已核对的 QQ 收藏 ID','aria-label':'已有 QQ 收藏 ID',value:qqId,disabled:locked,onChange:e=>setQQId(e.target.value)}),h(Btn,{small:true,disabled:locked||!qqId.trim(),onClick:()=>act('/sticker/sync/bind',{...body,emojiId:qqId.trim(),confirmedExisting:true},{label:'绑定已有 QQ 收藏',note:'请确认已核对此 ID 对应这张素材的现有 QQ 收藏。这里只登记绑定，不会新建收藏。'})},'绑定已有 QQ 收藏')):null,
           h('details',null,h('summary',null,'人工处理（异常、动画或停用）'),h(Row,{label:'审核说明'},h('input',{className:'ab-input wide',value:reason,disabled:locked,'aria-label':'表情审核说明',onChange:e=>setReason(e.target.value)})),
@@ -1478,8 +1527,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     function SpeakUp({ st, draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '主动搭话（主人私聊）', right: f.sw('speakUp.enabled'), desc: '发送目标固定为配置中主人的私聊，与其他页面的查看范围无关，不向群聊主动搭话。内容按当时情境生成。' },
-          h(Row, { label: '实际发送目标', hint: '由已保存的主人 QQ（ownerQQ）决定' }, h('span', null, '主人私聊 · private:' + st.config.ownerQQ)),
+        h(Card, { title: '主动搭话', right: f.sw('speakUp.enabled'), desc: '目标留空时只给主人私聊；指定其他已允许的聊天后，也可向这些聊天主动搭话。目的模式会从该聊天可见的资料选择话题。' },
+          h(Row, { label: '目标聊天', hint: '每行 private:QQ 或 group:群号，留空为主人私聊' }, f.list('speakUp.targets')),
+          h(Row, { label: '模式' }, f.select('speakUp.mode', [{ value: 'ordinary', label: '普通' }, { value: 'purpose', label: '目的驱动' }])),
           h(Row, { label: '追问', hint: '她问了你一句、你 15~40 分钟没回，偶尔轻轻追一句（「人呢」之类），每句最多追一次' }, f.sw('speakUp.nudge')),
           h(Row, { label: '多久没聊才找你' }, f.num('speakUp.idleMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
           h(Row, { label: '两次之间隔', hint: '在这个范围里随机' }, f.num('speakUp.minIntervalMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '到'), f.num('speakUp.maxIntervalMinutes', { min: 5 }), h('span', { className: 'ab-muted' }, '分钟')),
@@ -1490,7 +1540,28 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-spacer' }),
             h(Btn, { small: true, onClick: async () => { const r = await post('/speakup/fire'); toast(r.message) } }, '立即向主人私聊搭话')),
         ),
+        h(PurposePreview, { st, toast }),
       )
+    }
+
+    function PurposePreview({ st, toast }) {
+      const [target, setTarget] = useState(st.config.speakUp.targets?.[0] || 'private:' + st.config.ownerQQ)
+      const [data, setData] = useState(null)
+      const seq = useRef(0)
+      useEffect(() => () => { seq.current++ }, [])
+      const reasons = { disabled: '未开启目的模式或已暂停', 'dry-run': '试运行中', quiet: '安静时段', active: '聊天仍活跃', quota: '今日额度已用完', cooldown: '仍在冷却', scheduled: '尚未到计划时间', 'no-material': '没有新的可用来源' }
+      return h(Card, { title: '目的状态与预览', desc: '只读预览，不调用模型或发送消息；来源、目标和驱动均限于所选聊天和当前人格，候选只是待验证的假设。' },
+        h(Row, { label: '目标聊天' }, h('input', { className: 'ab-input', value: target, onChange: e => { seq.current++; setTarget(e.target.value); setData(null) } }),
+          h(Btn, { small: true, onClick: async () => { const request = ++seq.current; const r = await get('/purpose/preview?' + new URLSearchParams({ target })); if (request !== seq.current) return; setData(r); if (!r.ok) toast(r.message, 'err') } }, '查看预览')),
+        data?.ok ? h('div', null,
+          h('div', { className: 'ab-pills' }, h('span', { className: 'ab-pill' }, data.scope.chat + ' · ' + data.scope.persona),
+            h('span', { className: 'ab-pill' }, data.decision.act ? '条件满足，等待调度' : (reasons[data.decision.reason] || data.decision.reason)),
+            h('span', { className: 'ab-pill' }, '今日 ' + (data.quota.count || 0) + ' / ' + data.quota.maxPerDay)),
+          h('p', { className: 'ab-small ab-muted' }, '驱动：' + Object.entries(data.drives || {}).map(([k,v]) => k + ' ' + v).join(' · ')),
+          data.candidates.length ? data.candidates.map(c => h('div', { key: c.id, className: 'ab-li' },
+            h('div', { className: 'body' }, h('b', null, c.action + ' · ' + c.need), ' · 归属 ' + c.owner + ' · 假设 ' + c.confidence,
+              h('div', { className: 'ab-small' }, c.topic), h('div', { className: 'ab-small ab-muted' }, '来源 ' + c.sourceId + ' · 评分 ' + c.score)))) : h(Empty, { text: '没有新的有来源候选' }),
+          data.last ? h('p', { className: 'ab-small ab-muted' }, '上次排队：' + data.last.state + ' · ' + data.last.sourceId) : null) : null)
     }
 
     const SOURCE = { tool: '她自己记的', auto: '每日整理', panel: '你加的', event: '她的经历', import: '导入的' }
@@ -2343,7 +2414,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     /** 扩展页：所有模块（内置的 + 自己写的）、新建、安全模式。 */
-    function Modules({ st, draft, toast, reload }) {
+    function Modules({ st, draft, setDraft, toast, reload }) {
       const [data, setData] = useState(null)
       const [newId, setNewId] = useState('')
       const [newName, setNewName] = useState('')
@@ -2462,6 +2533,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '只看最近' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
         ),
         h(Card, { title: '评论、回复和分享', desc: '评论和回复要登录。试运行开着时只记日志不发。' },
+          h(Row, { label: '主人 B 站昵称', hint: '可选；用于解析评论中的 @主人，不能用 QQ 称呼代替。' }, f.text('bili.ownerName', { placeholder:'留空则不解析 @主人' })),
+          h(Row, { label: '主人 B 站 MID', hint: '可选；填写时请与上面的昵称对应。留空时只接受唯一的精确昵称匹配。' }, f.text('bili.ownerMid', { placeholder:'数字 MID，可留空' })),
           h(Row, { label: '自己发评论' }, f.sw('bili.comment'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxCommentsPerDay', { min: 0, max: 50 }), h('span', { className: 'ab-muted' }, '条')),
           h(Row, { label: '回别人回她的评论' }, f.sw('bili.reply'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxRepliesPerDay', { min: 0, max: 100 }), h('span', { className: 'ab-muted' }, '条')),
           h(Row, { label: '看到好玩的分享给你', hint: '私聊发给主人，带视频链接' }, f.sw('bili.shareToOwner')),
@@ -2502,6 +2575,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Card, { title: '让她画图', right: f.sw('imageGen.enabled'), desc: '聊天里让她画图、照着发来的图画、改图，她会在后台画好直接发出来，聊天不用等。可以接好几个生图服务：她会挑能做这件事的那个（默认的优先）；都做不了就直说，不会悄悄把参考图丢掉改成文生图。' },
           h(Row, { label: '默认服务' }, f.select('imageGen.defaultProfile', c.profiles.map((p) => ({ value: p.id, label: p.name, desc: p.protocol })), { width: 220, placeholder: '先在下面加一个服务' })),
           h(Row, { label: '默认尺寸' }, f.select('imageGen.size', [{ value: '1024x1024', label: '1024 × 1024', desc: '方图' }, { value: '768x1024', label: '768 × 1024', desc: '竖图' }, { value: '1024x768', label: '1024 × 768', desc: '横图' }, { value: '512x512', label: '512 × 512', desc: '小图，更快' }], { width: 200 })),
+          h(Row, { label: '画完后在下次对话中查看作品', hint: '仅限同账号、聊天和人格；模型必须支持图片。' }, f.sw('imageGen.observeGenerated')),
+          h(Row, { label: '默认画幅' }, f.select('imageGen.shape', [{value:'',label:'按尺寸'},{value:'square',label:'方图'},{value:'portrait',label:'竖图'},{value:'landscape',label:'横图'}])),
           h(Row, { label: '固定风格', hint: '每次画都会加在描述前面' }, f.text('imageGen.stylePrompt', { size: 'wide', placeholder: '例如：日系二次元，柔和光线，蓝白配色' })),
           h(Row, { label: '只给主人画', hint: '关掉后群友也能让她画（会花你的额度）' }, f.sw('imageGen.ownerOnly')),
           h(Row, { label: '每人每天最多', hint: '群友 / 别人每天能让她画几张' }, f.num('imageGen.quota.perUserPerDay', { min: 0, max: 1000 }), h('span', { className: 'ab-muted' }, '张')),
@@ -2580,6 +2655,38 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     const assetUrl = (id) => API + '/imagegen/asset?id=' + encodeURIComponent(id)
+    const galleryAssetUrl = (item, chatId, personaId) => API + '/imagegen/gallery/asset?' + new URLSearchParams({ id: item.galleryId || item.id, chatId, personaId })
+
+    function ArtworkGallery({ st, chats, onReuse, toast }) {
+      const [chatId, setChatId] = useState('private:' + st.config.ownerQQ)
+      const [page, setPage] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const seq = useRef(0)
+      const load = async (before = '', previous = null) => {
+        const request = ++seq.current
+        setBusy(true)
+        try {
+          const q = { chatId }; if (before) { q.before = before; q.personaId = previous.scope.personaId }
+          const r = await get('/imagegen/gallery?' + new URLSearchParams(q))
+          if (request !== seq.current) return
+          if (!r.ok) { setPage(null); toast(r.message || '图库读取失败', 'err'); return }
+          setPage(previous ? { ...r, items: [...previous.items, ...r.items] } : r)
+        } catch { if (request === seq.current) { setPage(null); toast('图库读取失败', 'err') } }
+        finally { if (request === seq.current) setBusy(false) }
+      }
+      useEffect(() => { setPage(null); load(); return () => { seq.current++ } }, [chatId])
+      return h(Card, { title: '作品图库', desc: '按当前账号、目标聊天、人设和主人请求分别浏览已送达作品。作品 ID 绑定原任务和图片；复用时会再次核验。',
+        right: h(Btn, { small: true, disabled: busy, onClick: () => load() }, '刷新') },
+        h(Row, { label: '聊天范围' }, h(Select, { value: chatId, options: chats.map(c => ({ value: c, label: c })), onChange: setChatId })),
+        page?.scope ? h('div', { className: 'ab-small ab-muted' }, '当前人设：' + page.scope.personaId) : null,
+        !page ? h(Empty, { text: busy ? '加载图库…' : '图库不可用' }) : !page.items.length ? h(Empty, { text: '此范围还没有作品' }) :
+          h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 12, marginTop: 10 } }, page.items.map(item =>
+            h('figure', { key: item.id, style: { margin: 0, width: 170 } },
+              h('img', { src: galleryAssetUrl(item, chatId, page.scope.personaId), alt: '作品 ' + item.id, style: { width: 160, height: 160, objectFit: 'contain', borderRadius: 8 } }),
+              h('figcaption', { className: 'ab-small' }, item.prompt || '无描述', h('div', { className: 'ab-muted', style: { overflowWrap: 'anywhere' } }, item.id)),
+              h(Btn, { small: true, onClick: () => onReuse(item, page.scope) }, '带入新任务')))),
+        page?.nextCursor ? h(Btn, { small: true, disabled: busy, onClick: () => load(page.nextCursor, page) }, busy ? '加载中…' : '加载更多') : null)
+    }
 
     /** 任务工作台：新建（文生图 / 参考图 / 改图 / 蒙版）+ 任务列表。 */
     function ImageJobs({ st, toast, draft }) {
@@ -2593,10 +2700,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         let imported = null
         try { imported = JSON.parse(sessionStorage.getItem('aurabot.imageReference')); sessionStorage.removeItem('aurabot.imageReference') } catch {}
         const valid = imported?.account === st.config.botQQ && imported.reference?.assetId
-        return { prompt: '', refs: valid ? [imported.reference] : [], maskAssetId: '', size: '', profileId: '', chatId: valid ? imported.chatId : 'private:' + st.config.ownerQQ, parentJobId: '' }
+        return { prompt: '', refs: valid ? [imported.reference] : [], maskAssetId: '', size: '', shape: '', profileId: '', chatId: valid ? imported.chatId : 'private:' + st.config.ownerQQ, parentJobId: '' }
       })
       const [maskFor, setMaskFor] = useState(null) // 正在画蒙版的底图 assetId
-      const chats = Array.from(new Set(['private:' + st.config.ownerQQ, ...(st.config.allow.groups || []).map((g) => 'group:' + g), ...Object.keys(st.sessions || {}).filter((k) => /^(group|private):\d+$/.test(k))]))
+      const chats = Array.from(new Set(['private:' + st.config.ownerQQ, ...(st.config.allow.groups || []).map((g) => 'group:' + g), ...(st.config.allow.private || []).map((q) => 'private:' + q)]))
       const upload = async (file, role) => {
         if (file.size > 30 * 1024 * 1024) return toast('图片不能超过 30 MB', 'err')
         const data = await new Promise((res, reject) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => reject(new Error('读取图片失败')); fr.readAsDataURL(file) })
@@ -2625,6 +2732,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         setForm({ ...form, profileId, prompt: '', refs: [{ assetId: j.output.assetIds[0], role: referenceOnly?'identity':'base' }], maskAssetId: '', parentJobId: j.id, chatId: j.chatId })
         toast(referenceOnly?'已经放入参考图；当前服务支持参考再生成，请填写新画面要求':'已经放入底图，请填写修改要求', 'ok')
       }
+      const reuseArtwork = (item, scope) => {
+        const profileId = form.profileId || st.config.imageGen.defaultProfile
+        const profile = st.config.imageGen.profiles.find(p => p.id === profileId)
+        const referenceOnly = profile?.capabilities?.modes?.includes('reference') && !profile.capabilities.modes.includes('edit')
+        if (form.refs.length) return toast('请先移除当前输入图，再选择图库作品', 'err')
+        setForm({ ...form, chatId: scope.chatId, refs: [{ galleryId: item.id, assetId: item.assetId, personaId: scope.personaId, role: referenceOnly ? 'identity' : 'base' }], maskAssetId: '', parentJobId: item.jobId })
+        toast(referenceOnly ? '已带入参考图，请填写画面要求' : '已带入底图，请填写修改要求', 'ok')
+      }
       const base = form.refs.find((r) => r.role === 'base')
       const profiles = (st.config.imageGen.profiles || []).map((p) => ({ value: p.id, label: p.name, desc: p.protocol }))
       const unsaved = JSON.stringify(draft.imageGen) !== JSON.stringify(st.config.imageGen)
@@ -2636,7 +2751,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '输入图', hint: '没有就是文生图' },
             h('div', { style: { width: '100%' } },
               h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 8 } }, form.refs.map((r, i) => h('div', { key: r.assetId + i, className: 'ab-imgref' },
-                h('img', { src: assetUrl(r.assetId), alt: '' }),
+                h('img', { src: r.galleryId ? galleryAssetUrl(r, form.chatId, r.personaId) : assetUrl(r.assetId), alt: '' }),
                 h(Select, { value: r.role, options: IMG_ROLES, width: 96, onChange: (v) => setForm({ ...form, refs: form.refs.map((x, k) => (k === i ? { ...x, role: v } : v === 'base' && x.role === 'base' ? { ...x, role: 'identity' } : x)), maskAssetId: v === 'base' || r.role === 'base' ? '' : form.maskAssetId }) }),
                 h(Btn, { small: true, kind: 'ghost', onClick: () => setForm({ ...form, refs: form.refs.filter((_, k) => k !== i), maskAssetId: r.role === 'base' ? '' : form.maskAssetId }) }, '去掉')))),
               h('div', { className: 'ab-flex', style: { marginTop: 6 } },
@@ -2646,10 +2761,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 form.maskAssetId ? h(Btn, { small: true, kind: 'ghost', onClick: () => setForm({ ...form, maskAssetId: '' }) }, '不用蒙版') : null))),
           maskFor ? h(MaskPainter, { assetId: maskFor, maskAssetId: form.maskAssetId, toast, onCancel: () => setMaskFor(null), onDone: (id) => { setForm({ ...form, maskAssetId: id }); setMaskFor(null) } }) : null,
           h(Row, { label: '用哪个服务' }, h(Select, { value: form.profileId, width: 220, options: [{ value: '', label: '自动挑（默认的优先）' }, ...profiles], onChange: (v) => setForm({ ...form, profileId: v }) })),
-          h(Row, { label: '尺寸' }, h(Select, { value: form.size, width: 200, options: [{ value: '', label: '用默认尺寸' }, { value: '1024x1024', label: '1024 × 1024' }, { value: '768x1024', label: '768 × 1024' }, { value: '1024x768', label: '1024 × 768' }], onChange: (v) => setForm({ ...form, size: v }) })),
+          h(Row, { label: '画幅', hint: '与明确尺寸二选一' }, h(Select, { value: form.shape || '', options: [{value:'',label:'默认'},{value:'square',label:'方图'},{value:'portrait',label:'竖图'},{value:'landscape',label:'横图'}], onChange: v => setForm({...form,shape:v,size:v?'':form.size}) })),
+          h(Row, { label: '尺寸' }, h(Select, { value: form.size, width: 200, options: [{ value: '', label: '用默认尺寸' }, { value: '1024x1024', label: '1024 × 1024' }, { value: '768x1024', label: '768 × 1024' }, { value: '1024x768', label: '1024 × 768' }], onChange: (v) => setForm({ ...form, size: v, shape: v ? '' : form.shape }) })),
           h(Row, { label: '发到' }, h(Select, { value: form.chatId, width: 220, options: chats.map((c) => ({ value: c, label: c === 'private:' + st.config.ownerQQ ? '主人私聊' : c.replace('group:', '群 ').replace('private:', '私聊 ') })), onChange: (v) => setForm({ ...form, chatId: v }) })),
           h('div', { className: 'ab-flex' }, form.parentJobId ? h('span', { className: 'ab-muted ab-small' }, '接着改任务 ' + form.parentJobId) : null, h('div', { className: 'ab-spacer' }),
             h(Btn, { kind: 'primary', disabled: busy || unsaved || !form.prompt.trim(), onClick: submit }, busy ? '登记中…' : '开始画'))),
+        h(ArtworkGallery, { st, chats, onReuse: reuseArtwork, toast }),
         h(Card, { title: '画图任务', desc: '聊天里和面板里下的画图任务都在这里。画好没发出去的可以重发（不会重新画）；结果不确定的不会自动重画，避免重复扣费。', right: h(Btn, { small: true, kind: 'ghost', onClick: load }, '刷新') },
           loadError ? h('div', { className: 'ab-note err' }, loadError) : null,
           jobs === null ? h(Empty, { icon: '⏳', text: '加载中…' }) : !jobs.length ? h(Empty, { icon: '🖼️', text: '还没有画图任务' }) :
@@ -2844,7 +2961,67 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             } }, '完成，让大肥鱼上线')))
     }
 
+    function screenshotSource(source) {
+      let info = source
+      try { if (typeof info === 'string') info = JSON.parse(info) } catch { return '来源信息不可用' }
+      if (!info || typeof info !== 'object') return '来源信息不可用'
+      const clock = seconds => {
+        if (seconds === null || seconds === undefined || !Number.isFinite(Number(seconds)) || Number(seconds) < 0) return ''
+        const n = Math.floor(Number(seconds)), hours = Math.floor(n / 3600), minutes = Math.floor(n % 3600 / 60), sec = n % 60
+        return hours ? `${hours}:${String(minutes).padStart(2,'0')}:${String(sec).padStart(2,'0')}` : `${minutes}:${String(sec).padStart(2,'0')}`
+      }
+      const method = { preview:'预览图抽帧', segment:'视频分段抽帧', stream:'视频流抽帧' }[info.method] || '截图'
+      const at = clock(info.seconds), requested = clock(info.requestedSeconds)
+      return [info.part ? 'P' + info.part + (info.partTitle ? ' ' + info.partTitle : '') : '', method,
+        at ? '画面 ' + at : '', requested && requested !== at ? '请求 ' + requested : ''].filter(Boolean).join(' · ')
+    }
+
+    function NewFeatures({ draft, setDraft, toast }) {
+      const f = useField(draft, setDraft)
+      const policies = draft.crossChatHistory || []
+      const editPolicy = (i, key, value) => { const rows = clone(policies); rows[i][key] = value; setDraft(setPath(draft, 'crossChatHistory', rows)) }
+      const [target, setTarget] = useState('')
+      const [shots, setShots] = useState(null)
+      const [shotChat, setShotChat] = useState('private:' + String(draft.ownerQQ||''))
+      const [shotPersona, setShotPersona] = useState(draft.persona?.current || '')
+      const shotSeq = useRef(0)
+      useEffect(() => () => { shotSeq.current++ }, [])
+      return h('div', {className:'ab-grid'},
+        h(Card,{title:'聊天与附件',desc:'收到的文件只在当前聊天中按需读取；历史默认不跨聊天。'},
+          h(Row,{label:'接收文本附件'},f.sw('incomingFiles.enabled')),
+          h(Row,{label:'@别人时忽略唤醒词'},f.sw('group.ignoreAtOthers')),
+          h(Row,{label:'忽略发送者 QQ',hint:'每行一个 QQ 号；不会凭昵称或头衔猜测身份。'},f.list('ignoredSenderQQs',{numbers:true})),
+          h(Row,{label:'新会话带入历史'},f.sw('conversation.seedHistory')),
+          h(Row,{label:'宿主审批通知'},f.sw('approvalNotify'))),
+        h(Card,{title:'跨聊天只读策略',desc:'仅主人私聊可访问明确授权的群，要求账号、人格和群成员身份匹配。'},
+          policies.map((p,i)=>h('div',{key:i,className:'ab-card',style:{marginBottom:8}},
+            h(Row,{label:'启用'},h(Switch,{on:!!p.enabled,onChange:v=>editPolicy(i,'enabled',v)})),
+            ...[['account','机器人 QQ'],['persona','人格 ID'],['fromChatId','来源聊天'],['targetChatId','目标群']].map(([key,label])=>h(Row,{key,label},h('input',{className:'ab-input',value:p[key]||'',placeholder:key==='targetChatId'?'group:群号':key==='fromChatId'?'private:主人QQ':'',onChange:e=>editPolicy(i,key,e.target.value)}))),
+            h(Btn,{kind:'ghost',small:true,onClick:()=>setDraft(setPath(draft,'crossChatHistory',policies.filter((_,j)=>j!==i)))},'移除'))),
+          h(Btn,{small:true,onClick:()=>setDraft(setPath(draft,'crossChatHistory',[...policies,{enabled:false,account:String(draft.botQQ||''),persona:'',fromChatId:'private:'+String(draft.ownerQQ||''),targetChatId:''}]))},'＋ 添加策略')),
+        h(Card,{title:'表情与语音'},
+          h(Row,{label:'表情收集方式'},f.select('stickers.collectMode',[{value:'auto',label:'自动'},{value:'owner',label:'仅主人'},{value:'ask',label:'由模型选择'}])),
+          h(Row,{label:'RVC 后处理'},f.sw('voice.rvc.enabled')),
+          h(Row,{label:'RVC 音色'},f.text('voice.rvc.voice')),
+          h(Row,{label:'RVC 音高'},f.num('voice.rvc.pitch',{min:-24,max:24})),
+          h(Row,{label:'转换失败'},f.select('voice.rvc.fallback',[{value:'original',label:'使用原声'},{value:'error',label:'报告失败'}])),
+          h(Row,{label:'转换超时（毫秒）'},f.num('voice.rvc.timeoutMs',{min:1000,max:300000}))),
+        h(Card,{title:'主动搭话'},
+          h(Row,{label:'目标聊天',hint:'每行 private:QQ 或 group:群号；留空只发给主人私聊。'},f.list('speakUp.targets')),
+          h(Row,{label:'模式'},f.select('speakUp.mode',[{value:'ordinary',label:'普通'},{value:'purpose',label:'目的驱动'}])),
+          h(Row,{label:'手动触发'},h('input',{className:'ab-input',value:target,placeholder:'留空为主人私聊',onChange:e=>setTarget(e.target.value)}),h(Btn,{small:true,onClick:async()=>{const r=await post('/speakup/fire',{target:target||undefined});toast(r.message || (r.ok?'已提交':'触发失败'),r.ok?'ok':'err')}},'尝试搭话'))),
+        h(Card,{title:'B 站'},
+          h(Row,{label:'启用弹幕'},f.sw('bili.danmakuEnabled')),
+          h(Row,{label:'每日弹幕上限'},f.num('bili.maxDanmakuPerDay',{min:0,max:100})),
+          h(Row,{label:'视频画面理解'},f.sw('bili.visionEnabled')),
+          h(Row,{label:'抽帧数'},f.num('bili.visionFrames',{min:1,max:3})),
+          h(Row,{label:'截图范围'},h('input',{className:'ab-input',value:shotChat,onChange:e=>{shotSeq.current++;setShotChat(e.target.value);setShots(null)},placeholder:'聊天 ID'}),h('input',{className:'ab-input',value:shotPersona,onChange:e=>{shotSeq.current++;setShotPersona(e.target.value);setShots(null)},placeholder:'人格 ID'}),h(Btn,{small:true,onClick:async()=>{const request=++shotSeq.current;const r=await get('/bili/screenshots?'+new URLSearchParams({chat:shotChat,persona:shotPersona}));if(request!==shotSeq.current)return;setShots(r);if(r.ok===false)toast(r.message,'err')}},'查看截图')),
+          shots?.items ? h('div',{className:'ab-flex',style:{flexWrap:'wrap'}},...shots.items.map(item=>h('figure',{key:item.id},h('img',{src:API+'/bili/screenshot/image?'+new URLSearchParams({id:item.id,chat:shotChat,persona:shotPersona}),alt:'B站截图 '+item.bvid,style:{width:150}}),h('figcaption',null,item.bvid,h('div',{className:'ab-small ab-muted'},screenshotSource(item.source)),h('div',{className:'ab-small ab-muted'},item.id))))) : null))
+    }
+
     // ---------------- 面板主体 ----------------
+    const PANEL_GROUPS = { '常用':['overview','connect','persona','access','group','new-features'], '能力':['model','voice','stickers','imagegen','search','speakup','song','bili'], '记忆':['mood','memory','retrieval','media-memory','learning'], '管理':['tasks','local','modules','diagnostics','logs'] }
+    const panelGroupOf = id => Object.keys(PANEL_GROUPS).find(g => PANEL_GROUPS[g].includes(id)) || '扩展'
     function AurabotPage() {
       useStyle()
       const [st, setSt] = useState(null)
@@ -2853,6 +3030,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [tab, setTab] = useState(() => { try { return localStorage.getItem('aurabot.tab') || 'overview' } catch (e) { return 'overview' } })
       const [toastMsg, setToastMsg] = useState(null)
       const [wizardOpen, setWizardOpen] = useState(false)
+      const [navSearch, setNavSearch] = useState('')
+      const [navGroup, setNavGroup] = useState(() => panelGroupOf(tab))
+      const [personaVisited, setPersonaVisited] = useState(false)
+      const navSearchRef = useRef(null)
       const toastTimer = useRef(null)
       const dirtyRef = useRef(false)
       const saveRef = useRef(null)
@@ -2872,7 +3053,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (!dirtyRef.current) setDraft(clone(r.config))
       }, [])
       useEffect(() => { reload(); const t = setInterval(reload, 5000); return () => clearInterval(t) }, [reload])
-      const go = (id) => { setTab(id); try { localStorage.setItem('aurabot.tab', id) } catch (e) {} }
+      const go = (id) => { if(id === 'persona') setPersonaVisited(true); setNavGroup(panelGroupOf(id)); setNavSearch(''); setTab(id); try { localStorage.setItem('aurabot.tab', id) } catch (e) {} }
       // 标签多、一屏放不下：滚轮横着滚，选中的标签自动滚进视野
       const tabsRef = useRef(null)
       useEffect(() => {
@@ -2906,6 +3087,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       // Ctrl/⌘ + S 保存
       useEffect(() => {
         const onKey = (e) => {
+          if (e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); navSearchRef.current?.focus(); return }
           if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && dirtyRef.current) {
             e.preventDefault()
             saveRef.current && saveRef.current()
@@ -2933,13 +3115,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const extTabs = mods.filter((m) => hasUi(m) && !intoTab(m)).map((m) => ({ id: 'ext:' + m.id, label: m.name, ext: m.id }))
       const tabs = TABS.filter((t) => !TAB_MODS[t.id] || TAB_MODS[t.id].some(running))
       tabs.splice(tabs.findIndex((t) => t.id === 'logs'), 0, ...extTabs)
+      const groups = PANEL_GROUPS, groupOf = panelGroupOf
+      const visibleTabs = tabs.filter(t => navSearch.trim() ? t.label.toLowerCase().includes(navSearch.trim().toLowerCase()) : groupOf(t.id) === navGroup)
       const curTab = tabs.find((t) => t.id === tab) || tabs[0]
       const body = curTab.ext ? ExtPage : {
-        overview: Overview, connect: Connect, persona: Persona, access: Access, group: Group, model: Model, voice: Voice,
+        overview: Overview, 'new-features': NewFeatures, connect: Connect, persona: Persona, access: Access, group: Group, model: Model, voice: Voice,
         stickers: Stickers, imagegen: ImageGen, search: SearchPanel, speakup: SpeakUp, mood: Mood, memory: ScopedMemory, retrieval: RetrievalPanel, 'media-memory': MediaMemory, learning: Learning, tasks: Tasks, song: Song, bili: Bili, local: LocalApi, modules: Modules, diagnostics: Diagnostics, logs: Logs,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
-      const TAB_KEYS = { connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge', 'participation', 'conversation'], model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], search: ['search'], speakup: ['speakUp'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['mediaMemory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], local: ['local'] }
+      const TAB_KEYS = { 'new-features': ['incomingFiles','group','ignoredSenderQQs','conversation','approvalNotify','crossChatHistory','stickers','voice','speakUp','bili'], connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge', 'participation', 'conversation'], model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], search: ['search'], speakup: ['speakUp'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['mediaMemory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], local: ['local'] }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }
@@ -2960,13 +3144,17 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h('div', { className: 'ab-switch-row' }, h('span', null, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })),
               h('div', { className: 'ab-switch-row' }, h('span', { className: 'ab-muted' }, '试运行'), h(Switch, { on: cfg.dryRun, onChange: (v) => quickToggle('dryRun', v), title: '开着时只写日志，不真的发到 QQ' })))),
           showWizard ? h(Wizard, { st, draft, setDraft: setD, save, toast, reload, onClose: () => setWizardOpen(false) }) : null,
-          showWizard ? null : h('div', { className: 'ab-tabs', role: 'tablist', ref: tabsRef }, tabs.map((t) => {
-            const flag = t.flag === 'group' ? cfg.allow.groups.length > 0 : t.flag ? getPath(cfg, t.flag) : null
-            return h('button', { key: t.id, type: 'button', role: 'tab', 'aria-selected': curTab.id === t.id, className: cx('ab-tab', curTab.id === t.id && 'on'), onClick: () => go(t.id) },
-              t.label,
-              tabDirty(t.id) ? h('i', { className: 'dirty', title: '有没保存的改动' }) : t.flag ? h('i', { className: cx('ab-dot', flag && 'ok'), title: flag ? '开着' : '关着' }) : null)
-          })),
-          showWizard ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, mod: curTab.ext })),
+          showWizard ? null : h('div', {className:'ab-grid',style:{gap:6,marginTop:16}},
+            h('div',{className:'ab-flex',style:{flexWrap:'wrap',gap:6}},
+              ...[...Object.keys(groups),...(extTabs.length?['扩展']:[])].map(g=>h('button',{key:g,type:'button',className:cx('ab-tab',navGroup===g&&!navSearch&&'on'),onClick:()=>{setNavGroup(g);setNavSearch('')}},g)),
+              h('input',{ref:navSearchRef,className:'ab-input',placeholder:'搜索页面（Alt+K）',value:navSearch,onChange:e=>setNavSearch(e.target.value),'aria-label':'搜索页面'})),
+            h('div', { className: 'ab-tabs', role: 'tablist', ref: tabsRef, style:{margin:'0 0 10px'} }, visibleTabs.map((t) => {
+              const flag = t.flag === 'group' ? cfg.allow.groups.length > 0 : t.flag ? getPath(cfg, t.flag) : null
+              return h('button', { key: t.id, type: 'button', role: 'tab', 'aria-selected': curTab.id === t.id, className: cx('ab-tab', curTab.id === t.id && 'on'), onClick: () => go(t.id) }, t.label,
+                tabDirty(t.id) ? h('i', { className: 'dirty', title: '有没保存的改动' }) : t.flag ? h('i', { className: cx('ab-dot', flag && 'ok'), title: flag ? '开着' : '关着' }) : null)
+            }))),
+          showWizard ? null : h('div',{style:{display:curTab.id==='persona'?'':'none'}},(personaVisited || curTab.id==='persona') ? h(TabBoundary,{onHome:()=>go('overview')},h(Persona,props)) : null),
+          showWizard || curTab.id==='persona' ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, mod: curTab.ext })),
           showWizard || curTab.ext ? null : mods.filter((m) => hasUi(m) && m.tab === curTab.id).map((m) => h('div', { key: 'embed-' + m.id, style: { marginTop: 14 } }, h(ExtPage, { ...props, mod: m.id, embedded: true }))),
           dirty && !showWizard ? h('div', { className: 'ab-savebar' }, h('span', { className: 'msg' }, '有改动还没保存'),
             h('span', { className: 'ab-muted ab-small' }, h('span', { className: 'ab-kbd' }, 'Ctrl'), ' + ', h('span', { className: 'ab-kbd' }, 'S')),

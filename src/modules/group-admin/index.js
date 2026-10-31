@@ -18,7 +18,7 @@ export default {
       return groupRoles.canManage(role) ? `你在这个群是${groupRoles.label(role)}，主人要求时可以用群管工具。` : '你在这个群只是普通成员，没有管理权限：禁言、踢人这些做不了，主人要求时直接说明。'
     })
 
-    // 工具层校验：这一轮说话的人里要有主人
+    // 高风险操作要求本轮真实请求者全部为主人。
     api.tool(({ chat, level, sessionId }) => {
       if (!(chat.kind === 'group' || level === 'full')) return []
       return defineTool({
@@ -33,9 +33,9 @@ export default {
         },
         required: ['action'],
         execute: async ({ action, group_id, user_id, minutes, text }) => {
-          // 这一轮里主人说过话才行；群里别人顺带插话不影响，但谁都不能拿群管对付主人
-          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能让我做群管操作' }
+          if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '这一轮含其他人的请求，请主人单独发起群管操作' }
           const cfg = api.config()
+          const account = String(cfg.botQQ), owner = String(cfg.ownerQQ), epoch = api.core.storage?.epochs?.current(chat.chatId), revision = cfg.policyRevision || 0
           const gid = Number(group_id || (chat.kind === 'group' ? chat.groupId : 0))
           if (!gid) return { ok: false, message: '不知道是哪个群' }
           if (!cfg.allow.groups.includes(String(gid))) return { ok: false, message: '这个群不在白名单里' }
@@ -43,9 +43,13 @@ export default {
           if (action !== 'notice' && !uid) return { ok: false, message: '要说清楚对谁（QQ 号）' }
           if (uid && String(uid) === String(cfg.ownerQQ) && action !== 'unban' && action !== 'title') return { ok: false, message: '不能对主人做这个' }
           const role = await groupRoles.get(gid, { fresh: true })
+          const latest = api.config()
+          if (api.signal?.aborted || latest.enabled === false || String(latest.botQQ) !== account || String(latest.ownerQQ) !== owner ||
+              (latest.policyRevision || 0) !== revision || api.core.storage?.epochs?.current(chat.chatId) !== epoch ||
+              !hub.turnHasOwner(sessionId) || !latest.allow.groups.includes(String(gid))) return { ok: false, message: '群管请求已失效' }
           if (role && !groupRoles.canManage(role)) return { ok: false, message: '我在这个群只是普通成员，没有管理权限' }
           if (role === 'admin' && action === 'title') return { ok: false, message: '改专属头衔要群主才行，我只是管理员' }
-          if (cfg.dryRun) return { ok: true, message: `试运行：本来要对群 ${gid} 做 ${action}` }
+          if (latest.dryRun) return { ok: true, message: `试运行：本来要对群 ${gid} 做 ${action}` }
           switch (action) {
             case 'ban': await onebot.call('set_group_ban', { group_id: gid, user_id: uid, duration: Math.max(1, Number(minutes) || 10) * 60 }); break
             case 'unban': await onebot.call('set_group_ban', { group_id: gid, user_id: uid, duration: 0 }); break

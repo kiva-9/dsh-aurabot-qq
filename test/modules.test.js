@@ -1,4 +1,5 @@
 // 模块系统 + 联动：自己写的模块、替换 / 关掉内置模块、热重载、安全模式、复制内置模块、开放接口、DSH 联动工具。
+import { setMediaHttpForTests } from '../src/core/net.js'
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
@@ -344,10 +345,12 @@ test('#3 表情：QQ 收藏无需聊天即可导入共用图库；识别失败�
   const chatId = `private:${OWNER}`
   const query = `/stickers?chatId=${chatId}`
   const fixtures = new Map([1, 2].map((salt) => [`https://93.184.216.34/sticker-test/${salt}.png`, fakePng(200, 200, salt)]))
-  const realFetch = globalThis.fetch
-  // 只拦截此测试的公开 URL，不发外网请求，也不放宽生产代码的 SSRF 检查。
-  t.mock.method(globalThis, 'fetch', async (url, options) => fixtures.has(String(url))
-    ? new Response(fixtures.get(String(url)), { headers: { 'content-type': 'image/png' } }) : realFetch(url, options))
+  // Inject an offline transport only in this test process.
+  setMediaHttpForTests({ read: async (url) => {
+    assert.ok(fixtures.has(String(url)))
+    return { body: fixtures.get(String(url)) }
+  } })
+  t.after(() => setMediaHttpForTests(null))
   mock.state.favorites = [...fixtures.keys()].map((url, i) => ({ url, ...(i === 0 ? { emoji_id: 'existing-1' } : {}) }))
   const adds = mock.sent('add_custom_face').length
   const r = (await fake.call('/sticker/import-qq', {})).json()

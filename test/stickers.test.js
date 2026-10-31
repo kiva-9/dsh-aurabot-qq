@@ -77,6 +77,86 @@ test('审核、范围和共享 image 类别在选择与实际发图时都检查'
   assert.equal(store.segmentFor(stale, 'private:1'), null)
 })
 
+test('manualOnly prevents automatic selection but keeps explicit matching', async (t) => {
+  const f = fixture(t, { caption: false }), store = f.create()
+  const { item } = await store.addFromBuffer(PNG, { chatId: 'group:1', name: '开心', toQQ: false })
+  store.approve(item.id, admin)
+  assert.equal(store.edit(item.id, { manualOnly: true }, admin).ok, true)
+  assert.equal(store.selectForReply('开心', 'group:1').decision, 'no_match')
+  assert.equal(store.match('开心', 'group:1'), null)
+  assert.equal(store.match('开心', { chatId: 'group:1', allowManual: true }).id, item.id)
+  assert.ok(store.segmentFor(item.id, 'group:1'))
+  store.markUsed(item.id, 'group:1')
+  assert.equal(store.match('开心', { chatId: 'group:1', allowManual: true, cooldown: true }), null)
+  f.advance(60_000)
+  assert.equal(store.match('开心', { chatId: 'group:1', allowManual: true, cooldown: true }).id, item.id)
+})
+
+test('collection mode changes stop queued work and owner mode checks the recorded sender', async (t) => {
+  const f = fixture(t, { caption: false, collectMode: 'auto' }), store = f.create()
+  const seg = segment(), source = f.incoming(seg)
+  assert.equal((await store.collect(seg, source)).ok, true)
+  f.cfg.stickers.collectMode = 'ask'
+  await store.drain()
+  assert.equal(store.list(admin).total, 0)
+  assert.equal((await store.collect(seg, f.incoming(seg))).code, 'SELECTION_REQUIRED')
+  f.cfg.stickers.collectMode = 'owner'; f.cfg.ownerQQ = 'someone-else'
+  assert.equal((await store.collect(seg, f.incoming(seg))).code, 'FORBIDDEN')
+})
+
+test('ask mode rechecks request cancellation before queued collection', async (t) => {
+  const f = fixture(t, { caption: false, collectMode: 'ask' }), store = f.create()
+  const seg = segment(), source = f.incoming(seg)
+  const request = f.storage.requests.create({ chatId: source.chatId, actorId: '200', sourceMessageIds: [source.messageId] })
+  const occurrenceId = f.storage.occurrences.add({ messageId: source.messageId, chatId: source.chatId, authorId: '200', segIndex: 0, kind: 'sticker', scope: {} })
+  f.storage.db.run('UPDATE asset_occurrences SET created_at=? WHERE id=?', 1_000_000, occurrenceId)
+  assert.equal((await store.collect(seg, { ...source, selectedOccurrence: true, occurrenceId, requestId: request.id, epoch: request.epoch })).ok, true)
+  f.storage.epochs.bump(source.chatId)
+  await store.drain()
+  assert.equal(store.list(admin).total, 0)
+})
+
+test('ask selection requires this request occurrence and rechecks TTL after queueing', async t => {
+  const f = fixture(t, { caption: false, collectMode: 'ask' }), store = f.create()
+  const seg = segment(), source = f.incoming(seg), other = f.incoming(seg)
+  const request = f.storage.requests.create({ chatId: source.chatId, actorId: '200', sourceMessageIds: [source.messageId] })
+  const addOccurrence = s => {
+    const id = f.storage.occurrences.add({ messageId: s.messageId, chatId: s.chatId, authorId: '200', segIndex: 0, kind: 'sticker', scope: {} })
+    f.storage.db.run('UPDATE asset_occurrences SET created_at=? WHERE id=?', 1_000_000, id); return id
+  }
+  const valid = addOccurrence(source), foreign = addOccurrence(other)
+  const opts = { ...source, selectedOccurrence: true, requestId: request.id, epoch: request.epoch }
+  assert.equal((await store.collect(seg, { ...opts, occurrenceId: foreign })).code, 'SELECTION_REQUIRED')
+  assert.equal((await store.collect(seg, { ...opts, occurrenceId: valid })).ok, true)
+  f.advance(30 * 60_000)
+  await store.drain()
+  assert.equal(store.list(admin).total, 0)
+})
+
+test('owner changes during queued download block collection; nested labels grant no ownership', async t => {
+  const f = fixture(t, { caption: false, collectMode: 'owner' })
+  const wait = gate(), enter = gate()
+  const store = f.create({ download: async () => { enter.release(); await wait.promise; return PNG } })
+  const seg = { ...segment(), data: { ...segment().data, sender: { user_id: '200' } } }, source = f.incoming(seg)
+  assert.equal((await store.collect(seg, source)).ok, true)
+  const draining = store.drain(); await enter.promise
+  f.cfg.ownerQQ = '999'; wait.release(); await draining
+  assert.equal(store.list(admin).total, 0)
+  assert.equal((await store.collect(seg, f.incoming(seg))).code, 'FORBIDDEN')
+})
+
+test('ask collection rechecks occurrence TTL after download, not just before it', async t => {
+  const f = fixture(t, { caption: false, collectMode: 'ask' }), wait = gate(), enter = gate()
+  const store = f.create({ download: async () => { enter.release(); await wait.promise; return PNG } })
+  const seg = segment(), source = f.incoming(seg)
+  const request = f.storage.requests.create({ chatId: source.chatId, actorId: '200', sourceMessageIds: [source.messageId] })
+  const occurrenceId = f.storage.occurrences.add({ messageId: source.messageId, chatId: source.chatId, authorId: '200', segIndex: 0, kind: 'sticker', scope: {} })
+  f.storage.db.run('UPDATE asset_occurrences SET created_at=? WHERE id=?', 1_000_000, occurrenceId)
+  assert.equal((await store.collect(seg, { ...source, selectedOccurrence: true, occurrenceId, requestId: request.id, epoch: request.epoch })).ok, true)
+  const draining = store.drain(); await enter.promise; f.advance(30 * 60_000); wait.release(); await draining
+  assert.equal(store.list(admin).total, 0)
+})
+
 test('相同字节在不同聊天具有独立审核记录，只复用物理资产', async (t) => {
   const f = fixture(t, { caption: false })
   const store = f.create()

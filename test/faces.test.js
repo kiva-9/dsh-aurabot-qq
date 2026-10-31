@@ -1,11 +1,17 @@
 // #6：QQ 系统表情。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildFaceIndex, createFaces, stripFaceTags, textToSegments, COMMON_FACES } from '../src/chat/faces.js'
+import { buildFaceIndex, createFaces, stripFaceTags, speakableText, textToSegments, COMMON_FACES } from '../src/chat/faces.js'
 import { parseMessageEvent } from '../src/chat/inbound.js'
 import { hubFixture, GROUP } from './helpers/hub-fixture.js'
 
 const idOf = name => COMMON_FACES[name]
+
+test('speech removes emoji sequences but preserves ordinary numbers and text', () => {
+  assert.equal(speakableText('你好 👩🏽‍💻 🇭🇰 1️⃣ 123！'), '你好 123！')
+  assert.equal(speakableText('你好 <voice> <sticker:猫> <at:123> <ordinary>内容</ordinary>'), '你好 <ordinary>内容</ordinary>')
+  assert.equal(speakableText('©2026 ™ 20°C，1+2=3。\uFE0E'), '©2026 ™ 20°C，1+2=3。')
+})
 
 test('<face:捂脸> 生成同条的 face 段', () => {
   assert.deepEqual(textToSegments('哈<face:捂脸>哈', idOf), [{ type: 'text', data: { text: '哈' } }, { type: 'face', data: { id: '264' } }, { type: 'text', data: { text: '哈' } }])
