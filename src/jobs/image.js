@@ -7,6 +7,8 @@ import { checkRequest, ProviderError, MODE_LABEL } from '../providers/image/comm
 import { toJson, fromJson } from '../storage/db.js'
 import { isOwner, checkAllowed, levelFor } from '../chat/access.js'
 import { canSee } from '../domain/scope.js'
+import { resolveShape } from '../image/shapes.js'
+import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
 
 /**
@@ -23,6 +25,17 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
   // 配置快照不进入 input_json：任务接口可展示输入，但绝不能把服务密钥一并返回。
   const savedProfile = (id) => fromJson(storage.db.get('SELECT profile_json FROM image_job_configs WHERE job_id = ?', id)?.profile_json, null)
   const referenceVisible = (ref,job) => {
+    if (ref.galleryId) {
+      const persona = hub.personaFor?.(job.chatId), expected = job.input.persona
+      if (!expected?.personaId || ref.personaId !== expected.personaId || persona?.error || persona?.personaId !== ref.personaId ||
+          persona?.revision !== expected.revision || persona?.bindingRevision !== expected.bindingRevision) return false
+      const resolved = resolveArtwork(ref.galleryId, id => {
+        const row = storage.db.get('SELECT * FROM jobs WHERE id=?', id)
+        return row && { id: row.id, kind: row.kind, state: row.state, chatId: row.chat_id, actorId: row.actor_id,
+          input: fromJson(row.input_json, {}), output: fromJson(row.output_json, {}) }
+      }, { account: job.input.accountId, chatId: job.chatId, actorId: job.actorId, personaId: ref.personaId })
+      if (!resolved || resolved.assetId !== ref.assetId) return false
+    }
     if(!ref.occurrenceId)return true
     const o=storage.occurrences.get(ref.occurrenceId),config=getConfig()
     if(!o||!o.scope||o.scope.chat!==o.chatId||!canSee(o.scope,{account:job.input.accountId||config.botQQ,chat:job.chatId,persona:job.input.persona?.personaId},config.memory))return false
@@ -62,7 +75,9 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
 
   function prepare(args) {
     const c = cfg()
-    const input = { ...structuredClone(args.input), accountId: String(getConfig().botQQ), stylePrompt: c.stylePrompt, size: args.input.size || c.size }
+    const shape = args.input.shape || (!args.input.size ? c.shape : '') || ''
+    const input = { ...structuredClone(args.input), accountId: String(getConfig().botQQ), stylePrompt: c.stylePrompt, shape,
+      size: shape ? (args.input.size || '') : (args.input.size || c.size) }
     const persona = args.personaSnapshot || hub.personaFor?.(args.chatId)
     if (persona?.error) throw new ProviderError('invalid', '当前聊天的人设绑定无效，请先修正', { maybeCharged: false })
     input.persona = persona ? { personaId: persona.personaId, revision: persona.revision, bindingRevision: persona.bindingRevision } : null
@@ -76,8 +91,10 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       if (input.refs.length && input.mode === 'text') input.mode = 'reference'
     }
     validateInput(input)
-    const picked = pickProfile({ mode: input.mode, inputs: input.refs, size: input.size, mask: input.maskAssetId ? {} : null }, input.profileId)
+    if (input.refs.some(ref => ref.galleryId && !referenceVisible(ref, { ...args, input }))) throw new ProviderError('invalid', '参考图来源已失效或不在当前范围内', { maybeCharged: false })
+    const picked = pickProfile({ mode: input.mode, inputs: input.refs, size: input.size, shape: input.shape, mask: input.maskAssetId ? {} : null }, input.profileId)
     if (picked.error) throw new ProviderError('unsupported', picked.error, { maybeCharged: false })
+    input.size = picked.size || input.size
     input.profileId = picked.profile.id
     return { input, profile: picked.profile }
   }
@@ -117,8 +134,11 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     const tryOne = (p) => {
       const info = profileInfo(p)
       if (!info.ok) return { error: `「${p.name}」用不了：${info.message}` }
-      const why = checkRequest(req, info.caps)
-      return why ? { error: `「${p.name}」：${why}` } : { profile: p, caps: info.caps }
+      let size = req.size
+      try { if (req.shape) size = resolveShape(req.shape, req.size, info.caps.sizes || []) }
+      catch (error) { return { error: `「${p.name}」：${error.message}` } }
+      const why = checkRequest({ ...req, size }, info.caps)
+      return why ? { error: `「${p.name}」：${why}` } : { profile: p, caps: info.caps, size }
     }
     if (profileId) {
       const p = list.find((x) => x.id === profileId)
@@ -227,6 +247,17 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       if (execution.shouldContinue?.() === false) return
       if (job.epoch !== storage.epochs.current(job.chatId) || (job.input.accountId && job.input.accountId !== String(getConfig().botQQ))) return
       if (event === 'delivered') {
+        if (!guard(job, execution)) return
+        const personaId = job.input.persona?.personaId
+        const currentPersona = hub.personaFor?.(job.chatId)
+        const recorded = lineage(job.id)?.outputs || []
+        if (getConfig().imageGen.observeGenerated === true && personaId && currentPersona?.personaId === personaId && !currentPersona.error) {
+          for (const assetId of job.output?.assetIds || []) {
+            if (recorded.includes(assetId) && storage.assets.get(assetId)) hub.noteImageToSession?.(job.chatId, {
+              account: job.input.accountId, personaId, epoch: job.epoch, assetId,
+            })
+          }
+        }
         hub.noteToSession?.(job.chatId, `【系统】你刚才画的图（任务 ${job.id}）已经发到聊天里了。`, { account: job.input.accountId, epoch: job.epoch })
         onDelivered?.(job)
         return

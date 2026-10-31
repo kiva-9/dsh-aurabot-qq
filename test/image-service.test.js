@@ -23,8 +23,37 @@ function setup(t, extra = {}) {
   const runner = createJobRunner({ storage, handlers: { image: service.handler }, retryBaseMs: 0, pollMs: 0 })
   t.after(async () => { await runner.stop(); storage.close(); rmSync(dir, { recursive: true, force: true }) })
   const enqueue = (input = {}) => service.enqueue(runner, { kind: 'image', chatId: 'private:10', actorId: '10', input: { prompt: 'cat', mode: 'text', refs: [], ...input } })
-  return { cfg, calls, sends, service, runner, storage, enqueue }
+  return { cfg, calls, sends, service, runner, storage, enqueue, hub }
 }
+
+test('queued gallery reuse refuses removed source or changed persona before another provider charge', async t => {
+  for (const cause of ['persona', 'revision', 'source']) await t.test(cause, async t => {
+    const s = setup(t)
+    let persona = { personaId: 'fish', revision: 1, bindingRevision: 1 }
+    s.hub.personaFor = () => persona
+    const parent = s.enqueue(); await s.runner.drain()
+    const assetId = s.runner.get(parent.id).output.assetIds[0]
+    const child = s.enqueue({ mode: 'reference', refs: [{ role: 'base', assetId, galleryId: `${parent.id}:${assetId}`, personaId: 'fish' }] })
+    if (cause === 'persona') persona = { ...persona, personaId: 'other' }
+    if (cause === 'revision') persona = { ...persona, revision: 2 }
+    if (cause === 'source') s.storage.db.run("UPDATE jobs SET state='unknown' WHERE id=?", parent.id)
+    await s.runner.drain()
+    assert.equal(s.calls.length, 1, 'the invalid reference never reaches a second provider submission')
+    assert.equal(s.runner.get(child.id).state, 'failed')
+  })
+})
+
+test('default named canvas shape selects one provider-compatible size and explicit size wins', t => {
+  const s = setup(t)
+  s.cfg.imageGen.shape = 'portrait'
+  const inherited = s.enqueue()
+  assert.equal(s.runner.get(inherited.id).input.shape, 'portrait')
+  const [width, height] = s.runner.get(inherited.id).input.size.split('x').map(Number)
+  assert.ok(height > width)
+  const explicit = s.enqueue({ size: '1024x1024' })
+  assert.equal(s.runner.get(explicit.id).input.shape, '')
+  assert.equal(s.runner.get(explicit.id).input.size, '1024x1024')
+})
 
 test('任务登记时冻结服务、风格和尺寸，删除配置后仍使用原配置；密钥不进入任务展示', async (t) => {
   const s = setup(t)
@@ -104,4 +133,31 @@ test('图片显式共享可用，撤回或撤销共享在提交前阻止收费',
   s.cfg.memory.shareGroups=[{id:'shared',chats:['private:10','group:77'],categories:['image']}]
   const third=s.enqueue({mode:'reference',refs});s.storage.messages.markRecalled('group:77','shared-image');await s.runner.drain()
   assert.equal(s.runner.get(third.id).state,'failed');assert.equal(s.calls.length,1)
+})
+
+
+test('delivered artwork is queued for the same persona only', async t => {
+  const s = setup(t), notes = []
+  s.cfg.imageGen.observeGenerated = true
+  let persona = 'fish'
+  s.hub.personaFor = () => ({ personaId: persona, revision: 1, bindingRevision: 1, layers: {} })
+  s.hub.noteImageToSession = (...args) => notes.push(args)
+  const job = s.enqueue(); await s.runner.drain()
+  assert.equal(notes.length, 1)
+  assert.equal(notes[0][0], 'private:10')
+  assert.equal(notes[0][1].account, '20')
+  assert.equal(notes[0][1].personaId, 'fish')
+  assert.ok(s.runner.get(job.id).output.assetIds.includes(notes[0][1].assetId))
+  const second = s.enqueue(); persona = 'other'; await s.runner.drain()
+  assert.equal(s.runner.get(second.id).state, 'delivered')
+  assert.equal(notes.length, 1)
+})
+
+test('shape selects a provider-supported size and rejects explicit conflicts before enqueue', t => {
+  const s = setup(t)
+  s.cfg.imageGen.profiles[0].capabilities.sizes = ['1024x1024', '832x1216']
+  const job = s.enqueue({ shape: 'portrait' })
+  assert.equal(job.input.size, '832x1216')
+  assert.throws(() => s.enqueue({ shape: 'portrait', size: '1024x1024' }), /冲突/)
+  assert.equal(s.calls.length, 0)
 })

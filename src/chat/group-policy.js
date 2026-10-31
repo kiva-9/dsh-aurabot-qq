@@ -66,7 +66,7 @@ export function decideGroupReply(p) {
   if (p.mentioned) return { reply: true, mode: 'must', reason: '被 @' }
   if (p.repliedToBot) return { reply: true, mode: 'must', reason: '引用了她的消息' }
   if (p.continuedRequest) return { reply: true, mode: 'must', reason: '补充同一请求的材料或问题' }
-  const hit = (pol.wakeWords || []).find((w) => w && text.includes(w))
+  const hit = !p.mentionedOthers && (pol.wakeWords || []).find((w) => w && text.includes(w))
   if (hit) return { reply: true, mode: 'must', reason: `叫到了「${hit}」` }
   // 自动参与的刹车；上面已经处理有效显式请求。
   const burst = said.filter((t) => p.now - t < (pol.burstWindowSec ?? 120) * 1000).length

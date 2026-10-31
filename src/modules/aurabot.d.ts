@@ -39,8 +39,14 @@ export interface HookOptions {
 export interface ContextArgs { chat: Chat; sessionId: string }
 export interface PrepareContextArgs extends ContextArgs, HookExecution {
   chatId: ChatId; text: string; account: string; persona: string
-  personaSnapshot?: PersonaSnapshot | null; requestIds: string[]
+  personaSnapshot?: PersonaSnapshot | null; requestIds: string[]; requestId?: string
   /** 独立集成可传；当前 hub 不保证提供。 */ epoch?: number
+}
+/** 准备结束后同一轮的输入；text 是用于准备的截短查询。 */
+export interface PreparedPromptInfo extends ContextArgs {
+  chatId: ChatId; senderId?: string; text: string; queryText: string; prevText: string
+  account: string; speakers: string[]; persona?: PersonaSnapshot | null
+  requestId?: string; requests: readonly any[]; signal?: AbortSignal
 }
 export interface Activity {
   kind: 'in' | 'out'; chatId: ChatId; userId?: string; nickname?: string
@@ -53,6 +59,7 @@ export interface Events {
   poke: (event: any, execution: HookExecution) => MaybePromise<boolean | void>
   'group/decide': (decision: Readonly<GroupDecision>, info: {msg: Readonly<Message>; policy: any; recentTexts: string[]; memScore: number}, execution: HookExecution) => MaybePromise<GroupDecision | null | void>
   prompt: (content: readonly any[], info: {chat: Chat; senderId: string; queryText?: string}, execution: HookExecution) => MaybePromise<any[] | null | void>
+  'prompt/prepared': (content: readonly any[], info: Readonly<PreparedPromptInfo>, execution: HookExecution) => MaybePromise<any[] | null | void>
   reply: (text: string, info: {chatId: ChatId; userText: string}, execution: HookExecution) => MaybePromise<string | null | void>
   'reply/items': (items: readonly ReplyItem[], info: {chatId: ChatId; text: string; userText: string}, execution: HookExecution) => MaybePromise<ReplyItem[] | null | void>
   send: (message: readonly Segment[], info: {chatId: ChatId; note: string; force: boolean}, execution: HookExecution) => MaybePromise<Segment[] | null | void>

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { createFakeDsh } from './helpers/fake-dsh.js'
 import { startMockOneBot } from './helpers/mock-onebot.js'
+import { png as makePng } from './helpers/images.js'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const until = async predicate => { const end = Date.now() + 8000; while (!predicate()) { if (Date.now() > end) throw Error('timeout'); await sleep(20) } }
 
@@ -32,7 +33,7 @@ test('host: pure @, image and question remain one scoped task; later unmentioned
   })
   const push = (id, segments) => host.hub.onMessage({ post_type: 'message', message_type: 'group', sub_type: 'normal', group_id: Number(group), self_id: Number(bot), user_id: member, message_id: id,
     sender: { user_id: member, nickname: '测试群友', role: 'member' }, message: segments })
-  const png = Buffer.alloc(64); png.set([0x89,0x50,0x4e,0x47]); png[7] = 10; png.writeUInt32BE(64,16); png.writeUInt32BE(64,20)
+  const png = makePng(64, 64)
   await push(1, [{ type: 'at', data: { qq: bot } }]); await sleep(100)
   await push(2, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + png.toString('base64') } }])
   await push(3, [{ type: 'text', data: { text: '为什么任务管理器找不到进程' } }])

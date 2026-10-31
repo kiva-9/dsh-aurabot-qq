@@ -63,12 +63,7 @@ writeFileSync(join(dataDir, 'config.json'), JSON.stringify({
   voice: { enabled: false }, merge: { enabled: false },
 }))
 
-const PNG = (() => {
-  const b = Buffer.alloc(64)
-  b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47; b[7] = 0x0a
-  b.writeUInt32BE(64, 16); b.writeUInt32BE(64, 20)
-  return b
-})()
+const PNG = (await import('./helpers/images.js')).png(64, 64)
 
 const { createFakeDsh } = await import(`file:///${REPO}/test/helpers/fake-dsh.js`)
 const fake = createFakeDsh({ brain: async () => '我看见啦' })

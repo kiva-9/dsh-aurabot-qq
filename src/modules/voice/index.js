@@ -2,11 +2,15 @@
 // 面板里的试听、语音识别自检也在这里。
 // 导出 speak(text, profile) → { file, engine }：聊天中枢发语音时找它；profile 是当前人设的音色。替换这个模块就能换成任何你想要的念法。
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { dataDir } from '../../core/store.js'
 import { spawn } from 'node:child_process'
 import { textToSpeech, normalizeAudio } from '../../voice/tts.js'
 import { toMono16k, parseWav, buildWav } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
+import { speakableText } from '../../chat/faces.js'
 
 const MAX_ASR_BYTES = 20 * 1024 * 1024
 const MAX_ASR_SECONDS = 120
@@ -87,25 +91,70 @@ export default {
   files: ['voice/tts.js'],
   setup(api) {
     const { hub, onebot, local, http } = api.core
+    const lifetime = new AbortController()
+    api.onDispose?.(() => lifetime.abort(new Error('语音模块已停止')))
 
-    async function speak(text, profile = {}) {
+    async function synthesize(text, profile = {}, assertCurrent = () => {}) {
       // 本地接口接管语音合成；出错退回语音接口
       if (local.active('tts')) {
         try {
-          const file = fileOf(await local.call('tts', { text, voice: profile.voice || '' }))
+          const file = fileOf(await local.call('tts', { text, voice: profile.voice || '', signal: profile.signal }, { signal: profile.signal }))
+          assertCurrent()
           if (file && existsSync(file)) return { file, engine: 'local' }
-        } catch (error) {}
+        } catch (error) { assertCurrent() }
       }
+      assertCurrent()
       const startedAt=Date.now();let status='failed'
       try{const result=await textToSpeech(text, api.config().voice, profile);status='succeeded';return result}
       finally{api.core.usage?.record({service:'tts',model:api.config().voice.provider,chatId:profile.chatId,requestId:profile.requestId,status,billing:'unknown',startedAt,durationMs:Date.now()-startedAt,inputChars:String(text).length})}
+    }
+
+    async function speak(text, profile = {}) {
+      const clean = speakableText(text)
+      if (!clean) throw new Error('没有可朗读文字')
+      const signal = AbortSignal.any([lifetime.signal, ...(profile.signal ? [profile.signal] : [])])
+      const settings = { ...(api.config().voice.rvc || {}), ...(profile.rvc || {}) }
+      const account = String(api.config().botQQ), epoch = profile.chatId && api.core.storage.epochs.current(profile.chatId)
+      const persona = profile.chatId && JSON.stringify(hub.personaFor?.(profile.chatId) || null)
+      const rvcConfig = JSON.stringify(api.config().voice.rvc || {})
+      const profileState = JSON.stringify([profile.voice, profile.speed, profile.rvc || {}])
+      const voiceState = JSON.stringify([api.config().voice.provider, api.config().voice.defaultVoice, api.config().voice.speed])
+      const current = () => {
+        const cfg = api.config(), req = profile.requestId && api.core.storage.requests.get(profile.requestId)
+        return !signal.aborted && cfg.enabled !== false && cfg.voice.enabled !== false && String(cfg.botQQ) === account && JSON.stringify(cfg.voice.rvc || {}) === rvcConfig &&
+          JSON.stringify([profile.voice, profile.speed, profile.rvc || {}]) === profileState && JSON.stringify([cfg.voice.provider, cfg.voice.defaultVoice, cfg.voice.speed]) === voiceState &&
+          (!profile.chatId || (api.core.storage.epochs.current(profile.chatId) === epoch && JSON.stringify(hub.personaFor?.(profile.chatId) || null) === persona)) &&
+          (!profile.requestId || (req && req.chatId === profile.chatId && (req.epoch === undefined || req.epoch === epoch) && !['canceled', 'cancel_requested', 'closed', 'expired'].includes(req.state) &&
+            (!req.sourceMessageIds || req.sourceMessageIds.every(id => { const m = api.core.storage.messages?.get(id); return m && !m.recalledAt && m.account === account && m.chatId === profile.chatId && m.authorId === req.actorId }))))
+      }
+      const assertCurrent = () => { if (!current()) throw new Error('语音请求已取消') }
+      assertCurrent()
+      const result = await synthesize(clean, { ...profile, signal }, assertCurrent)
+      assertCurrent()
+      if (!settings.enabled) return result
+      try {
+        const bytes = await api.lazy('song').convertSpeech(result.file, { ...settings, signal, current })
+        assertCurrent()
+        const audio = normalizeAudio(bytes)
+        const dir = dataDir('voice-cache'); mkdirSync(dir, { recursive: true })
+        // The TTS provider normally prunes this cache. Local-only TTS does not
+        // enter that code path, so give converted outputs the same one-day TTL.
+        try { for (const name of readdirSync(dir)) { try { const old = join(dir, name), stat = statSync(old); if (stat.isFile() && Date.now() - stat.mtimeMs > 86400_000) unlinkSync(old) } catch {} } } catch {}
+        const file = join(dir, randomUUID() + '.' + audio.ext); writeFileSync(file, audio.buf)
+        return { file, engine: result.engine + '+rvc' }
+      } catch (error) {
+        if (!current() || settings.fallback === 'error') throw error
+        api.log?.warn?.('RVC 转换失败，使用原声：', error.message)
+        return { ...result, engine: result.engine + '+rvc-fallback', rvcError: error.message }
+      }
     }
 
     api.route('/voice/test', async (req) => {
       const b = await http.body(req)
       const { file, engine } = await speak(String(b.text || '你好呀，我是大肥鱼'))
       const buf = readFileSync(file)
-      return { ok: true, engine, mime: file.endsWith('.wav') ? 'audio/wav' : file.endsWith('.ogg') ? 'audio/ogg' : 'audio/mpeg', data: buf.toString('base64') }
+      const mime = { wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac', aac: 'audio/aac', silk: 'audio/silk', mp3: 'audio/mpeg' }[file.split('.').pop().toLowerCase()] || 'application/octet-stream'
+      return { ok: true, engine, mime, data: buf.toString('base64') }
     })
 
     // DSH 自带语音识别：看状态 / 下载模型

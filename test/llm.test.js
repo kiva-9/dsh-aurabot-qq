@@ -6,6 +6,16 @@ const { askModel, modelReasoning, pickReasoningEffort, clearReasoningCache } = a
 
 const CFG = { model: { provider: 'p', model: 'm' } }
 
+test('final model input cleans malformed Unicode added by attachment admission without changing source evidence', async () => {
+  const input = { type: 'text', text: 'source\ud800' }, admitted = [{ type: 'text', text: 'late\udfff' }]
+  const { dsh, calls } = fakeDsh({ reasoning: null })
+  dsh.attachments = { admitPromptContent: async () => admitted }
+  await askModel(dsh, { cfg: CFG, text: input.text, system: 'system\ud800', images: [{ data: 'AA==', mediaType: 'image/png' }] })
+  assert.equal(calls[0].system.isWellFormed(), true)
+  assert.equal(calls[0].messages[0].content[0].text.isWellFormed(), true)
+  assert.equal(input.text, 'source\ud800'); assert.equal(admitted[0].text, 'late\udfff')
+})
+
 /**
  * reasoning: undefined = 适配器报错（查不到）；null = 没有推理元数据；{efforts, default} = 支持
  */

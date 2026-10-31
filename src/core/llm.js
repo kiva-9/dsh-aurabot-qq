@@ -1,6 +1,7 @@
 // 直接问一次宿主模型（不进会话）：给表情起备注、心情判断、记忆提炼等后台小任务用。
 
 import { randomUUID } from 'node:crypto'
+import { cleanContent, cleanText } from './text.js'
 
 export const MODEL_ROLES = ['replyer', 'vision', 'memory', 'learning', 'judge']
 export const DEFAULT_MODEL_TIMEOUT_MS = 120_000
@@ -335,11 +336,11 @@ export async function askModel (dsh, o = {}) {
       if (!att || typeof att.admitPromptContent !== 'function') throw new Error('宿主没有附件服务，看不了图')
       content = await control.wait(() => att.admitPromptContent(content))
     }
-    const messages = [{ role: 'user', id: randomUUID(), content, source: { kind: 'plugin', plugin: 'aurabot' } }]
+    const messages = [{ role: 'user', id: randomUUID(), content: cleanContent(content), source: { kind: 'plugin', plugin: 'aurabot' } }]
     const base = {
       provider: t.provider,
       model: t.model,
-      system: o.system || '',
+      system: cleanText(o.system || ''),
       messages,
       maxTokens: o.maxTokens || 600,
       temperature: o.temperature ?? 0.3,

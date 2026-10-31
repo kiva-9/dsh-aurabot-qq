@@ -23,13 +23,16 @@ export default {
       if (a.kind !== 'in') return
       try { enqueue(a) } catch (error) { api.log?.warn?.('学习证据未排队：', error.code || 'SCOPE_REQUIRED') }
     })
-    api.context((args) => {
+    // Selection changes with the current message. Inject it only into this
+    // turn; changing a system context callback makes the host retain snapshots.
+    api.on('prompt/prepared', (content, args) => {
       try {
         const scope = enqueue(args), hub = api.core.hub
-        const query = args.msg?.text ?? args.text ?? hub?.lastTextOf?.(args.sessionId) ?? ''
+        const query = args.text ?? args.queryText ?? hub?.lastTextOf?.(args.sessionId) ?? ''
         const requestId = args.requestId || hub?.turnActor?.(args.sessionId)?.requestId || ''
-        return learning.contextFor(scope, query, { requestId })
-      } catch { return '' }
+        const hint = learning.contextFor(scope, query, { requestId })
+        return hint ? [{ type: 'text', text: hint }, ...content] : content
+      } catch { return content }
     })
     let cursor = 0, working = false
     api.every(60_000, async () => {

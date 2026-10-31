@@ -117,6 +117,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (status && status !== 'all') items = items.filter((it) => it.state === status)
     else if (status !== 'all' || !c.admin) items = items.filter((it) => it.state !== 'deleted' && (c.admin || it.state === 'approved'))
     if (!c.admin) items = items.filter((it) => it.state === 'approved' && assetOf(it) && sourceValid(it) && !deniedAtTarget(it, viewer))
+    if (c.automatic) items = items.filter((it) => !it.manualOnly)
     if (c.query) items = items.filter((it) => [it.name, it.description, it.ocr, ...it.tags].join(' ').toLowerCase().includes(String(c.query).toLowerCase()))
     if (c.analysis) items = items.filter((it) => it.analysis.state === c.analysis)
     if (c.animated === 'true' || c.animated === 'false') items = items.filter((it) => it.animated === (c.animated === 'true'))
@@ -146,13 +147,14 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
   function selectForReply(text, o, extra = {}) {
     const c = { ...context(o), ...extra }
     const options = { ...(cfg().selection || {}), intent: c.intent, mood: c.mood }
-    const candidates = available(c, { cooldown: true }).filter((it) => allowedForContext(it, text, options))
+    const candidates = available(c, { cooldown: true }).filter((it) => !it.manualOnly && allowedForContext(it, text, options))
     const item = pickForReply(candidates, text, options)
     return { decision: item ? 'match' : 'no_match', item: item ? decorate(item, scopeOf(c)) : null,
       reason: item ? '范围、审核、用途与冷却检查通过' : '没有相关且可用的表情', candidateIds: candidates.slice(0, 20).map((it) => it.id) }
   }
   function match(query, o) {
-    const it = matchSticker(available(o), query)
+    const options = context(o)
+    const it = matchSticker(available(o, { cooldown: options.cooldown === true }).filter(item => !item.manualOnly || options.allowManual === true), query)
     return it ? decorate(it, scopeOf(o)) : null
   }
   function segmentFor(item, o) {
@@ -207,7 +209,17 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (!source?.messageId) return
     const m = storage.messages.get(source.messageId)
     const seg = m?.segments?.[source.segmentIndex]
-    if (!m || m.recalledAt || m.account !== source.scope.account || m.chatId !== source.scope.chat || !seg || hash(JSON.stringify(seg)) !== source.segmentHash) fail('INVALID_SOURCE', '来源已撤回、修改或改变范围')
+    if (!m || m.recalledAt || m.account !== source.scope.account || m.chatId !== source.scope.chat || m.authorId !== source.authorId || !seg || hash(JSON.stringify(seg)) !== source.segmentHash) fail('INVALID_SOURCE', '来源已撤回、修改或改变范围')
+  }
+  function selectedSourceValid(source, requestId, epoch, occurrenceId, requireOpen = false) {
+    const request = requestId && storage.requests?.get(requestId), occurrence = occurrenceId && storage.occurrences?.get(occurrenceId)
+    const message = source.messageId && storage.messages.get(source.messageId), age = now() - Number(occurrence?.createdAt)
+    return Boolean(request && occurrence && message && source.scope.account === account() &&
+      request.chatId === source.scope.chat && request.epoch === epoch && storage.epochs.current(source.scope.chat) === epoch &&
+      !['canceled', 'cancel_requested', 'closed', 'expired', ...(requireOpen ? ['ended', 'answered', 'delivery_partial', 'delivery_unknown'] : [])].includes(request.state) &&
+      request.sourceMessageIds.includes(source.messageId) && request.actorId === message.authorId &&
+      occurrence.messageId === source.messageId && occurrence.chatId === source.scope.chat && occurrence.authorId === message.authorId &&
+      occurrence.segIndex === source.segmentIndex && occurrence.kind === 'sticker' && Number.isFinite(age) && age >= 0 && age < 30 * 60_000)
   }
   function analysisTask(it) {
     if (unknownAnalysis(it)) fail('ANALYSIS_UNKNOWN', '上次识别结果未知，可能已计费；请核对任务，不能直接重新识别')
@@ -232,8 +244,12 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       if ((scope.chat.startsWith('group:') && cfg().fromGroups === false) || (scope.chat.startsWith('private:') && cfg().fromPrivate === false)) fail('DISABLED', '这个来源的自动收藏已关闭')
       if (JSON.stringify(seg).length > 7 * 1024 * 1024) fail('INVALID_IMAGE', '媒体段过大')
       const source = sourceFor(seg, scope, options)
+      const mode = cfg().collectMode || 'auto'
+      if (!['auto', 'owner', 'ask'].includes(mode)) fail('DISABLED', '收藏策略无效')
+      if (mode === 'owner' && (!source.messageId || String(source.authorId) !== String(getConfig().ownerQQ))) fail('FORBIDDEN', '仅收藏主人发送的表情')
+      if (mode === 'ask' && (options.selectedOccurrence !== true || !selectedSourceValid(source, options.requestId, options.epoch, options.occurrenceId, true))) fail('SELECTION_REQUIRED', '仅可选择本轮未过期、未撤回的表情来源')
       const job = repo.db.tx(() => {
-        const t = repo.enqueue(scope, 'collect', source.key, { source, automatic: true })
+        const t = repo.enqueue(scope, 'collect', source.key, { source, automatic: true, collectMode: mode, requestId: mode === 'ask' ? options.requestId : null, epoch: mode === 'ask' ? options.epoch : null, occurrenceId: mode === 'ask' ? options.occurrenceId : null })
         repo.saveSource(scope, source.key, source)
         return t
       })
@@ -289,11 +305,12 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     return safe(() => {
       const it = managed(key, options)
       if (it.state === 'deleted') fail('TOMBSTONED', '已删除的表情不可修改')
-      const allowed = ['name', 'tags', 'description', 'ocr', 'emotions', 'suitable', 'unsuitable']
+      const allowed = ['name', 'tags', 'description', 'ocr', 'emotions', 'suitable', 'unsuitable', 'manualOnly']
       if (Object.keys(patch).some((key) => !allowed.includes(key))) fail('INVALID_INPUT', '只能编辑标签和描述证据')
       const saved = repo.update(it.id, (current) => {
         for (const [key, value] of Object.entries(patch)) {
-          if (['tags', 'emotions', 'suitable', 'unsuitable'].includes(key)) current[key] = array(value, key)
+          if (key === 'manualOnly') { if (typeof value !== 'boolean') fail('INVALID_INPUT', 'manualOnly 必须是布尔值'); current[key] = value }
+          else if (['tags', 'emotions', 'suitable', 'unsuitable'].includes(key)) current[key] = array(value, key)
           else {
             if (typeof value !== 'string' || value.length > (key === 'name' ? 80 : 4000)) fail('INVALID_INPUT', `${key} 格式/长度无效`)
             current[key] = value
@@ -390,11 +407,19 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
 
   async function processCollect(t) {
     const source = t.input.source
+    const permitted = () => {
+      const mode = cfg().collectMode || 'auto'
+      return !stopped && getConfig().enabled !== false && cfg().enabled !== false && source.scope.account === account() &&
+        mode === (t.input.collectMode || 'auto') && (mode !== 'owner' || String(source.authorId) === String(getConfig().ownerQQ)) &&
+        (mode !== 'ask' || selectedSourceValid(source, t.input.requestId, t.input.epoch, t.input.occurrenceId))
+    }
+    if (!permitted()) fail('DISABLED', '收藏策略或主人已改变')
     if (cfg().collect === false || (source.scope.chat.startsWith('group:') ? cfg().fromGroups : cfg().fromPrivate) === false) fail('DISABLED', '当前来源的自动收藏已关闭')
     validateSource(source)
     const markedSticker = isStickerSegment(source.segment)
     const buf = await download(source.segment, onebot, { maxBytes: (markedSticker ? 5 : 1.5) * 1024 * 1024, timeoutMs: 20000 })
     if (stopped) fail('STOPPED', '模块已停止')
+    if (!permitted()) fail('DISABLED', '下载期间收藏策略或主人已改变')
     if (cfg().enabled === false || cfg().collect === false || (source.scope.chat.startsWith('group:') ? cfg().fromGroups : cfg().fromPrivate) === false) fail('DISABLED', '下载期间自动收藏已关闭')
     validateSource(source)
     repo.db.tx(() => {

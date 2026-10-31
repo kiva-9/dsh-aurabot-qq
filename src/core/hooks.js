@@ -20,6 +20,7 @@ export const HOOK_SPECS = Object.freeze({
   'group/decide': spec('filter','decision',decisions,{modifies:['reply','mode','reason']}),
   prompt: spec('filter','before-model',content,{modifies:['content'],failure:'abort'}),
   'context/prepare': spec('observe','before-model',()=>true,{modifies:[],timeoutMs:10000}),
+  'prompt/prepared': spec('filter','before-model',content,{modifies:['content'],failure:'abort'}),
   reply: spec('filter','before-delivery',text,{modifies:['text']}),
   'reply/items': spec('filter','before-delivery',items,{modifies:['items'],failure:'abort'}),
   send: spec('filter','transport',segments,{modifies:['message'],failure:'abort'}),

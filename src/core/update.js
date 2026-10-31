@@ -2,9 +2,27 @@
 
 /** 比较 x.y.z：a > b 返回正数。 */
 export function compareVersions(a, b) {
-  const pa = String(a || '0').split('.').map((n) => parseInt(n, 10) || 0)
-  const pb = String(b || '0').split('.').map((n) => parseInt(n, 10) || 0)
-  for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0)
+  // SemVer identifiers are not bounded by JavaScript's integer precision.
+  const compareNumeric = (a, b) => {
+    const x = a.replace(/^0+(?=\d)/, ''), y = b.replace(/^0+(?=\d)/, '')
+    return x.length === y.length ? (x === y ? 0 : x < y ? -1 : 1) : x.length < y.length ? -1 : 1
+  }
+  const parse = (v) => {
+    const m = String(v || '0').trim().replace(/^v/i, '').match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/)
+    return m ? { core: [m[1], m[2] || '0', m[3] || '0'], pre: m[4]?.split('.') } : { core: ['0', '0', '0'], pre: null }
+  }
+  const pa = parse(a), pb = parse(b)
+  for (let i = 0; i < 3; i++) { const order = compareNumeric(pa.core[i], pb.core[i]); if (order) return order }
+  if (!pa.pre || !pb.pre) return pa.pre ? -1 : pb.pre ? 1 : 0
+  for (let i = 0; i < Math.max(pa.pre.length, pb.pre.length); i++) {
+    const x = pa.pre[i], y = pb.pre[i]
+    if (x === undefined || y === undefined) return x === undefined ? -1 : 1
+    if (x === y) continue
+    const nx = /^\d+$/.test(x), ny = /^\d+$/.test(y)
+    if (nx && ny) { const order = compareNumeric(x, y); if (order) return order; continue }
+    if (nx !== ny) return nx ? -1 : 1
+    return x < y ? -1 : 1
+  }
   return 0
 }
 

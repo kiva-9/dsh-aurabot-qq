@@ -424,8 +424,54 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
   const noVocals = () => readJson(noVocalFile(), () => [])
   const markNoVocals = (id) => { if (id && !noVocals().includes(String(id))) writeJson(noVocalFile(), [...noVocals(), String(id)].slice(-500)) }
   let stopped = false
+  const speechLifetime = new AbortController()
+  let speechBusy = false
+  let speechFinished = Promise.resolve()
   let current = null // 正在做的翻唱
   let install = { running: false, step: '', log: [], ok: null, message: '' }
+
+  async function convertSpeech(input, { voice: voiceId, pitch = 0, signal, timeoutMs = 120000, current: isCurrent = () => true } = {}) {
+    if (speechBusy || current) throw new Error('RVC 语音转换正忙')
+    if (stopped || !isCurrent()) throw new Error('RVC 请求已取消')
+    const songConfig = JSON.stringify(getConfig().song)
+    const settings = structuredClone(getConfig().song), paths = pathsOf(settings.root || defaultRoot())
+    settings.localSong = Boolean(local?.active('song'))
+    if (settings.localSong && local?.pathOf) { try { settings.converterFingerprint = audioHash(local.pathOf('song')) } catch { throw new Error('本地换声脚本不可读') } }
+    const voices = listVoices(paths.models), selected = String(voiceId || settings.voice || '')
+    const voice = (selected ? voices.find(v => v.id === selected) : voices[0]) || (settings.localSong ? { id: selected, pth: '', index: '' } : null)
+    if (!voice && !settings.localSong) throw new Error('没有指定的 RVC 音色')
+    if (!Number.isFinite(Number(pitch)) || Math.abs(Number(pitch)) > 24) throw new Error('RVC 音高无效')
+    const voiceStamp = () => [voice?.pth, voice?.index].map(file => {
+      if (!file) return null
+      try { const s = statSync(file); return [s.size, s.mtimeMs, s.ino] } catch { return 'missing' }
+    })
+    const frozenVoice = JSON.stringify(voiceStamp())
+    const timeout = AbortSignal.timeout(Math.max(1000, Math.min(300000, Number(timeoutMs) || 120000)))
+    const activeSignal = AbortSignal.any([...(signal ? [signal] : []), timeout, speechLifetime.signal])
+    const assertActive = () => {
+      activeSignal.throwIfAborted()
+      if (stopped || !isCurrent() || JSON.stringify(getConfig().song) !== songConfig || Boolean(local?.active('song')) !== settings.localSong || JSON.stringify(voiceStamp()) !== frozenVoice) throw new Error('RVC 请求或转换配置已改变')
+      verifyConverter(settings)
+    }
+    const dir = join(workRoot, 'speech-' + randomUUID()); mkdirSync(dir, { recursive: true }); speechBusy = true
+    let onAbort
+    const operation = processing.run({ settings, execution: { signal: activeSignal, assertActive } }, async () => {
+      assertActive(); const out = await convert(input, dir, voice, Number(pitch), {}); assertActive()
+      const size = statSync(out).size
+      if (!size || size > 20 * 1024 * 1024) throw new Error('RVC 输出无效或超过 20 MiB')
+      return readFileSync(out)
+    }).finally(() => {
+      speechBusy = false
+      try { rmSync(dir, { recursive: true, force: true }) } catch (e) { log?.warn?.('清理 RVC 临时文件失败：', e.message) }
+    })
+    // A converter may ignore cancellation. Reject the caller promptly, but keep
+    // the concurrency slot and temporary directory until that converter settles.
+    speechFinished = operation.then(() => {}, () => {})
+    try {
+      const canceled = new Promise((_, reject) => { onAbort = () => reject(activeSignal.reason || new Error('RVC 已取消')); activeSignal.addEventListener('abort', onAbort, { once: true }); if (activeSignal.aborted) onAbort() })
+      return await Promise.race([operation, canceled])
+    } finally { activeSignal.removeEventListener('abort', onAbort) }
+  }
 
   function status() {
     const p = P()
@@ -718,6 +764,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
   }
 
   async function convert(vocals, dir, voice, pitch, job) {
+    if (processing.getStore()?.job && speechBusy) { await speechFinished; check() }
     const p = P()
     const out = join(dir, 'vocals_rvc.wav')
     if (cfg().localSong) {
@@ -1094,9 +1141,9 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
   }
 
   return {
-    status,
+    status, convertSpeech,
     tick, recover, cancel, resend, runner, handler,
-    stop: () => { stopped = true; runner?.stop() },
+    stop: () => { stopped = true; speechLifetime.abort(new Error('翻唱模块已停止')); runner?.stop() },
     install: () => { runInstall(); return { ok: true, message: '开始安装，要下载好几个 GB，可能要十几分钟' } },
     request,
     result: (id, context = {}) => { const j = runner?.get(String(id)); return j && j.kind === 'song' && j.chatId === context.chatId &&

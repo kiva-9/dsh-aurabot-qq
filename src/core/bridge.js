@@ -60,8 +60,10 @@ function deliveryReport(result, target) {
 export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, version, apiVersion, overview }) {
   const events = [] // 最近发生的事（收到的消息、她发出去的话、模块发的事件），别的程序轮询用
   let seq = 0
+  let stopped = false
   let toolOffs = []
   let toolNames = []
+  const retiringTools = new Set()
 
   function record(type, data) {
     events.push({ seq: ++seq, at: Date.now(), type, ...data })
@@ -92,7 +94,9 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
   // ---------- 大家共用的几个操作 ----------
   const ops = {
     info: async () => {
+      if (stopped) return { ok: false, message: '联动服务已停止' }
       const o = await overview()
+      if (stopped) return { ok: false, message: '联动服务已停止' }
       return {
         ok: true, version, apiVersion,
         online: o.onebot.state === 'connected', login: o.onebot.login,
@@ -103,6 +107,7 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
     /** 让她把一段话发出去（会拆条、可以带 <voice> <sticker:名字>）。target 不填 = 发给主人。 */
     send: async ({ target, text } = {}) => {
       const t = String(target || ownerTarget())
+      if (stopped) return failed(t, '联动服务已停止')
       const why = canSend(t)
       if (why) return failed(t, why)
       if (!String(text || '').trim()) return failed(t, '要说点什么')
@@ -111,12 +116,15 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
     /** 后台只生成文字，不授予工具权限。to 填了时 ok 只表示全部送达；不填时 ok 表示生成成功。 */
     think: async ({ prompt, to } = {}) => {
       const target = to ? String(to) : null
+      if (stopped) return failed(target, '联动服务已停止')
       if (!String(prompt || '').trim()) return failed(target, 'prompt 不能空')
       if (target) { const why = canSend(target); if (why) return failed(target, why) }
       let reply
       try {
         reply = await hub.runSystemTurn('bridge', '联动', `【系统提醒·来自联动接口】${prompt}\n（只写你要说的话。不想说就输出 [沉默]）`, { noTools: true })
       } catch (error) { return { ...failed(target, '后台生成失败，未请求发送'), error: String(error?.message ?? error) } }
+      if (stopped) return failed(target, '联动服务已停止')
+      if (target) { const why = canSend(target); if (why) return failed(target, why) }
       const text = String(reply || '').trim()
       if (!target) return { ...deliveryReport(undefined, null), ok: true, reply: text, message: '已生成回复，未请求发送' }
       const delivery = text && text !== '[沉默]' ? await deliverTo(target, text) : deliveryReport(undefined, target)
@@ -124,6 +132,7 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
     },
     /** 调某个模块导出的函数：call('memory', 'recall', '香菜')。模块导出了什么看面板「扩展」和 API.md。 */
     call: async ({ module, method, args } = {}) => {
+      if (stopped) return { ok: false, message: '联动服务已停止' }
       const m = mods.use(String(module || ''))
       if (!m) return { ok: false, message: `模块「${module}」没在跑` }
       const fn = m[String(method || '')]
@@ -178,10 +187,19 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
   }
 
   function refresh() {
-    for (const off of toolOffs) { try { off() } catch (error) {} }
+    for (const off of toolOffs) {
+      try {
+        const value = off()
+        if (value && typeof value.then === 'function') {
+          const done = Promise.resolve(value).catch(error => log.warn('联动工具清理失败：', error?.message || error))
+          retiringTools.add(done)
+          done.then(() => retiringTools.delete(done))
+        }
+      } catch (error) { log.warn('联动工具清理失败：', error?.message || error) }
+    }
     toolOffs = []
     toolNames = []
-    if (!getConfig().bridge.dshTools) return
+    if (stopped || !getConfig().bridge.dshTools) return
     const tools = ctx.get?.('tools')
     if (!tools || typeof tools.register !== 'function') {
       log.warn('DSH 没有提供全局工具注册，联动工具挂不上')
@@ -199,7 +217,8 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
   }
   /** 模块用 api.dshTool() 加的工具：允许直接给 defineTool 的参数，也允许给做好的工具。 */
   function wrapModuleTool(t) {
-    return t.parameters && t.output ? t : defineTool(t)
+    const tool = t.parameters && t.output ? t : defineTool(t)
+    return { ...tool, execute: (...args) => stopped ? { ok: false, message: '联动服务已停止' } : tool.execute(...args) }
   }
 
   // ---------- 3. 给别的程序的 HTTP 接口 ----------
@@ -236,6 +255,7 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
 
   return {
     ops, service, refresh, ensureToken, resetToken, authorized,
+    dispose() { stopped = true; refresh(); return Promise.allSettled([...retiringTools]) },
     deniedTools: () => toolNames.slice(),
     examples: (base) => examples(base, getConfig().bridge.token),
   }

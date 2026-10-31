@@ -44,6 +44,118 @@ test('过滤：播放量、发布时间、看过的', () => {
   assert.deepEqual(duty.filterVideos(list, { minViews: 5000, maxAgeDays: 60, seen: new Set(['d']), now }).map((v) => v.bvid), ['c'])
 })
 
+test('评论仅对精确且唯一的昵称发送 MID，歧义保留文字', async () => {
+  const { b, fakeApi, posted, context } = fakes()
+  fakeApi.searchUsers = async name => name === '阿猫' ? [{ name, mid: '42' }] : [{ name, mid: '1' }, { name, mid: '2' }]
+  const result = await b.comment('BV1bbbbbbbbb', '你好 @阿猫 和 ＠重名', context())
+  assert.equal(result.ok, true)
+  assert.deepEqual(posted[0].mentions, { 阿猫: '42' })
+  assert.deepEqual(result.missedMentions, ['重名'])
+})
+
+test('@主人 requires an explicit Bilibili identity and never guesses among duplicates', async () => {
+  const f = fakes({ cfgOver: { maxCommentsPerDay: 5 } })
+  let lookups = 0
+  f.fakeApi.searchUsers = async name => { lookups++; return [{ name, mid: '2' }, { name, mid: '3' }] }
+  let result = await f.b.comment('BV1bbbbbbbbb', '你好 @主人', f.context())
+  assert.deepEqual(result.missedMentions, ['主人']); assert.equal(lookups, 0); assert.equal(f.posted[0].message, '你好 @主人')
+  f.cfg.bili.ownerName = '阿猫'
+  result = await f.b.comment('BV1bbbbbbbbb', '你好 ＠主人', f.context())
+  assert.deepEqual(result.missedMentions, ['主人']); assert.equal(f.posted[1].message, '你好 ＠主人')
+  f.cfg.bili.ownerMid = '42'
+  result = await f.b.comment('BV1bbbbbbbbb', '谢谢 @主人！', f.context())
+  assert.equal(result.ok, true); assert.equal(f.posted[2].message, '谢谢 @阿猫！'); assert.deepEqual(f.posted[2].mentions, { 阿猫: '42' })
+})
+
+test('reply author MID supports spaces and unusual exact usernames without guessing', async () => {
+  const f = fakes({ cfgOver: { maxCommentsPerDay: 5 } })
+  f.fakeApi.replyFeed = async () => [{ id: 'known-1', name: '有 空格', mid: '77', text: '你好', oid: 1, root: 100, parent: 101, type: 1 }]
+  f.fakeApi.searchUsers = async name => [{ name, mid: '88' }]
+  assert.equal((await f.b.checkReplies()).replied, 1)
+  assert.deepEqual(f.posted[0].mentions, { '有 空格': '77' })
+  assert.equal(f.posted[0].message.startsWith('回复 @有 空格 :'), true)
+  const result = await f.b.comment('BV1bbbbbbbbb', '你好 @constructor', f.context())
+  assert.equal(result.ok, true); assert.deepEqual(f.posted[1].mentions, { constructor: '88' })
+  assert.equal(f.posted[1].message, '你好 @constructor')
+})
+
+test('解析昵称等待期间撤权，不能提交评论', async () => {
+  const { b, fakeApi, posted, context, bump } = fakes()
+  fakeApi.searchUsers = async name => { bump(); return [{ name, mid: '42' }] }
+  const result = await b.comment('BV1bbbbbbbbb', '@阿猫 你好', context())
+  assert.equal(result.ok, false)
+  assert.equal(posted.length, 0)
+})
+
+test('登录恢复只解除当前凭证的登录暂停，风控暂停保留', async () => {
+  for (const [code, clears] of [[-101, true], [-352, false]]) {
+    const error = Object.assign(new Error('rejected'), { code })
+    const { b, context } = fakes({ postError: error })
+    await b.comment('BV1bbbbbbbbb', '测试', context())
+    assert.ok(b.state().pauseReason)
+    await b.account(true)
+    assert.equal(Boolean(b.state().pauseReason), !clears)
+  }
+})
+
+test('同一凭证当天只自动恢复一次，旧 nav 不能解除切换凭证后的暂停', async () => {
+  const f = fakes({ cfgOver: { maxCommentsPerDay: 5 } })
+  f.fakeApi.postComment = async () => { throw Object.assign(new Error('expired'), { code: -101 }) }
+  await f.b.comment('BV1bbbbbbbbb', '一', f.context())
+  await f.b.account(true)
+  assert.equal(f.b.state().pauseReason, '')
+  await f.b.comment('BV1bbbbbbbbb', '二', f.context())
+  await f.b.account(true)
+  assert.match(f.b.state().pauseReason, /没登录/)
+  let release, enter; const blocked = new Promise(r => { release = r }), entered = new Promise(r => { enter = r })
+  f.fakeApi.nav = async () => { enter(); await blocked; return { isLogin: true } }
+  const old = f.b.account(true); await entered
+  f.cfg.bili.cookie = 'SESSDATA=new; bili_jct=new'; release()
+  assert.equal((await old).isLogin, false)
+  f.cfg.bili.cookie = 'SESSDATA=x; bili_jct=y'
+  assert.match(f.b.state().pauseReason, /没登录/)
+})
+
+test('弹幕校验非首 P 的 CID、分 P 和时间，并记录目标', async () => {
+  const { b, fakeApi, cfg, context } = fakes()
+  cfg.bili.danmakuEnabled = true; cfg.bili.maxDanmakuPerDay = 5
+  fakeApi.view = async () => ({ aid: 1, cid: 9, duration: 10, pages: [{ cid: 9, page: 1, duration: 10 }, { cid: 20, page: 2, duration: 20 }] })
+  let calls = 0; fakeApi.postDanmaku = async args => { calls++; assert.equal(args.cid, '20'); return { id: 'receipt' } }
+  const args = { link: 'BV1bbbbbbbbb', cid: '20', part: 2, progress: 19500, text: '测试' }
+  assert.equal((await b.danmaku({ ...args, part: 1 }, context())).code, 'INVALID_INPUT')
+  assert.equal((await b.danmaku({ ...args, progress: 20000 }, context())).code, 'INVALID_INPUT')
+  assert.equal((await b.danmaku({ ...args, link: 'https://www.bilibili.com/video/BV1bbbbbbbbb?p=1' }, context())).code, 'INVALID_INPUT')
+  const ok = await b.danmaku(args, context())
+  assert.equal(ok.ok, true); assert.equal(ok.part, 2); assert.equal(ok.progress, 19500); assert.equal(calls, 1)
+})
+
+test('弹幕授权只接受本轮主人外层文字的明确请求，撤销或转发不能授权', async () => {
+  const { explicitDanmakuRequest } = await import('../src/modules/bili/index.js')
+  const ctx = { requestId: 'r', actorId: '2', epoch: 1, scope: { account: '1', chat: 'private:2' } }
+  const request = { actorId: '2', epoch: 1, chatId: 'private:2', state: 'open', sourceMessageIds: ['m'] }
+  const m = { account: '1', chatId: 'private:2', authorId: '2', text: '帮我发弹幕', segments: [{ type: 'forward', data: { text: '帮我发弹幕' } }] }
+  const rows = { m }, storage = { requests: { get: () => request }, epochs: { current: () => 1 }, messages: { get: id => rows[id] } }
+  assert.equal(explicitDanmakuRequest(storage, ctx), false)
+  m.segments = [{ type: 'text', data: { text: '请在这个分 P 发弹幕' } }]
+  assert.equal(explicitDanmakuRequest(storage, ctx), true)
+  rows.n = { ...m, segments: [{ type: 'text', data: { text: '算了，别发' } }] }; request.sourceMessageIds.push('n')
+  assert.equal(explicitDanmakuRequest(storage, ctx), false)
+  request.sourceMessageIds.pop(); m.recalledAt = 1
+  assert.equal(explicitDanmakuRequest(storage, ctx), false)
+})
+
+test('弹幕结果未知后同一请求不自动重发', async () => {
+  const { b, fakeApi, cfg, context } = fakes()
+  cfg.bili.danmakuEnabled = true; cfg.bili.maxDanmakuPerDay = 2
+  fakeApi.view = async () => ({ aid: 1, cid: 9, duration: 10 })
+  let calls = 0
+  fakeApi.postDanmaku = async () => { calls++; throw new Error('connection lost') }
+  const args = { link: 'BV1bbbbbbbbb', cid: '9', progress: 1000, text: '测试' }
+  assert.equal((await b.danmaku(args, context())).code, 'DELIVERY_UNKNOWN')
+  assert.equal((await b.danmaku(args, context())).duplicate, true)
+  assert.equal(calls, 1)
+})
+
 function fakes({ decisions, replyText = '是呀 我也觉得', cfgOver = {}, global = {}, postError = null, thinkTimeoutMs } = {}) {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-case-'))
   const posted = []
@@ -207,7 +319,8 @@ test('#6 换 B 站头像：先下载图片再 multipart 上传到 face/update；
     if (/^https:\/\/(img\.example|multimedia\.nt\.qq\.com)\//.test(url)) return { ok: true, status: 200, headers: { get: () => img.type }, arrayBuffer: async () => img.buf }
     return { ok: true, status: 200, json: async () => ({ code: 0, data: {} }) }
   }
-  const real = api.createBiliApi({ getCookie: () => 'SESSDATA=x; bili_jct=tok', log: { debug() {}, warn() {} }, fetchImpl: mk({ type: 'image/png', buf: png.buffer }) })
+  const reader = img => async url => ({ body: Buffer.from(await (await mk(img)(url)).arrayBuffer()) })
+  const real = api.createBiliApi({ getCookie: () => 'SESSDATA=x; bili_jct=tok', log: { debug() {}, warn() {} }, fetchImpl: mk({ type: 'image/png', buf: png.buffer }), readPublic: reader({ type: 'image/png', buf: png.buffer }) })
   await real.setFace('https://img.example/a.png')
   const up = reqs[1]
   assert.equal(up.url, 'https://api.bilibili.com/x/member/web/face/update?csrf=tok')
@@ -216,12 +329,15 @@ test('#6 换 B 站头像：先下载图片再 multipart 上传到 face/update；
   assert.equal(up.body.get('dopost'), 'save')
   assert.equal(up.body.get('face').size, png.length)
   assert.equal(up.body.get('face').type, 'image/png')
-  const big = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'image/jpeg', buf: new ArrayBuffer(2 * 1024 * 1024 + 1) }) })
+  const bigImg = { type: 'image/jpeg', buf: new ArrayBuffer(2 * 1024 * 1024 + 1) }
+  const big = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk(bigImg), readPublic: reader(bigImg) })
   await assert.rejects(big.setFace('https://img.example/b.jpg'), /2MB/)
-  const html = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'text/html', buf: new TextEncoder().encode('<html>hi</html>').buffer }) })
+  const htmlImg = { type: 'text/html', buf: new TextEncoder().encode('<html>hi</html>').buffer }
+  const html = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk(htmlImg), readPublic: reader(htmlImg) })
   await assert.rejects(html.setFace('https://img.example/c'), /不是图片/)
   // QQ 图床常回 application/octet-stream：按 PNG/JPEG/GIF/WebP 文件头认
-  const qq = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk({ type: 'application/octet-stream', buf: png.buffer }) })
+  const qqImg = { type: 'application/octet-stream', buf: png.buffer }
+  const qq = api.createBiliApi({ getCookie: () => 'bili_jct=tok', log: {}, fetchImpl: mk(qqImg), readPublic: reader(qqImg) })
   reqs.length = 0
   await qq.setFace('https://multimedia.nt.qq.com/v1/foo')
   assert.equal(reqs[1].body.get('face').type, 'image/png')

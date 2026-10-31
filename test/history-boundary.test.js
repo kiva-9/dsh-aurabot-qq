@@ -348,7 +348,7 @@ test('history keeps legacy undated entries without a boundary and reads a newly 
   boundary(f.storage)
   assert.equal((await tool.execute({})).message, '没翻到聊天记录')
   f.cfg.botQQ = OTHER
-  assert.equal((await tool.execute({})).message, '没翻到聊天记录', 'an old tool cannot change accounts')
+  assert.equal((await tool.execute({})).ok, false, 'an old tool cannot change accounts')
   f.state.history = [quoted({ kind: 'group', self_id: OTHER, time: null })]
   assert.match((await f.historyTool().execute({})).message, /引用材料/, 'another account has its own boundary')
 })

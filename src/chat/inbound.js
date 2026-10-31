@@ -14,7 +14,9 @@ export function isStickerSegment(seg) {
   if (seg.type === 'mface') return true
   if (seg.type !== 'image') return false
   const d = seg.data
-  if (String(d.sub_type ?? d.subType ?? '') === '1') return true
+  const subtype = String(d.sub_type ?? d.subType ?? '')
+  if (subtype === '1') return true
+  if (subtype === '7' && String(d.summary || '').trim() && String(d.summary).trim() !== '[图片]') return true
   if (d.emoji_id || d.emojiId) return true
   return false
 }
@@ -38,6 +40,7 @@ export function parseMessageEvent(event, selfId, { faceName } = {}) {
   const groupId = kind === 'group' ? String(event.group_id ?? '') : ''
   const sender = event.sender || {}
   let mentioned = false
+  let mentionedOthers = false
   let replyId = ''
   const texts = []
   const images = []
@@ -55,7 +58,7 @@ export function parseMessageEvent(event, selfId, { faceName } = {}) {
         break
       case 'at':
         if (String(d.qq) === self || d.qq === 'all') mentioned = mentioned || String(d.qq) === self
-        else texts.push(`@${d.name || d.qq} `)
+        else { mentionedOthers = true; texts.push(`@${d.name || d.qq} `) }
         break
       case 'reply':
         replyId = String(d.id ?? '')
@@ -83,7 +86,7 @@ export function parseMessageEvent(event, selfId, { faceName } = {}) {
         texts.push('[视频]')
         break
       case 'file':
-        texts.push(`[文件 ${d.name || d.file || ''}]`)
+        texts.push(`[文件 ${d.name || d.file || ''}${event.message_id ? `，消息ID ${event.message_id}` : ''}]`)
         break
       case 'json':
         texts.push(cardText(d.data))
@@ -116,6 +119,7 @@ export function parseMessageEvent(event, selfId, { faceName } = {}) {
     messageId: String(event.message_id ?? ''),
     text,
     mentioned,
+    mentionedOthers,
     replyId,
     images,
     stickers,

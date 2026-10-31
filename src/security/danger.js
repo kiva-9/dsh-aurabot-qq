@@ -47,36 +47,52 @@ const clip = (text, max) => (text.length > max ? text.slice(0, max) + '…' : te
  * @param {(sessionId: string) => string} o.chatOfSession DSH 会话对应的 QQ 聊天
  */
 export function createDangerGuard({ getConfig, deliver, chatOfSession, timeoutMs = DEFAULT_TIMEOUT_MS, log, now = Date.now }) {
+  let stopped = false
+  let policyEpoch = 0
   const pending = new Map() // chatId → { resolve, startedAt }
   const ownerChat = () => { const owner = String(getConfig()?.ownerQQ || ''); return owner ? `private:${owner}` : '' }
   const settle = (chatId, approved) => {
     const waiting = pending.get(chatId)
     if (!waiting) return false
-    pending.delete(chatId)
     waiting.resolve(approved)
     return true
   }
 
   /** 问主人；任何一步不成就算不同意。 */
   function ask(chatId, label, command, signal) {
+    let delivery
     return new Promise((resolve) => {
-      const timer = setTimeout(() => settle(chatId, false), timeoutMs)
-      const onAbort = () => settle(chatId, false)
-      signal?.addEventListener('abort', onAbort, { once: true })
-      pending.set(chatId, { startedAt: now(), resolve: (approved) => {
+      let finished = false, replied = false
+      const finish = (approved) => {
+        if (finished) return
+        finished = true
         clearTimeout(timer)
         signal?.removeEventListener('abort', onAbort)
+        if (pending.get(chatId) === ticket) pending.delete(chatId)
         resolve(approved)
-      } })
+      }
+      const timer = setTimeout(() => finish(false), timeoutMs)
+      const onAbort = () => finish(false)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      const ticket = { startedAt: now(), resolve: (approved) => {
+        if (!approved) return finish(false)
+        if (replied) return
+        replied = true
+        // A reply does not prove the notification arrived. Keep timeout, abort and
+        // invalidation active while an uncertain delivery is still pending.
+        Promise.resolve().then(() => delivery).then(sent => finish(Boolean(sent?.delivered)), () => finish(false))
+      } }
+      pending.set(chatId, ticket)
       if (signal?.aborted) return onAbort()
       const seconds = Math.max(1, Math.round(timeoutMs / 1000))
-      Promise.resolve().then(() => deliver(chatId, `⚠️ 危险命令确认（${label}）\n${clip(command, 260)}\n回复「确认」执行，回复「取消」拦下；${seconds} 秒内没回也会拦下。`))
-        .then((sent) => { if (!sent?.delivered) { log?.warn?.('危险命令确认没发出去，已拦下'); settle(chatId, false) } },
-          (error) => { log?.warn?.('危险命令确认没发出去：', error.message); settle(chatId, false) })
+      delivery = Promise.resolve().then(() => deliver(chatId, `⚠️ 危险命令确认（${label}）\n${clip(command, 260)}\n回复「确认」执行，回复「取消」拦下；${seconds} 秒内没回也会拦下。`))
+        .then((sent) => { if (!sent?.delivered) { log?.warn?.('危险命令确认没发出去，已拦下'); finish(false) } return sent },
+          (error) => { log?.warn?.('危险命令确认没发出去：', error.message); finish(false) })
     })
   }
 
   async function preExecute(exec, next) {
+    if (stopped) return { kind: 'deny', reason: '安全确认已停用' }
     if (getConfig()?.security?.dangerConfirm !== true || !SHELL_TOOLS.has(exec?.name)) return next()
     const command = String(exec.arguments?.command ?? '')
     const label = isDangerousCommand(command)
@@ -90,9 +106,10 @@ export function createDangerGuard({ getConfig, deliver, chatOfSession, timeoutMs
       return { kind: 'deny', reason: `这条命令被安全策略拦下了（${label}）：只有主人私聊里、经主人确认才能执行。` }
     }
     if (pending.has(chatId)) return { kind: 'deny', reason: `上一条危险命令还在等主人确认，这条（${label}）先不执行。` }
+    const ticketEpoch = policyEpoch
     const approved = await ask(chatId, label, command, exec.signal)
     log?.info?.(`危险命令（${label}）${approved ? '主人确认执行' : '没有确认，已拦下'}：${logged}`)
-    if (approved) return next()
+    if (approved && ticketEpoch === policyEpoch && !stopped && !exec.signal?.aborted && getConfig()?.security?.dangerConfirm === true && chatId === ownerChat() && String(chatOfSession(exec.agent?.session?.id) || '') === chatId) return next()
     return { kind: 'deny', reason: `危险命令被拦下了（${label}）：主人没有回复「确认」。可以换个安全的做法，或者告诉主人你要做什么。` }
   }
 
@@ -100,7 +117,7 @@ export function createDangerGuard({ getConfig, deliver, chatOfSession, timeoutMs
   function handleReply(chatId, userId, text, { at = Infinity } = {}) {
     const key = String(chatId || '')
     const waiting = pending.get(key)
-    if (!waiting || key !== ownerChat() || key !== `private:${userId}`) return false
+    if (stopped || getConfig()?.security?.dangerConfirm !== true || !waiting || key !== ownerChat() || key !== `private:${userId}`) return false
     // 网关重连会重放旧消息：问之前说的「确认」不算数（QQ 时间只精确到秒）
     if (at < Math.floor(waiting.startedAt / 1000) * 1000) return false
     const reply = String(text || '').trim()
@@ -112,8 +129,9 @@ export function createDangerGuard({ getConfig, deliver, chatOfSession, timeoutMs
   return {
     preExecute,
     handleReply,
+    invalidate: () => { policyEpoch++; for (const chatId of [...pending.keys()]) settle(chatId, false) },
     /** 插件卸载：还在等的一律拦下，工具链不能挂着。 */
-    dispose: () => { for (const chatId of [...pending.keys()]) settle(chatId, false) },
+    dispose: () => { stopped = true; for (const chatId of [...pending.keys()]) settle(chatId, false) },
     get pendingCount() { return pending.size },
   }
 }

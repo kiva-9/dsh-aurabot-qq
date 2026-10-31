@@ -48,8 +48,8 @@ export default {
 | use(id) / lazy(id) / has(id) | 当前导出或 null / 动态代理 / 是否运行。不要长期保留热重载前的导出 |
 | on(event,fn,options?) / emit(event,...args) | 注册 Hook / 发观察事件；emit 不等待全部监听完成 |
 | tool(builder) / defineTool(spec) | 按会话提供工具 / 构造工具定义 |
-| context(fn) | 同步文字或空值；Promise 会被拒绝并记错 |
-| prepareContext(fn,options?) | 每次送入会话前异步准备，再由同步 context 读取有效结果 |
+| context(fn) | 同步返回稳定的上下文文字或空值；Promise 会被拒绝并记错 |
+| prepareContext(fn,options?) | 每次送入会话前异步准备，再由 `prompt/prepared` 消费当轮有效结果 |
 | rule(fnOrText) | 同步补充规则，函数每轮读取 kind/config |
 | command({name,aliases,desc,run}) | 主人命令，返回文字回到发命令的聊天 |
 | every(ms,fn,label?) / later(ms,fn) | 进程内定时器，停用撤销；every 最小 1 秒且同回调不重叠。持久等待用 tasks |
@@ -82,6 +82,7 @@ chatId 为 `private:<QQ>` / `group:<群号>`；后台会话可为 `system:<名�
 | message / poke | claim；消息 / 原戳一戳事件 | true 接管；false/undefined 继续；错误继续后续监听 |
 | group/decide | filter；decision,{msg,policy,recentTexts,memScore} | 必须有 boolean reply，可带 mode/reason。错误保留前值；null 终止链但当前 hub 保留原决定，阻止回复请返回 `{reply:false}` |
 | prompt | filter；content,{chat,senderId,queryText} | text/image 内容数组；错误或 null 阻止本次提交 |
+| prompt/prepared | filter；content,{chat,chatId,sessionId,text,queryText,prevText,speakers,persona,account,requestId,requests,signal} | context/prepare 和会话有效性检查后执行；text 是准备时使用的查询。返回 text/image 内容数组；错误或 null 阻止本次提交 |
 | reply | filter；text,{chatId,userText} | 新文字；null 不发；普通错误保留前值 |
 | reply/items | filter；items,{chatId,text,userText} | text/voice/sticker/image/poke 数组；错误或 null 中止发送链 |
 | send | filter；segments,{chatId,note,force} | OneBot 段数组；错误或 null 中止高层发送；直接 onebot 不经过此链 |
@@ -99,11 +100,11 @@ chatId 为 `private:<QQ>` / `group:<群号>`；后台会话可为 `system:<名�
 
 ### prepareContext 与同步上下文
 
-当前 hub 传入 `{chat,chatId,sessionId,text,account,persona,personaSnapshot,requestIds,signal}`。prepareContext 包装后补上 isCurrent，并合并本轮、Hook、模块的 signal。准备失败不等于取消聊天，提供者必须清理本次旧缓存。
+当前 hub 传入 `{chat,chatId,sessionId,text,account,persona,personaSnapshot,requestIds,requestId,signal}`。prepareContext 包装后补上 isCurrent，并合并本轮、Hook、模块的 signal。准备失败不等于取消聊天，提供者必须清理本次旧缓存。
 
 普通 context 目前只保证 `{chat,sessionId}`，**没有 persona 顶层参数**。用 `api.core.hub.turnPersona(sessionId)?.personaId` 解析冻结人设，账号取宿主当前配置。一般人物事实写入 persona:''，读取可带当前人设；不要为每个人格复制人物事实。
 
-预热缓存需以 session + scope + 查询/单调 ticket 隔离，提交前检查 signal/isCurrent/账号，同步读取再核对源版本和可见性。内置 retrieval 已注册这两个入口，无需重复注册；模块导出为 `prepareContext(args)` 与 `contextFor(chat,sessionId)`，后者自行解析当前 scope；底层向量 service 才接受第三个 `{scope,epoch}` 参数。
+预热缓存需以 session + scope + 查询/单调 ticket 隔离，提交前检查 signal/isCurrent/账号，同步读取再核对源版本和可见性。随请求变化的检索、人物资料和学习结果应通过 `prompt/prepared` 加入本轮内容，而不是放入可能留存多份快照的系统 context。内置 retrieval 已注册这两个入口，无需重复注册；模块导出为 `prepareContext(args)` 与 `contextFor(chat,sessionId,options?)`，后者自行解析当前 scope，可用 `options.query` 匹配准备查询；底层向量 service 接受 `{scope,epoch}`。
 
 ## 工具授权与持久任务
 

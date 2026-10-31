@@ -157,11 +157,11 @@ export function canonicalUrl(value, base) {
   try { return parseWebUrl(base ? new URL(value, base).href : value).href } catch { return null }
 }
 
-export async function resolvePublicUrl(value, { lookup = dnsLookup, dohLookup = publicDohLookup, signal } = {}) {
+export async function resolvePublicUrl(value, { lookup = dnsLookup, dohLookup = publicDohLookup, signal, allowAnyPort = false } = {}) {
   const u = parseWebUrl(value)
   const host = u.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase()
   if (/^(localhost|localhost\.localdomain|metadata\.google\.internal)$/.test(host) || /\.(localhost|local|internal|home|lan|test|invalid)$/.test(host) || (!host.includes('.') && !isIP(host))) fail('UNSAFE_URL', '禁止访问本机或内网主机')
-  if (u.port && !['80', '443'].includes(u.port)) fail('UNSAFE_URL', '外部资料 URL 只允许 80/443 端口')
+  if (!allowAnyPort && u.port && !['80', '443'].includes(u.port)) fail('UNSAFE_URL', '外部资料 URL 只允许 80/443 端口')
   let addresses
   try { addresses = isIP(host) ? [{ address: host, family: isIP(host) }] : await abortable(lookup(host, { all: true, verbatim: true }), signal) }
   catch (error) { checkSignal(signal); if (error instanceof SearchError) throw error; fail('DNS_FAILED', '无法解析来源主机') }
@@ -177,12 +177,15 @@ export async function resolvePublicUrl(value, { lookup = dnsLookup, dohLookup = 
 
 const REDIRECTS = new Set([301, 302, 303, 307, 308])
 const RETRY = new Set([408, 429, 500, 502, 503, 504])
+// CDN redirects may need a fixed Referer/UA and range, but credentials and
+// arbitrary custom headers must never follow to a different origin.
+const REDIRECT_HEADERS = new Set(['accept', 'accept-language', 'user-agent', 'referer', 'range', 'if-range'])
 
 /** Injectable DNS/request are trusted transport seams for local HTTP tests, never profile options. */
-export function createSearchHttp({ lookup = dnsLookup, dohLookup = publicDohLookup, request } = {}) {
+export function createSearchHttp({ lookup = dnsLookup, dohLookup = publicDohLookup, request, allowAnyPort = false } = {}) {
   async function once(url, opts, signal) {
     const u = parseWebUrl(url)
-    const pinned = opts.publicOnly === false ? null : await resolvePublicUrl(u.href, { lookup, dohLookup, signal })
+    const pinned = opts.publicOnly === false ? null : await resolvePublicUrl(u.href, { lookup, dohLookup, signal, allowAnyPort })
     checkSignal(signal)
     return new Promise((resolve, reject) => {
       const selected = pinned?.addresses[0]
@@ -230,12 +233,13 @@ export function createSearchHttp({ lookup = dnsLookup, dohLookup = publicDohLook
     let current = url
     let redirects = 0
     let retries = 0
+    let headers = opts.headers
     const safeRead = ['GET', 'HEAD'].includes(opts.method)
     try {
       for (;;) {
         checkSignal(d.signal)
         let result
-        try { result = await once(current, opts, d.signal) }
+        try { result = await once(current, { ...opts, headers }, d.signal) }
         catch (error) {
           checkSignal(d.signal)
           if (!safeRead || error.code !== 'NETWORK_FAILED' || retries >= Math.min(2, opts.retries)) throw error
@@ -252,6 +256,9 @@ export function createSearchHttp({ lookup = dnsLookup, dohLookup = publicDohLook
           const next = canonicalUrl(result.headers.location || '', current)
           if (!next || !result.headers.location) fail('REDIRECT_BLOCKED', '重定向地址不合法')
           if (new URL(current).protocol === 'https:' && new URL(next).protocol !== 'https:') fail('REDIRECT_BLOCKED', '禁止 HTTPS 降级重定向')
+          if (new URL(current).origin !== new URL(next).origin && headers) {
+            headers = Object.fromEntries(Object.entries(headers).filter(([key]) => REDIRECT_HEADERS.has(key.toLowerCase())))
+          }
           current = next // next iteration resolves and pins again, including same-host redirects
           continue
         }

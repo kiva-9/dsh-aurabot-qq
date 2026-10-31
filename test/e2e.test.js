@@ -210,12 +210,13 @@ test('群管：群友要求禁言被拒绝，主人要求才执行', async () =>
   assert.equal(mock.sent('set_group_ban')[0].params.duration, 300)
 })
 
-test('群管：群友和主人的话合并成一轮时，主人的要求照样执行', async () => {
+test('群管：混合请求批次即便引用主人消息，也不执行高风险操作', async () => {
   const n = mock.sent('set_group_ban').length
   mock.push(grp('555', '777', [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 哈哈哈' } }]))
   mock.push(grp('555', OWNER, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 他太吵了 把999禁言' } }], 'xiaoming'))
-  await until(() => mock.sent('set_group_ban').length === n + 1)
-  assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, true)
+  await until(() => fake.turns.at(-1)?.userText.includes('他太吵了') && fake.turns.at(-1).toolCalls.length)
+  assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, false)
+  assert.equal(mock.sent('set_group_ban').length, n)
 })
 
 test('群管：混在一轮里时，不写编号、或者写的是群友那条，都不能借主人的权限', async () => {
@@ -648,7 +649,7 @@ test('改图：主人发图说「照着这张改」，按编号把那张当底�
   assert.ok(job.lineage.inputs[0].occurrenceId, '记下了是哪条消息里的哪张图')
 })
 
-test('参考图归属：群友 A 不能拿群友 B 刚发的图当自己的参考', async () => {
+test('混合生图请求：群友 A 不能借群友 B 刚发的图发起付费任务', async () => {
   await settle()
   await fake.call('/save', { imageGen: { ownerOnly: false } })
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
@@ -659,7 +660,7 @@ test('参考图归属：群友 A 不能拿群友 B 刚发的图当自己的参�
   const r = fake.turns.at(-1).toolCalls[0].result
   await fake.call('/save', { imageGen: { ownerOnly: true } })
   assert.equal(r.ok, false)
-  assert.match(r.message, /路人乙 发的，不能拿来给别人画/)
+  assert.match(r.message, /这一轮含其他人的请求/)
 })
 
 test('增量记忆：必须指定范围，原始旧聊天保留供审计', async () => {
