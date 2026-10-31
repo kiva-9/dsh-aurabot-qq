@@ -1,4 +1,4 @@
-// Aurabot 2.0.0-rc.1 · 扩展 API 2。
+// Aurabot 2.0.0-rc.2 · 扩展 API 2。
 // 运行时复制到 modules/aurabot.d.ts；自己的模块引用 import('../aurabot').AurabotModule。
 // 这些是接口提示，不是运行时授权。api.core/lib/dsh 内部能力不承诺稳定。
 
@@ -306,11 +306,29 @@ export interface TokenUsageCounts {
   calls: number; callsWithUsage: number; incompleteCalls: number
   inputTokens: number; outputTokens: number; cachedTokens: number; totalTokens: number
 }
+export interface TokenDashboardCounts extends TokenUsageCounts {
+  /** 各字段有返回（包含真实 0）的调用数。 */
+  inputCallsWithUsage: number; outputCallsWithUsage: number; cachedCallsWithUsage: number
+}
+export interface TokenDashboardOptions {
+  range?: 'today' | '7d' | '30d' | 'all' | 'custom'; chatId?: string
+  /** custom 必填，固定 UTC+8 自然日 YYYY-MM-DD，结束日包含在内。 */
+  startDate?: string; endDate?: string; now?: number
+}
+export interface TokenDashboard {
+  range: 'today' | '7d' | '30d' | 'all' | 'custom'
+  /** 时间戳（毫秒），左闭右开；all 无记录时 from 为 0。 */
+  from: number; to: number; timeZone: 'Etc/GMT-8'; generatedAt: number; note: string
+  totals: TokenDashboardCounts; models: Array<TokenDashboardCounts & {key: string}>
+  trend: {granularity: 'day' | 'month'; points: Array<TokenDashboardCounts & {key: string}>}
+}
 export interface TokenMeterApi {
   summary(options?: {range?: 'today' | '7d' | '30d' | 'all'; chatId?: string; groupBy?: 'none' | 'day' | 'model' | 'role' | 'provider'; now?: number}): {
     account: string; chatId: string | null; from: number; to: number; range: string
     totals: TokenUsageCounts; buckets: Array<TokenUsageCounts & {key: string}>; generatedAt: number; note: string
   }
+  /** 默认 7d，最多 1200 个自然月；无效范围抛 RangeError。 */
+  dashboard(options?: TokenDashboardOptions): TokenDashboard
 }
 
 export interface TaskApi {
@@ -368,6 +386,8 @@ export interface UsageLedger {
   record(input?: UsageRecord): string | undefined
   /** 当前账号；limit 默认 50、整数 1..200。共享调用不按关联请求重复计入总账。 */
   report(options?: {requestId?: string; chatId?: ChatId; limit?: number}): UsageReport
+  /** 当前账号的 Token 仪表盘；只读 service_calls 的 llm 与 embedding 调用，不包含金额。 */
+  dashboard(options?: TokenDashboardOptions): TokenDashboard
 }
 export interface Api {
   id: string; source: 'builtin' | 'user'; dir: string; apiVersion: number; version: string

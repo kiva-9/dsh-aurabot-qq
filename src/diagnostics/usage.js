@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 export const RANGES = ['today', '7d', '30d', 'all']
 const DAY_MS = 86_400_000
-const SHANGHAI_MS = 8 * 3_600_000 // 中国没有夏令时，自然日按 UTC+8 算
+const SHANGHAI_MS = 8 * 3_600_000 // 自然日固定按 UTC+8 算，不采用历史夏令时
 
 /** today / 7d / 30d（含今天的自然日）/ all → [from, to)。 */
 export function rangeWindow(range, now = Date.now()) {
@@ -21,6 +21,33 @@ const TOKEN_COLUMNS = `COUNT(*) calls,
   COALESCE(SUM(input_tokens), 0) inputTokens, COALESCE(SUM(output_tokens), 0) outputTokens, COALESCE(SUM(cached_tokens), 0) cachedTokens,
   COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) + COALESCE(SUM(CASE WHEN service = 'llm' THEN cached_tokens END), 0) totalTokens`
 const TOKEN_NOTE = '只统计服务返回的 token 用量；合计包含缓存读取，缺失值不计入合计，不做费用推算。'
+const DASHBOARD_NOTE = '只统计 LLM 和 embedding 服务返回的 token；LLM 合计加上缓存读取，embedding 缓存已包含在输入中，不重复计算；缺失值不计入合计，不做费用推算。'
+const DASHBOARD_RANGES = [...RANGES, 'custom']
+const MAX_DASHBOARD_MONTHS = 1200
+const DASHBOARD_COLUMNS = `${TOKEN_COLUMNS}, COUNT(input_tokens) inputCallsWithUsage,
+  COUNT(output_tokens) outputCallsWithUsage, COUNT(cached_tokens) cachedCallsWithUsage`
+const ZERO_TOKENS = { calls: 0, callsWithUsage: 0, incompleteCalls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, totalTokens: 0,
+  inputCallsWithUsage: 0, outputCallsWithUsage: 0, cachedCallsWithUsage: 0 }
+
+// 日期参数只能是存在的 UTC+8 自然日。不要依赖 Date.parse 的宽松归一化（如 2 月 30 日）。
+function dashboardDate(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new RangeError('日期必须是 YYYY-MM-DD')
+  const [year, month, day] = value.split('-').map(Number)
+  if (year < 1970 || year > 9999) throw new RangeError('日期年份须在 1970 至 9999 之间')
+  const utc = Date.UTC(year, month - 1, day), date = new Date(utc)
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) throw new RangeError('日期不存在')
+  return utc - SHANGHAI_MS
+}
+const shanghaiDay = (time) => Math.floor((time + SHANGHAI_MS) / DAY_MS) * DAY_MS - SHANGHAI_MS
+const monthNumber = (time) => {
+  const date = new Date(time + SHANGHAI_MS)
+  return date.getUTCFullYear() * 12 + date.getUTCMonth()
+}
+const dateKey = (time) => {
+  const date = new Date(time + SHANGHAI_MS)
+  return `${String(date.getUTCFullYear()).padStart(4, '0')}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`
+}
+const monthKey = (month) => `${String(Math.floor(month / 12)).padStart(4, '0')}-${String(month % 12 + 1).padStart(2, '0')}`
 
 /** Local accounting evidence; never infers a currency amount from tokens or status. */
 export function createUsageLedger({storage,getAccount}) {
@@ -107,5 +134,64 @@ export function createUsageLedger({storage,getAccount}) {
       buckets:key?db.all(`SELECT ${key} key,${TOKEN_COLUMNS} FROM service_calls WHERE ${where} GROUP BY key ORDER BY key`,...args):[],
       generatedAt:Date.now(),note:TOKEN_NOTE}
   }
-  return {record,report,aggregate}
+  /** 仪表盘的总计、模型和趋势共用同一条只读查询；区间右边界不包含。 */
+  function dashboard({ range = '7d', chatId, startDate, endDate, now = Date.now() } = {}) {
+    if (!DASHBOARD_RANGES.includes(range)) throw new RangeError('range 不对')
+    if (!Number.isFinite(now) || !Number.isSafeInteger(now) || now < 0) throw new RangeError('当前时间不对')
+    if (chatId != null && typeof chatId !== 'string') throw new RangeError('chatId 不对')
+    const account = String(getAccount()), hasChat = Boolean(chatId)
+    let from, to
+    if (range === 'custom') {
+      from = dashboardDate(startDate)
+      const end = dashboardDate(endDate)
+      if (end < from) throw new RangeError('结束日期不能早于开始日期')
+      to = end + DAY_MS
+    } else {
+      ({ from, to } = rangeWindow(range, now))
+    }
+
+    const filter = "account_id=? AND started_at>=? AND started_at<? AND service IN ('llm','embedding')" + (hasChat ? ' AND chat_id=?' : '')
+    const args = () => [account, from, to, ...(hasChat ? [chatId] : [])]
+    if (range === 'all') {
+      const first = db.get(`SELECT MIN(started_at) first FROM service_calls WHERE ${filter}`, ...args()).first
+      // 无匹配记录不从 1970 年开始补点。
+      if (first == null) return { range, from, to, timeZone: 'Etc/GMT-8', generatedAt: now, note: DASHBOARD_NOTE,
+        totals: { ...ZERO_TOKENS }, models: [], trend: { granularity: 'day', points: [] } }
+      from = shanghaiDay(first)
+    }
+
+    const firstMonth = monthNumber(from), lastMonth = monthNumber(to - 1)
+    if (lastMonth - firstMonth + 1 > MAX_DASHBOARD_MONTHS) throw new RangeError('时间范围不能超过 1200 个自然月')
+    const granularity = Math.ceil((to - from) / DAY_MS) > 366 ? 'month' : 'day'
+    // 先截取整秒：SQLite 的浮点日期转换可能把末秒的亚毫秒四舍五入到次日。
+    const timeKey = granularity === 'month'
+      ? "strftime('%Y-%m', CAST(started_at / 1000 AS INTEGER), 'unixepoch', '+8 hours')"
+      : "strftime('%Y-%m-%d', CAST(started_at / 1000 AS INTEGER), 'unixepoch', '+8 hours')"
+    // 每个分组都来自相同的 SQLite 语句快照；输入值只作为绑定参数，不拼入 SQL。
+    const rows = db.all(`WITH filtered AS (
+      SELECT service,model,started_at,input_tokens,output_tokens,cached_tokens,usage_complete FROM service_calls WHERE ${filter}
+    )
+    SELECT 'total' kind,NULL key,${DASHBOARD_COLUMNS} FROM filtered
+    UNION ALL SELECT 'model' kind,${GROUP_KEYS.model} key,${DASHBOARD_COLUMNS} FROM filtered GROUP BY key
+    UNION ALL SELECT 'trend' kind,${timeKey} key,${DASHBOARD_COLUMNS} FROM filtered GROUP BY key`, ...args())
+    const counts = ({ kind, key, ...values }) => values
+    const totals = counts(rows.find(row => row.kind === 'total'))
+    const models = rows.filter(row => row.kind === 'model').map(row => ({ key: row.key, ...counts(row) }))
+      .sort((a, b) => b.totalTokens - a.totalTokens || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    const grouped = new Map(rows.filter(row => row.kind === 'trend').map(row => [row.key, counts(row)]))
+    const points = []
+    if (granularity === 'day') {
+      for (let day = from; day < to; day += DAY_MS) {
+        const key = dateKey(day)
+        points.push({ key, ...(grouped.get(key) || ZERO_TOKENS) })
+      }
+    } else {
+      for (let month = firstMonth; month <= lastMonth; month++) {
+        const key = monthKey(month)
+        points.push({ key, ...(grouped.get(key) || ZERO_TOKENS) })
+      }
+    }
+    return { range, from, to, timeZone: 'Etc/GMT-8', generatedAt: now, note: DASHBOARD_NOTE, totals, models, trend: { granularity, points } }
+  }
+  return {record,report,aggregate,dashboard}
 }

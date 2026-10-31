@@ -2,7 +2,7 @@
 
 本版本包含 Issue #16 的选择性移植实现，处于实机验收前阶段；范围、开关和验证清单见 [实现交接](docs/AUDIT16-IMPLEMENTATION.md)。
 
-**2.0.0-rc.1，候选版本。** Aurabot 是 DeepSeek Harness（DSH）插件，经 SnowLuma / OneBot v11 连接独立 QQ 号，提供聊天、人设、范围化记忆，以及可选的语音、表情、搜索、生图和翻唱。
+**2.0.0-rc.2，候选版本。** Aurabot 是 DeepSeek Harness（DSH）插件，经 SnowLuma / OneBot v11 连接独立 QQ 号，提供聊天、人设、范围化记忆，以及可选的语音、表情、搜索、生图和翻唱。
 
 本次本机整合状态（2026-10-29）：**原版全量备份已校验，候选版本已安装到实际 DSH**。指定 Magpie 模型、Cloudflare BGE-M3、GRSAI 生图与参考再生成、StepFun TTS、本地 SenseVoice、Tavily 搜索与正文提取，以及主人私聊的文字/图片/语音投递已有真实验证。范围隔离、故障恢复和面板编辑保存另有自动化与界面测试；完整结果和未覆盖的场景见 [验证记录](docs/VALIDATION-2026-10-29.md)。
 
@@ -14,11 +14,19 @@ QQ ⇄ SnowLuma / OneBot ⇄ Aurabot ⇄ DSH 会话
                           └─ 资产文件、可重建检索索引、配置与扩展
 ```
 
-DSH 侧栏的 **Aurabot** 面板按功能分开：连接、人格、权限、聊天、模型、语音、表情包、生图、搜索、主动搭话、心情、记忆、检索与索引、表达与黑话、任务、扩展、诊断等。操作说明见 [使用手册](docs/USER-MANUAL.md)，扩展接口见 [API 2](src/modules/API.md) 和 [类型声明](src/modules/aurabot.d.ts)。
+DSH 侧栏的 **Aurabot** 面板按功能分开：连接、人格、权限、聊天、模型、语音、表情包、生图、搜索、主动搭话、心情、记忆、检索与索引、表达与黑话、任务、Token 统计、扩展、诊断等。操作说明见 [使用手册](docs/USER-MANUAL.md)，扩展接口见 [API 2](src/modules/API.md) 和 [类型声明](src/modules/aurabot.d.ts)。
 
 ## 安装与替换使用
 
 需要 Windows、支持插件的 DSH 桌面版、符合本项目 Node.js 要求的宿主运行时，以及机器人 QQ 小号。当前最低 Node.js 声明为 22.13.0，开发环境见 [开发说明](docs/DEVELOPMENT.md)。自行安装并配置 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)，由本人阅读、同意其协议后再接入机器人账号。
+
+可以直接从本 fork 的 GitHub 仓库安装。先退出 DSH 并备份当前数据，再执行：
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "https://github.com/kiva-9/dsh-aurabot-qq#main"
+```
+
+验收时建议把 `#main` 换成目标版本的完整提交 SHA，锁定已检查的代码；更新后再核对实际安装版本。该命令更新同名插件的代码，不负责迁移两个分叉之间的数据。从本 fork 更新到本次 Token 面板版本不需要改配置或数据库结构；如果当前运行的是上游版本，应先准备匹配的 fork 数据快照，不能叠加两个版本的数据目录。安装可能触发插件重载，运行中的机器人应留到维护窗口再更新。
 
 测试本地候选版本时，将下列路径替换为实际仓库目录，在 DSH 停止使用旧插件并完成备份后安装：
 

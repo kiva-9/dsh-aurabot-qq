@@ -1,6 +1,6 @@
 # Aurabot 扩展接口说明（插件 v{{VERSION}} · 扩展接口 v{{API}}）
 
-本文对应 **2.0.0-rc.1 / API 2**。运行时把本文件和 `aurabot.d.ts` 复制到数据目录 `modules/`；运行时副本会更新，自己的模块请放在 `modules/<id>/`。
+本文对应 **2.0.0-rc.2 / API 2**。运行时把本文件和 `aurabot.d.ts` 复制到数据目录 `modules/`；运行时副本会更新，自己的模块请放在 `modules/<id>/`。
 
 API 2 仍接受声明 `api:1` 的模块，但不会恢复旧版全局记忆、心情或未经范围核验的读取方式。新模块声明 `api:2`。下面描述当前代码契约；中间安装包的部分真实样例已测，最终整合包验收由主线程另行汇总。
 
@@ -261,7 +261,7 @@ modules[id].enabled 与功能配置是两层开关；模块加载不等于服务
 | mood | state/current/label/nudge/reset/observe/judge/effects/contextLine/stop；account/chat/persona 必填。关键词判断默认开启、模型判断默认关闭；只影响短期表达，明确请求/承诺不受阻断 |
 | learning | list/get/upsert/update/transition/history/evidence/sources/enqueue/learn/checkpoint/select/contextFor/stop；表达/黑话分开。learnEnabled/useEnabled 默认 false，私聊学习默认禁止 |
 | retrieval | prepareContext/contextFor/recall/queryImages/materializeReference/assertReferences/health/status/dispose；默认关闭，启动不自动 probe 付费模型，面板显式探测后开放对应通道 |
-| token-meter | summary({range,chatId?,groupBy?})；range 为 today/7d/30d/all，自然日按 Asia/Shanghai。只读 service_calls，不含金额；totalTokens 含缓存读取。GET /token-meter/summary |
+| token-meter | summary({range,chatId?,groupBy?})；range 为 today/7d/30d/all，自然日固定按 UTC+8。只读 service_calls，不含金额；totalTokens 包含 LLM 缓存读取，embedding 缓存已含在输入中。GET /token-meter/summary；dashboard(options) 及 GET /token-meter/dashboard 见下 |
 | tasks | planner 与请求授权、wait/stop/listTasks/cancelTask 等；GET /tasks/list、POST /tasks/cancel，面板传 chatId |
 | stickers | list/get/selectForReply/collect/addFromBuffer/approve/reject/disable/remove/queueStatus/reconcileSync/stop 等，必须有聊天范围。本地保存、审核、分析、QQ 收藏同步各有状态 |
 | voice | speak(text,profile) → Promise<{file,engine}>；外部 OpenAI 兼容 TTS/固定 HTTP，默认 provider:none，本地脚本另行开启 |
@@ -269,6 +269,10 @@ modules[id].enabled 与功能配置是两层开关；模块加载不等于服务
 | search | 默认关闭，Tavily 搜索/提取和参考图复核；候选不是自动批准的生图引用 |
 | song/bili/speakup | 翻唱/B站/主动搭话分别受配置权限与回执约束；song/bili 默认关闭，speakup 功能默认开启但受总开关和试运行约束 |
 | qq-tools/group-admin/profile/contacts | QQ、群管理、资料和联系人工具，授权以执行前检查为准 |
+
+`GET /token-meter/dashboard` 返回当前账号同一窗口的 Token 总计、模型分组和趋势，只统计 `llm` 与 `embedding` 调用；不带 `chatId` 时包括账号的后台调用，带上则只统计该聊天。参数 `range=today|7d|30d|all|custom`，默认 `7d`；`custom` 必须提供真实的 `startDate`、`endDate`（`YYYY-MM-DD`，含结束日）。日期按固定 UTC+8（`Etc/GMT-8`）自然日计算，年份为 1970–9999，最多跨 1200 个自然月；错误参数返回 `{ok:false,message}`。预设范围截至查询时刻，`all` 从首条匹配记录开始，没有记录时趋势为空。
+
+成功返回 `{ok:true,range,from,to,timeZone,generatedAt,note,totals,models,trend}`。`from`、`to` 是毫秒时间戳，窗口为 `[from,to)`；`trend.granularity` 为 `day` 或 `month`（超过 366 天按月），`trend.points` 补齐空期，`key` 分别为 `YYYY-MM-DD` 或 `YYYY-MM`。模型按 `totalTokens` 降序、名称升序排序，缺少名称归入 `(unknown)`。每个总计、模型和趋势点都有 `calls`、`callsWithUsage`、`incompleteCalls`、`inputTokens`、`outputTokens`、`cachedTokens`、`totalTokens`；额外的 `inputCallsWithUsage`、`outputCallsWithUsage`、`cachedCallsWithUsage` 分别统计字段非空的调用（含真实 0），可用于区分未返回与返回零。缺失字段不计入总和，所有数字都不代表费用。
 
 retrieval 的文本/图片/联合空间独立配置，能力取决于协议、模态、维度、前缀、预处理与探针；不能因模型名或维数相同就混用向量。索引是可重建派生数据，词法降级、候选截断和 needsRebuild 要如实展示。历史图按 occurrence 授权，asset 字节相同不授予跨聊天权限；引用还要绑定请求者、使用前复核。
 

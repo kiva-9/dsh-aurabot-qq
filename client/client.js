@@ -165,6 +165,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-table{width:100%;border-collapse:collapse;font-size:12.5px}
 .ab-table th{text-align:left;color:var(--ab-sub);font-weight:500;padding:6px 8px;border-bottom:1px solid var(--ab-line)}
 .ab-table td{padding:6px 8px;border-bottom:1px solid var(--ab-line)}
+.ab-token-ranges{display:flex;gap:6px;flex-wrap:wrap}
+.ab-token-ranges button[aria-pressed=true]{background:var(--ab-foam-2);border-color:var(--ab-sea);color:var(--ab-deep);font-weight:600}
+.ab-token-table-wrap,.ab-token-chart-scroll{max-width:100%;overflow-x:auto}
+.ab-token-table{min-width:690px;font-variant-numeric:tabular-nums}
+.ab-token-table th[scope=row]{text-align:left;overflow-wrap:anywhere;min-width:130px}
+.ab-token-chart-scroll{border:1px solid var(--ab-line);border-radius:10px;background:var(--ab-card-2)}
+.ab-token-chart-scroll svg{display:block;max-width:none}
+.ab-token-chart-scroll svg:focus-visible{outline:2px solid var(--ab-sea);outline-offset:-3px}
+.ab-token-chart-detail{min-height:1.6em;margin:8px 0 0;font-variant-numeric:tabular-nums}
+.ab-token-stat .n{font-size:clamp(18px,2.8vw,28px);overflow-wrap:anywhere}
+.ab-token-stat-status{margin-top:4px;color:var(--ab-sub);font-size:12px}
+.ab-token-filters .ab-input[type=date]{width:165px}
 .ab-flex{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .ab-spacer{flex:1}
 .ab-muted{color:var(--ab-sub)}
@@ -457,11 +469,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { id: 'bili', label: 'B站', flag: 'bili.enabled' },
       { id: 'local', label: '本地接口' },
       { id: 'modules', label: '扩展' },
+      { id: 'token-meter', label: 'Token 统计' },
       { id: 'diagnostics', label: '诊断' },
       { id: 'logs', label: '日志' },
     ]
     // 内置标签页属于哪个模块：模块都没在跑就不显示这一页
-    const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], search: ['search'], speakup: ['speakup'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['media-memory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'] }
+    const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], search: ['search'], speakup: ['speakup'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['media-memory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], 'token-meter': ['token-meter'] }
     const modOn = (st, id) => (st.modules || []).some((m) => m.id === id && m.running)
     function ModOff({ name }) {
       return h(Card, { title: name }, h('div', { className: 'ab-muted ab-small' }, '「' + name + '」模块关着，这部分用不了。要用的话去「扩展」页把它打开。'))
@@ -1565,6 +1578,197 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     const SOURCE = { tool: '她自己记的', auto: '每日整理', panel: '你加的', event: '她的经历', import: '导入的' }
+
+    // Token 统计只读取账本；字段覆盖率用于区分真实的 0 和服务未返回。
+    const TOKEN_METRICS = [
+      { key: 'inputTokens', label: '输入', count: 'inputCallsWithUsage' },
+      { key: 'outputTokens', label: '输出', count: 'outputCallsWithUsage' },
+      { key: 'cachedTokens', label: '缓存', count: 'cachedCallsWithUsage' },
+      { key: 'totalTokens', label: '已记录合计', count: 'callsWithUsage' },
+    ]
+    const TOKEN_INCOMPLETE_HINT = '包含明确标记 usageComplete=false、缺少输入，或聊天模型缺少输出的调用；缓存未返回不会单独计入。'
+    const tokenNumber = n => n == null || !Number.isFinite(Number(n)) ? '未提供' : Number(n).toLocaleString('zh-CN')
+    const tokenAxisNumber = n => new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
+    function tokenCell(row, metric) {
+      const calls = Number(row?.calls) || 0, value = row?.[metric.key]
+      if (value == null || !Number.isFinite(Number(value))) return { text: '未返回', value: '未返回', plot: null }
+      if (!calls) return { text: tokenNumber(value), value: tokenNumber(value), plot: Number(value) }
+      const count = row?.[metric.count]
+      const covered = count == null ? null : Number(count)
+      if (covered === 0 || (covered == null && Number(row.callsWithUsage) === 0)) return { text: '未返回', value: '未返回', plot: null }
+      const partial = metric.key === 'totalTokens'
+        ? Number(row.incompleteCalls) > 0
+        : covered == null ? Number(row.incompleteCalls) > 0 : covered < calls
+      if (partial) return { text: '已记录 ' + tokenNumber(value) + '（未完整返回）', value: tokenNumber(value), status: '已记录部分用量', plot: Number(value) === 0 ? null : Number(value) }
+      return { text: tokenNumber(value), value: tokenNumber(value), plot: Number(value) }
+    }
+    function tokenDateValid(value) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+      const date = new Date(value + 'T00:00:00Z')
+      return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+    }
+    const tokenFilterKey = f => JSON.stringify([f.range, f.range === 'custom' ? f.startDate : '', f.range === 'custom' ? f.endDate : '', f.chatId.trim()])
+    function tokenDateLabel(value) {
+      if (!Number.isFinite(Number(value))) return '—'
+      const date = new Date(Number(value) + 8 * 60 * 60 * 1000)
+      if (!Number.isFinite(date.getTime())) return '—'
+      return String(date.getUTCFullYear()).padStart(4, '0') + '/' + String(date.getUTCMonth() + 1).padStart(2, '0') + '/' + String(date.getUTCDate()).padStart(2, '0')
+    }
+
+    function TokenTrend({ trend, metric }) {
+      const [selected, setSelected] = useState(0)
+      const points = trend?.points || []
+      const [containerWidth, setContainerWidth] = useState(0), chartRef = useRef(null)
+      useEffect(() => {
+        const element = chartRef.current
+        if (!element) return
+        const measure = () => setContainerWidth(Math.max(0, Math.floor(element.clientWidth || 0)))
+        measure()
+        if (typeof ResizeObserver !== 'undefined') {
+          const observer = new ResizeObserver(measure)
+          observer.observe(element)
+          return () => observer.disconnect()
+        }
+        if (typeof window !== 'undefined') {
+          window.addEventListener('resize', measure)
+          return () => window.removeEventListener('resize', measure)
+        }
+      }, [!!points.length])
+      if (!points.length) return h(Empty, { text: '当前范围没有趋势数据' })
+      const width = Math.max(560, containerWidth, Math.min(10000, points.length * 28 + 84)), height = 230
+      const left = 66, right = 18, top = 18, bottom = 42, plotWidth = width - left - right, plotHeight = height - top - bottom
+      const values = points.map(p => tokenCell(p, metric).plot)
+      const max = Math.max(1, ...values.filter(v => v != null))
+      const xAt = i => points.length === 1 ? left + plotWidth / 2 : left + i * plotWidth / (points.length - 1)
+      const yAt = value => top + plotHeight * (1 - value / max)
+      let path = '', joined = false
+      values.forEach((v, i) => {
+        if (v == null) { joined = false; return }
+        path += (joined ? ' L ' : ' M ') + xAt(i).toFixed(2) + ' ' + yAt(v).toFixed(2)
+        joined = true
+      })
+      const current = Math.max(0, Math.min(points.length - 1, selected)), point = points[current], pointCell = tokenCell(point, metric)
+      const tickStep = Math.max(1, Math.ceil((points.length - 1) / Math.max(1, Math.floor(plotWidth / 100))))
+      const move = e => {
+        const rect = e.currentTarget.getBoundingClientRect()
+        if (!rect.width || points.length === 1) { setSelected(0); return }
+        const chartX = (e.clientX - rect.left) * width / rect.width
+        setSelected(Math.max(0, Math.min(points.length - 1, Math.round((chartX - left) * (points.length - 1) / plotWidth))))
+      }
+      const keyDown = e => {
+        let next = current
+        if (e.key === 'ArrowLeft') next = Math.max(0, current - 1)
+        else if (e.key === 'ArrowRight') next = Math.min(points.length - 1, current + 1)
+        else if (e.key === 'Home') next = 0
+        else if (e.key === 'End') next = points.length - 1
+        else return
+        e.preventDefault(); setSelected(next)
+        const scroller = e.currentTarget?.parentElement
+        if (scroller?.clientWidth) scroller.scrollLeft = Math.max(0, xAt(next) - scroller.clientWidth / 2)
+      }
+      return h('div', null,
+        h('p', { className: 'ab-small ab-muted' }, '按' + (trend.granularity === 'month' ? '月' : '日') + '统计；曲线显示已记录值。未返回或无法确认的零值留空，缺失部分可能使实际值更高。可用鼠标或方向键查看各期。'),
+        h('div', { className: 'ab-token-chart-scroll', ref: chartRef },
+          h('svg', { width, height, viewBox: '0 0 ' + width + ' ' + height, role: 'img', tabIndex: 0,
+            'aria-label': metric.label + ' Token 趋势，使用左右方向键查看各期，Home 和 End 跳至首末期', onMouseMove: move, onKeyDown: keyDown },
+            h('title', null, metric.label + ' Token 趋势'),
+            h('desc', null, '当前 ' + point.key + '：' + pointCell.text + '；共 ' + tokenNumber(point.calls) + ' 次调用。'),
+            ...[0, 0.5, 1].map(f => h('g', { key: 'y' + f, 'aria-hidden': true },
+              h('line', { x1: left, x2: width - right, y1: yAt(max * f), y2: yAt(max * f), stroke: 'var(--ab-line-2)', strokeWidth: 1 }),
+              h('text', { x: left - 8, y: yAt(max * f) + 4, textAnchor: 'end', fill: 'var(--ab-sub)', fontSize: 11 }, tokenAxisNumber(max * f)))),
+            ...points.map((p, i) => (i % tickStep === 0 || i === points.length - 1) && h('text', { key: 'x' + p.key, x: xAt(i), y: height - 16, textAnchor: i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle', fill: 'var(--ab-sub)', fontSize: 11, 'aria-hidden': true }, p.key)),
+            path ? h('path', { d: path, fill: 'none', stroke: 'var(--ab-sea)', strokeWidth: 2, strokeLinejoin: 'round', 'aria-hidden': true }) : null,
+            ...values.map((v, i) => v == null ? null : h('circle', { key: 'p' + points[i].key, cx: xAt(i), cy: yAt(v), r: i === current ? 4 : 2.5, fill: 'var(--ab-sea)', 'aria-hidden': true })),
+            h('line', { x1: xAt(current), x2: xAt(current), y1: top, y2: height - bottom, stroke: 'var(--ab-sky)', strokeWidth: 1, strokeDasharray: '4 4', 'aria-hidden': true }))),
+        h('p', { className: 'ab-token-chart-detail', 'aria-live': 'polite' }, point.key + ' · ' + metric.label + ' ' + pointCell.text + ' token · ' + tokenNumber(point.calls) + ' 次调用'),
+        h('details', { style: { marginTop: 10 } }, h('summary', null, '查看趋势数据表'),
+          h('div', { className: 'ab-token-table-wrap' },
+            h('table', { className: 'ab-table ab-token-table' },
+              h('thead', null, h('tr', null, h('th', { scope: 'col' }, trend.granularity === 'month' ? '月份' : '日期'), ...TOKEN_METRICS.map(m => h('th', { key: m.key, scope: 'col' }, m.label)), h('th', { scope: 'col' }, '调用'), h('th', { scope: 'col', title: TOKEN_INCOMPLETE_HINT }, '核心用量不完整'))),
+              h('tbody', null, ...points.map(p => h('tr', { key: p.key }, h('th', { scope: 'row' }, p.key), ...TOKEN_METRICS.map(m => h('td', { key: m.key }, tokenCell(p, m).text)), h('td', null, tokenNumber(p.calls)), h('td', null, tokenNumber(p.incompleteCalls)))))))))
+    }
+
+    function TokenDashboard() {
+      const initial = { range: '7d', startDate: '', endDate: '', chatId: '' }
+      const [filters, setFilters] = useState(initial), [applied, setApplied] = useState(initial)
+      const [data, setData] = useState(null), [status, setStatus] = useState('loading'), [error, setError] = useState('')
+      const [metricKey, setMetricKey] = useState('totalTokens'), seq = useRef(0)
+      const change = (key, value) => {
+        if (filters[key] === value) return
+        seq.current++
+        setFilters(f => ({ ...f, [key]: value }))
+        setData(null); setError(''); setStatus('idle')
+      }
+      const load = async selected => {
+        const request = ++seq.current
+        setData(null); setError('')
+        if (selected.range === 'custom' && (!tokenDateValid(selected.startDate) || !tokenDateValid(selected.endDate))) {
+          setStatus('idle'); setError('请选择有效的开始和结束日期。'); return
+        }
+        if (selected.range === 'custom' && selected.startDate > selected.endDate) {
+          setStatus('idle'); setError('开始日期不能晚于结束日期。'); return
+        }
+        const query = new URLSearchParams({ range: selected.range })
+        if (selected.range === 'custom') { query.set('startDate', selected.startDate); query.set('endDate', selected.endDate) }
+        if (selected.chatId.trim()) query.set('chatId', selected.chatId.trim())
+        setApplied({ ...selected }); setStatus('loading')
+        try {
+          const result = await get('/token-meter/dashboard?' + query.toString())
+          if (request !== seq.current) return
+          if (!result?.ok) { setStatus('error'); setError(result?.message || '读取 Token 统计失败'); return }
+          setData(result); setStatus('ready')
+        } catch (e) {
+          if (request !== seq.current) return
+          setStatus('error'); setError(e?.message || '读取 Token 统计失败')
+        }
+      }
+      useEffect(() => { load(initial); return () => { seq.current++ } }, [])
+      const modified = tokenFilterKey(filters) !== tokenFilterKey(applied)
+      const metric = TOKEN_METRICS.find(m => m.key === metricKey) || TOKEN_METRICS[3]
+      const totals = data?.totals, calls = Number(totals?.calls) || 0
+      const countsKnown = totals && TOKEN_METRICS.slice(0, 3).every(m => totals[m.count] != null)
+      const rangeOptions = [{ value: 'today', label: '今日' }, { value: '7d', label: '近 7 天' }, { value: '30d', label: '近 30 天' }, { value: 'all', label: '全部' }, { value: 'custom', label: '自定义' }]
+      return h('div', { className: 'ab-grid' },
+        h(Card, { title: 'Token 统计', className: 'ab-token-filters', desc: '只读统计当前账号的聊天模型（LLM）和向量模型（embedding）调用；其他服务用量可在「诊断」查看。按 UTC+8 计算，自定义结束日期包含当天。' },
+          h(Row, { label: '时间范围' }, h('div', { className: 'ab-token-ranges', role: 'group', 'aria-label': 'Token 统计时间范围' },
+            ...rangeOptions.map(o => h('button', { key: o.value, type: 'button', className: 'ab-btn sm', 'aria-pressed': filters.range === o.value, onClick: () => change('range', o.value) }, o.label)))),
+          filters.range === 'custom' ? h(Row, { label: '自定义日期', hint: '包含起始日和结束日' },
+            h('input', { className: 'ab-input', type: 'date', 'aria-label': '开始日期', value: filters.startDate, onChange: e => change('startDate', e.target.value) }),
+            h('span', { className: 'ab-muted' }, '至'),
+            h('input', { className: 'ab-input', type: 'date', 'aria-label': '结束日期', value: filters.endDate, onChange: e => change('endDate', e.target.value) })) : null,
+          h(Row, { label: '聊天范围', hint: '留空为整个当前账号；例如 group:123456' },
+            h('input', { className: 'ab-input wide', 'aria-label': 'Token 统计聊天范围', value: filters.chatId, placeholder: '整个当前账号', onChange: e => change('chatId', e.target.value) })),
+          h('div', { className: 'ab-flex', style: { marginTop: 12 } },
+            h('button', { type: 'button', className: 'ab-btn primary', onClick: () => load(filters) }, '应用筛选'),
+            h('button', { type: 'button', className: 'ab-btn', disabled: modified, onClick: () => load(applied) }, '刷新'),
+            status === 'idle' && !error ? h('span', { className: 'ab-small ab-muted', role: 'status' }, '筛选条件已更改，请点击应用筛选。') : null),
+          error ? h('p', { className: 'ab-note err', role: 'alert' }, error) : null),
+        status === 'loading' ? h(Card, null, h('div', { role: 'status', className: 'ab-muted' }, h('i', { className: 'ab-spin' }), ' 正在读取 Token 统计…')) : null,
+        status === 'ready' && data ? h('div', { className: 'ab-grid' },
+          h('div', { className: 'ab-small ab-muted' }, (data.range === 'all' ? '全部历史' : tokenDateLabel(data.from) + ' 至 ' + tokenDateLabel(Number(data.to) - 1)) + ' · 北京时间 · ' + (applied.chatId.trim() || '整个当前账号')),
+          h('div', { className: 'ab-grid ab-g4' }, ...TOKEN_METRICS.map(m => {
+            const cell = tokenCell(totals, m)
+            return h('div', { key: m.key, className: 'ab-card ab-stat ab-token-stat', role: 'group', 'aria-label': m.label + ' token：' + cell.text },
+              h('div', { className: 'l', 'aria-hidden': true }, m.label + ' token'),
+              h('div', { className: 'n', 'aria-hidden': true }, cell.value),
+              cell.status ? h('div', { className: 'ab-token-stat-status', 'aria-hidden': true }, cell.status) : null)
+          })),
+          h('div', { className: 'ab-note' },
+            h('div', { title: TOKEN_INCOMPLETE_HINT }, '共 ' + tokenNumber(calls) + ' 次调用 · ' + tokenNumber(totals.callsWithUsage) + ' 次返回用量 · ' + tokenNumber(totals.incompleteCalls) + ' 次核心用量不完整'),
+            countsKnown ? h('div', null, '字段返回覆盖：输入 ' + tokenNumber(totals.inputCallsWithUsage) + ' / ' + tokenNumber(calls) + ' · 输出 ' + tokenNumber(totals.outputCallsWithUsage) + ' / ' + tokenNumber(calls) + ' · 缓存 ' + tokenNumber(totals.cachedCallsWithUsage) + ' / ' + tokenNumber(calls)) : null,
+            calls && Number(totals.callsWithUsage) === 0 ? h('div', null, '这些调用未返回用量，不能视为零用量。') : null,
+            h('div', null, '合计只包含已返回的用量；未返回字段不计入。核心用量不完整包括明确标记不完整或缺少必要输入、输出，不含仅缓存未返回的调用。'),
+            h('div', null, 'Embedding 的输入已含缓存，合计不会重复计算；因此输入、输出和缓存相加不一定等于合计。'),
+            h('div', null, data.note || '只统计服务返回的用量；缺失值不计入合计。')),
+          !calls ? h(Empty, { text: '当前范围尚无调用记录' }) : null,
+          h(Card, { title: '按模型统计', desc: '未完整返回的字段只显示已记录值；模型名称缺失时显示 (unknown)。' },
+            data.models?.length ? h('div', { className: 'ab-token-table-wrap' }, h('table', { className: 'ab-table ab-token-table' },
+              h('thead', null, h('tr', null, h('th', { scope: 'col' }, '模型'), ...TOKEN_METRICS.map(m => h('th', { key: m.key, scope: 'col' }, m.label)), h('th', { scope: 'col' }, '调用'), h('th', { scope: 'col', title: TOKEN_INCOMPLETE_HINT }, '核心用量不完整'))),
+              h('tbody', null, ...data.models.map(m => h('tr', { key: m.key }, h('th', { scope: 'row' }, m.key), ...TOKEN_METRICS.map(x => h('td', { key: x.key }, tokenCell(m, x).text)), h('td', null, tokenNumber(m.calls)), h('td', null, tokenNumber(m.incompleteCalls))))))) : h(Empty, { text: '当前范围没有模型记录' })),
+          h(Card, { title: '用量趋势', right: h('div', { className: 'ab-token-ranges', role: 'group', 'aria-label': '趋势指标' },
+            ...TOKEN_METRICS.map(m => h('button', { key: m.key, type: 'button', className: 'ab-btn sm', 'aria-pressed': metricKey === m.key, onClick: () => setMetricKey(m.key) }, m.label))) },
+            h(TokenTrend, { trend: data.trend, metric }))) : null)
+    }
 
     function Diagnostics({ toast }) {
       const [data,setData]=useState(null),[requests,setRequests]=useState([]),[decisions,setDecisions]=useState([]),[timeline,setTimeline]=useState(null),[chatId,setChatId]=useState(''),[error,setError]=useState(''),[latency,setLatency]=useState(null),[replay,setReplay]=useState(null),[refresh,setRefresh]=useState(0)
@@ -3020,7 +3224,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     // ---------------- 面板主体 ----------------
-    const PANEL_GROUPS = { '常用':['overview','connect','persona','access','group','new-features'], '能力':['model','voice','stickers','imagegen','search','speakup','song','bili'], '记忆':['mood','memory','retrieval','media-memory','learning'], '管理':['tasks','local','modules','diagnostics','logs'] }
+    const PANEL_GROUPS = { '常用':['overview','connect','persona','access','group','new-features'], '能力':['model','voice','stickers','imagegen','search','speakup','song','bili'], '记忆':['mood','memory','retrieval','media-memory','learning'], '管理':['tasks','local','modules','token-meter','diagnostics','logs'] }
     const panelGroupOf = id => Object.keys(PANEL_GROUPS).find(g => PANEL_GROUPS[g].includes(id)) || '扩展'
     function AurabotPage() {
       useStyle()
@@ -3120,7 +3324,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const curTab = tabs.find((t) => t.id === tab) || tabs[0]
       const body = curTab.ext ? ExtPage : {
         overview: Overview, 'new-features': NewFeatures, connect: Connect, persona: Persona, access: Access, group: Group, model: Model, voice: Voice,
-        stickers: Stickers, imagegen: ImageGen, search: SearchPanel, speakup: SpeakUp, mood: Mood, memory: ScopedMemory, retrieval: RetrievalPanel, 'media-memory': MediaMemory, learning: Learning, tasks: Tasks, song: Song, bili: Bili, local: LocalApi, modules: Modules, diagnostics: Diagnostics, logs: Logs,
+        stickers: Stickers, imagegen: ImageGen, search: SearchPanel, speakup: SpeakUp, mood: Mood, memory: ScopedMemory, retrieval: RetrievalPanel, 'media-memory': MediaMemory, learning: Learning, tasks: Tasks, song: Song, bili: Bili, local: LocalApi, modules: Modules, 'token-meter': TokenDashboard, diagnostics: Diagnostics, logs: Logs,
       }[curTab.id] || Overview
       // 哪些标签有没保存的改动
       const TAB_KEYS = { 'new-features': ['incomingFiles','group','ignoredSenderQQs','conversation','approvalNotify','crossChatHistory','stickers','voice','speakUp','bili'], connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge', 'participation', 'conversation'], model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], search: ['search'], speakup: ['speakUp'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['mediaMemory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], local: ['local'] }
