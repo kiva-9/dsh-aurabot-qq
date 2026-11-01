@@ -143,7 +143,7 @@ export default {
       if (level === 'full') tools.push(defineTool({
         name: 'qq_send_message',
         description: '主动给某个 QQ 好友或群发一条消息（不是回复当前聊天时用）。target 写 private:QQ号 或 group:群号；只能发给白名单里的人和群。',
-        properties: { target: str('private:QQ号 或 group:群号'), text: str('要发的话，可以用 ||| 分多条、<voice>…</voice> 发语音、<sticker:名字> 发表情') },
+        properties: { target: str('private:QQ号 或 group:群号'), text: str('要发的话，可以用 ||| 分多条、<voice>…</voice> 发语音；不写表情包控制标记') },
         required: ['target', 'text'],
         execute: async ({ target, text }) => {
           const cfg = api.config()

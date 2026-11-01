@@ -650,9 +650,22 @@ export function apply(ctx) {
     return r ? { ok: true, message: '发给主人了，去 QQ 看看' } : { ok: false, message: '没发出去（看日志）' }
   })
 
-  route('/sessions/reset', async () => {
-    const n = hub.resetSessions()
-    return { ok: true, message: n ? `归档了 ${n} 个会话，下一条消息起她会重新开始` : '本来就没有会话' }
+  route('/sessions/reset', async (req) => {
+    const body = await readBody(req, 1024 * 1024)
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'chatIds'))
+      return { ok: false, message: '请求体只能包含 chatIds 数组' }
+    if (!Object.hasOwn(body, 'chatIds')) {
+      const n = hub.resetSessions()
+      return { ok: true, count: n, message: n ? `归档了 ${n} 个会话，下一条消息起她会重新开始` : '本来就没有会话' }
+    }
+    const ids = body.chatIds
+    const validChatId = id => typeof id === 'string' && /^(?:private|group):[0-9]{1,32}$/.exec(id)?.[0] === id
+    if (!Array.isArray(ids) || ids.length < 1 || ids.length > 100 ||
+        ids.some(id => !validChatId(id)))
+      return { ok: false, message: 'chatIds 须为 1 到 100 个 private:数字 或 group:数字，数字不超过 32 位' }
+    // 先验证整个请求，再逐个重置；没有会话的聊天不会被计入。
+    const chatIds = [...new Set(ids)].filter(id => hub.resetChat(id))
+    return { ok: true, chatIds, count: chatIds.length, message: chatIds.length ? `重新开始了 ${chatIds.length} 个聊天` : '指定聊天没有可重开的会话' }
   })
 
   // 人格（旧面板接口，内部已经是带版本的人设库）
