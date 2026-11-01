@@ -185,6 +185,19 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-thumb{width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--ab-line);background:var(--ab-card-2);flex:none}.ab-thumb.big{width:240px;height:auto;max-height:320px;object-fit:contain}
 .ab-mask{margin:10px 0;padding:10px;border:1px dashed var(--ab-line-2);border-radius:10px}.ab-mask-stage{position:relative;display:inline-block;max-width:100%;margin-top:6px}.ab-mask-stage img{display:block;max-width:100%;max-height:420px}.ab-mask-stage canvas{position:absolute;inset:0;width:100%;height:100%;opacity:.55;cursor:crosshair;touch-action:none}
 .ab-psec{border-top:1px solid var(--ab-line);margin-top:14px;padding-top:10px}.ab-psec h4{margin:0 0 6px;font-size:13px;font-weight:600}
+/* 只约束生图页：长任务不能撑宽整列，表单按实际主区宽度换行。 */
+.ab-imagegen{grid-template-columns:minmax(0,1fr);min-width:0;overflow-wrap:anywhere;container:ab-imagegen/inline-size}
+.ab-imagegen>.ab-card{min-width:0}
+.ab-imagegen .ab-flex>b,.ab-imagegen .ab-flex>span{min-width:0;max-width:100%}
+.ab-imagegen .ab-kv{grid-template-columns:auto minmax(0,1fr)}
+.ab-imagegen .ab-kv>*{min-width:0;overflow-wrap:anywhere}
+.ab-imagegen .ab-sel{min-width:0}
+.ab-imagegen .ab-sel-pop{max-width:100%;box-sizing:border-box}
+.ab-imagegen .ab-sel-opt{white-space:normal;overflow-wrap:anywhere}
+.ab-imagegen .ab-thumb.big,.ab-imagegen figure,.ab-imagegen figure img{max-width:100%;box-sizing:border-box}
+@container ab-imagegen (max-width:560px){.ab-imagegen .ab-row{flex-direction:column;gap:6px}.ab-imagegen .ab-row .ab-label{flex:none}.ab-imagegen .ab-row .ab-ctl{align-self:stretch}}
+/* Select 的最小宽度写在内联样式里，极窄时需要覆盖。 */
+@container ab-imagegen (max-width:280px){.ab-imagegen .ab-sel{min-width:0!important;width:100%}}
 .ab-pref-list{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}.ab-pref-item{display:flex;flex-direction:column;gap:6px;width:200px;max-width:100%;padding:8px;border:1px solid var(--ab-line);border-radius:10px;background:var(--ab-card-2)}
 .ab-pref-item label{display:flex;align-items:flex-start;gap:5px;cursor:pointer;overflow-wrap:anywhere}.ab-pref-item label.ab-pref-field{display:block;cursor:default}.ab-pref-item .ab-input{width:100%;box-sizing:border-box}.ab-pref-preview-button{border:0;padding:0;background:transparent;cursor:pointer;text-align:left}.ab-pref-preview-button:focus-visible{outline:2px solid var(--ab-sea);outline-offset:3px}.ab-pref-preview-button img{display:block;width:182px;max-width:100%;height:120px;object-fit:contain;border-radius:6px;background:var(--ab-card)}
 .ab-pref-large img{display:block;max-width:100%;max-height:360px;object-fit:contain;border-radius:8px;margin:8px 0}.ab-pref-id{font-size:11px;overflow-wrap:anywhere;color:var(--ab-sub)}
@@ -3330,7 +3343,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [open, setOpen] = useState(c.profiles[0] ? c.profiles[0].id : '')
       const setProfiles = (list) => setDraft(setPath(draft, 'imageGen.profiles', list))
       const upd = (i, path, v) => setProfiles(c.profiles.map((p, k) => (k === i ? setPath(p, path, v) : p)))
-      return h('div', { className: 'ab-grid' },
+      return h('div', { className: 'ab-grid ab-imagegen' },
         h(Card, { title: '让她画图', right: f.sw('imageGen.enabled'), desc: '聊天里让她画图、照着发来的图画、改图，她会在后台画好直接发出来，聊天不用等。可以接好几个生图服务：她会挑能做这件事的那个（默认的优先）；都做不了就直说，不会悄悄把参考图丢掉改成文生图。' },
           h(Row, { label: '默认服务' }, f.select('imageGen.defaultProfile', c.profiles.map((p) => ({ value: p.id, label: p.name, desc: p.protocol })), { width: 220, placeholder: '先在下面加一个服务' })),
           h(Row, { label: '默认尺寸' }, f.select('imageGen.size', [{ value: '1024x1024', label: '1024 × 1024', desc: '方图' }, { value: '768x1024', label: '768 × 1024', desc: '竖图' }, { value: '1024x768', label: '1024 × 768', desc: '横图' }, { value: '512x512', label: '512 × 512', desc: '小图，更快' }], { width: 200 })),
