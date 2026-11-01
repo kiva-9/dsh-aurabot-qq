@@ -64,6 +64,7 @@ export const DEFAULTS = {
     // capabilities 是主人声明的能力（模式、最多几张输入图、尺寸），和适配器自己能做的取交集
     profiles: [],
     defaultProfile: '',
+    routing: { text: '', singleReference: '', multiReference: '' }, // 留空沿用本地接口 / 默认服务的原有顺序
     size: '1024x1024',
     shape: '',
     observeGenerated: false,
@@ -353,6 +354,12 @@ export function normalize(raw) {
   }
   c.imageGen.profiles = normalizeImageProfiles(c.imageGen.profiles)
   if (!c.imageGen.profiles.some((p) => p.id === c.imageGen.defaultProfile)) c.imageGen.defaultProfile = c.imageGen.profiles[0]?.id || ''
+  const routing = isObj(c.imageGen.routing) ? c.imageGen.routing : {}
+  const imageProfileIds = new Set(c.imageGen.profiles.map((p) => p.id))
+  c.imageGen.routing = Object.fromEntries(IMAGE_ROUTING_KEYS.map((key) => {
+    const id = Object.hasOwn(routing, key) ? routing[key] : ''
+    return [key, validImageRoutingId(id) && (id === '' || imageProfileIds.has(id) || (id === 'local' && c.local.image)) ? id : '']
+  }))
   for (const k of ['provider', 'baseUrl', 'apiKey', 'model']) delete c.imageGen[k]
   if (!isObj(c.imageGen.quota)) c.imageGen.quota = {}
   c.imageGen.quota.perUserPerDay = num(c.imageGen.quota.perUserPerDay, 20, 0, 1000)
@@ -393,6 +400,8 @@ export function normalize(raw) {
 // 面板里不回传原文的字段：路径（几层都行）
 const IMAGE_PROTOCOLS = ['openai', 'gemini', 'comfyui', 'studio', 'http']
 const IMAGE_MODES = ['text', 'reference', 'edit', 'mask']
+const IMAGE_ROUTING_KEYS = ['text', 'singleReference', 'multiReference']
+const validImageRoutingId = (id) => typeof id === 'string' && (id === '' || /^[A-Za-z0-9_-]{1,40}$/.test(id))
 /** 生图服务列表归一化：ID 唯一且合法，协议认识，能力字段规整。 */
 export function normalizeImageProfiles(list) {
   const out = []
@@ -545,6 +554,14 @@ export function mergeFromPanel(current, incoming) {
     const groups=incoming.memory.shareGroups, normalized=normalizeShareGroups(groups)
     if(!Array.isArray(groups)||normalized.length!==groups.length||new Set(groups.map(g=>g.id)).size!==groups.length)throw new Error('共享组需要唯一 ID、至少两个有效聊天以及至少一种共享类别')
     for(let i=0;i<groups.length;i++)if(normalized[i].chats.length!==groups[i].chats.length||normalized[i].categories.length!==groups[i].categories.length)throw new Error('共享组包含重复或无效的聊天/类别')
+  }
+  if (incoming?.imageGen?.routing !== undefined) {
+    const routing = incoming.imageGen.routing
+    if (!isObj(routing)) throw new Error('生图服务优先选择必须是对象')
+    for (const [key, value] of Object.entries(routing)) {
+      if (!IMAGE_ROUTING_KEYS.includes(key)) throw new Error(`不认识的生图服务优先选择：${key}`)
+      if (!validImageRoutingId(value)) throw new Error(`生图服务优先选择 ${key} 必须为空或 1–40 位合法服务 ID`)
+    }
   }
   // 面板错误必须留在草稿里，不能经归一化悄悄删掉一个服务后告诉用户保存成功。
   if (incoming?.imageGen?.profiles !== undefined) {
