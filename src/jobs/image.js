@@ -161,7 +161,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
   }
 
   /**
-   * 给这个请求挑服务：指定了就用指定的（不支持就直说）；没指定先看默认的，默认的不支持再找第一个支持的。
+   * 指定服务优先；否则按最终输入图数量试用配置的偏好，再沿用本地 / 默认 / 其他兼容服务顺序。
    * 返回 { profile, caps } 或 { error }。
    */
   function pickProfile(req, profileId) {
@@ -180,11 +180,20 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       const p = list.find((x) => x.id === profileId)
       return p ? tryOne(p) : { error: `没有叫 ${profileId} 的生图服务` }
     }
+    const count = Array.isArray(req.inputs) ? req.inputs.length : 0
+    const route = count >= 2 ? 'multiReference' : count === 1 ? 'singleReference' : req.mode === 'text' ? 'text' : ''
+    const preferredId = route && cfg().routing?.[route]
+    const preferred = preferredId && list.find((x) => x.id === preferredId)
+    let preferredResult
+    if (preferred) {
+      preferredResult = tryOne(preferred)
+      if (preferredResult.profile) return preferredResult
+    }
     const def = list.find((x) => x.id === (local?.active?.('image') ? 'local' : cfg().defaultProfile)) || list[0]
-    const first = tryOne(def)
+    const first = def === preferred ? preferredResult : tryOne(def)
     if (first.profile) return first
     for (const p of list) {
-      if (p === def) continue
+      if (p === def || p === preferred) continue
       const r = tryOne(p)
       if (r.profile) return r
     }

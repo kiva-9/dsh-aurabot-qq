@@ -834,7 +834,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     /** 参考图库按人设隔离；上传只入库，勾选才会修改编辑框里的草稿。 */
-    function PersonaReferences({ personaId, appearance, draftAppearance, publishedAppearance, onChange, isCurrent, disabled, profile, toast }) {
+    function PersonaReferences({ personaId, appearance, draftAppearance, publishedAppearance, onChange, isCurrent, disabled, toast }) {
       const [library, setLibrary] = useState(null)
       const [uploaded, setUploaded] = useState([])
       const [loading, setLoading] = useState(false)
@@ -995,17 +995,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         ? h('div', { className: 'ab-note warn' }, '图片不可用')
         : h('button', { type: 'button', className: 'ab-pref-preview-button', onClick: () => setPreview({ id, label }), 'aria-label': '放大查看' + label },
           h('img', { src: source(id), alt: label, onError: () => markBroken(id) }))
-      const limit = Number(profile?.capabilities?.maxInputs)
-      const hasLimit = profile && profile.capabilities?.maxInputs !== undefined && Number.isSafeInteger(limit) && limit >= 0
       const radioName = 'persona-reference-default-' + personaId
       const editingDisabled = disabled || !!deleting
 
       return h('section', { 'aria-label': '自拍参考照片', style: { margin: '12px 0' } },
         h('h4', null, '自拍参考照片与造型'),
         h('p', { className: 'ab-desc' }, '照片属于这张人设，所有绑定它的聊天都会使用。给不同服装添加名称和标签，她会根据请求选择一个造型；每次自拍只使用一张照片。上传只加入图库，候选与默认选择须存草稿并发布才生效。'),
-        h('div', { className: 'ab-small ab-muted' }, hasLimit
-          ? '默认生图服务「' + (profile.name || profile.id) + '」配置声明最多 ' + limit + ' 张输入图；每次自拍使用 1 张，实际服务限制可能更低。'
-          : '每次自拍使用 1 张参考照片；生图服务须支持参考图片。'),
+        h('div', { className: 'ab-small ab-muted' }, '需要时会自动加入 1 张自拍参考照片；如另有风格或构图参考，也会计入输入图数量。生图服务须支持请求的模式、数量和尺寸，可在「生图」设置优先服务。'),
         loading && !library ? h('p', { className: 'ab-small', role: 'status' }, '正在读取参考图库…') : null,
         loadError ? h('div', { className: 'ab-note err', role: 'alert' }, loadError, ' ', h(Btn, { small: true, disabled: !!deleting, onClick: load }, '重试读取')) : null,
         library ? h('div', { className: 'ab-small', role: 'status', style: { marginTop: 8 } },
@@ -1013,7 +1009,6 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         library && activeIds.some(unavailable) ? h('div', { className: 'ab-note warn', role: 'alert' }, '有造型照片不可用，请移除或重新上传并选择；处理后才能发布。') : null,
         library && !defaultReady ? h('div', { className: 'ab-note warn', role: 'alert' }, defaultInvalid || chosenDefault || (defaultIsBuiltin && !builtinId)
           ? '默认自拍参考照片不可用，请重新选择默认照片。' : '没有可用的默认自拍参考照片，未指定造型时无法自拍。请上传照片并设为默认' + (canDefault ? '，或选择默认大肥鱼原图' : '') + '。') : null,
-        library && hasLimit && limit < 1 ? h('div', { className: 'ab-note warn' }, '默认生图服务未声明可接收参考图；自拍需要能接收至少一张图片的服务。') : null,
         legacy.length && !variants.length ? h('div', { className: 'ab-note' },
           '这张卡有 ' + legacy.length + ' 张旧版参考照片。' + (legacy.length > 1 && !chosenDefault ? '请先指定默认，或转为造型候选。' : '可转为造型候选并填写名称与标签。') + (legacyConvertible ? '转换时会把旧版选择移到候选中。' : '部分旧版照片未授权，请重新上传或清除旧版选择。'),
           ' ', h(Btn, { small: true, disabled: editingDisabled || legacy.length > 8 || !legacyConvertible, onClick: () => change(current => ({ ...current,
@@ -1363,7 +1358,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(PersonaReferences, { key: 'references:' + card.id + ':' + selectionAtRender, personaId: card.id, appearance: L('appearance') || {}, onChange: setAppearance,
               draftAppearance: card.draft?.layers?.appearance, publishedAppearance: card.published?.layers?.appearance,
               isCurrent: () => selectedRef.current === card.id && selectionSeq.current === selectionAtRender, disabled: !!card.archivedAt,
-              profile: (st.config.imageGen?.profiles || []).find(p => p.id === st.config.imageGen?.defaultProfile), toast }),
+              toast }),
             h(Row, { label: '音色', hint: '留空用「语音」页的默认音色' }, h('input', { className: 'ab-input', value: L('voice.voice') || '', onChange: (e) => setL('voice.voice', e.target.value) })),
             h(Row, { label: '语速' }, h(Range, { min: 0.5, max: 2, step: 0.1, value: L('voice.speed') || 1, onChange: (v) => setL('voice.speed', v), fmt: (v) => Number(v).toFixed(1) + '×' })),
             h(PersonaRvc, { voice: L('voice'), onChange: v => setL('voice', v) })),
@@ -3335,6 +3330,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     ]
     const IMG_MODES = [{ value: 'text', label: '文生图' }, { value: 'reference', label: '参考图生成' }, { value: 'edit', label: '原图编辑' }, { value: 'mask', label: '蒙版编辑' }]
     const IMG_ROLES = [{ value: 'base', label: '底图' }, { value: 'identity', label: '人物长相' }, { value: 'style', label: '风格' }, { value: 'composition', label: '构图' }]
+    const IMG_ROUTES = [
+      { key: 'text', label: '文生图（无输入图）' },
+      { key: 'singleReference', label: '1 张输入图' },
+      { key: 'multiReference', label: '2 张及以上输入图' },
+    ]
     const JOB_CLS = { delivered: 'ok', failed: 'err', unknown: 'warn', canceled: 'dim', delivery_pending: 'warn', cancel_requested: 'warn' }
     const newProfile = (n) => ({ id: 'img-' + Date.now().toString(36).slice(-5), name: '生图服务 ' + n, protocol: 'openai', baseUrl: '', apiKey: '', model: '', capabilities: { modes: ['text'], maxInputs: 4, sizes: [] }, extra: {} })
 
@@ -3345,9 +3345,20 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [checks, setChecks] = useState({})
       const setProfiles = (list) => setDraft(setPath(draft, 'imageGen.profiles', list))
       const upd = (i, path, v) => setProfiles(c.profiles.map((p, k) => (k === i ? setPath(p, path, v) : p)))
+      const localEnabled = !!st.config.local?.image
+      const profileOptions = c.profiles.map((p) => ({ value: p.id, label: p.name, desc: p.protocol }))
+      const defaultMissing = c.defaultProfile && !profileOptions.some((p) => p.value === c.defaultProfile)
+      const routeOptions = (key) => {
+        const id = c.routing?.[key] || ''
+        const options = [{ value: '', label: '跟随默认 / 自动匹配' },
+          ...(localEnabled ? [{ value: 'local', label: '本地画图脚本', desc: '仅文生图；脚本文件存在时可用' }] : []),
+          ...profileOptions.filter((p) => !localEnabled || p.value !== 'local')]
+        if (id && !options.some((p) => p.value === id)) options.push({ value: id, label: '不可用：' + id, desc: '选择其他服务或跟随默认；保存后失效选择会清除' })
+        return options
+      }
       return h('div', { className: 'ab-grid ab-imagegen' },
-        h(Card, { title: '让她画图', right: f.sw('imageGen.enabled'), desc: '聊天里让她画图、照着发来的图画、改图，她会在后台画好直接发出来，聊天不用等。可以接好几个生图服务：她会挑能做这件事的那个（默认的优先）；都做不了就直说，不会悄悄把参考图丢掉改成文生图。' },
-          h(Row, { label: '默认服务' }, f.select('imageGen.defaultProfile', c.profiles.map((p) => ({ value: p.id, label: p.name, desc: p.protocol })), { width: 220, placeholder: '先在下面加一个服务' })),
+        h(Card, { title: '让她画图', right: f.sw('imageGen.enabled'), desc: '聊天里让她画图、照着发来的图画、改图，她会在后台画好直接发出来，聊天不用等。可以接好几个生图服务；自动选择会按下方优先设置和能力挑选，都做不了就直说，不会悄悄把参考图丢掉改成文生图。' },
+          h(Row, { label: '默认服务', hint: defaultMissing ? '此服务已不在列表中，保存后会自动调整默认服务。' : undefined }, f.select('imageGen.defaultProfile', defaultMissing ? [...profileOptions, { value: c.defaultProfile, label: '不可用：' + c.defaultProfile }] : profileOptions, { width: 220, placeholder: '先在下面加一个服务' })),
           h(Row, { label: '默认尺寸' }, f.select('imageGen.size', [{ value: '1024x1024', label: '1024 × 1024', desc: '方图' }, { value: '768x1024', label: '768 × 1024', desc: '竖图' }, { value: '1024x768', label: '1024 × 768', desc: '横图' }, { value: '512x512', label: '512 × 512', desc: '小图，更快' }], { width: 200 })),
           h(Row, { label: '画完后在下次对话中查看作品', hint: '仅限同账号、聊天和人格；模型必须支持图片。' }, f.sw('imageGen.observeGenerated')),
           h(Row, { label: '默认画幅' }, f.select('imageGen.shape', [{value:'',label:'按尺寸'},{value:'square',label:'方图'},{value:'portrait',label:'竖图'},{value:'landscape',label:'横图'}])),
@@ -3358,9 +3369,17 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '每个聊天每日上限' }, f.num('imageGen.quota.perChatPerDay', { min: 0, max: 10000 })),
           h(Row, { label: '每个服务每日上限' }, f.num('imageGen.quota.perProviderPerDay', { min: 0, max: 10000 })),
           h(Row, { label: '等参考图最多', hint: '发来的图还在下载时' }, f.num('imageGen.waitInputSec', { min: 5, max: 300 }), h('span', { className: 'ab-muted' }, '秒')),
-          st.config.local && st.config.local.image ? h('div', { className: 'ab-note' }, '「本地接口」里的画图脚本开着：它会被当成一个只会文生图的服务优先使用。') : null,
+          localEnabled ? h('div', { className: 'ab-note' }, '「本地接口」里的画图脚本已启用；脚本文件存在时，它可作为只支持文生图的服务使用。') : null,
           !c.enabled ? h('div', { className: 'ab-note', style: { marginTop: 10 } }, '还没开启。加好服务、打开右上角开关并保存后，她就会多一个「画图」能力。') : null,
         ),
+        h(Card, { title: '自动选择的优先服务', desc: '未手选服务时，按最终输入图数量先尝试对应优先服务；底图、参考图以及自动加入的人设自拍照都计数。提交前还会检查模式、输入图数量和尺寸；优先服务不适用时沿用原有自动顺序查找。留空跟随默认；提交后服务失败不会自动切换。' },
+          ...IMG_ROUTES.map(({ key, label }) => {
+            const id = c.routing?.[key] || ''
+            const options = routeOptions(key)
+            const missing = id && !(localEnabled && id === 'local') && !profileOptions.some((p) => p.value === id)
+            return h(Row, { key, label, hint: missing ? '此优先服务已不可用；可重新选择，保存时会清除失效选择。' : undefined }, f.select('imageGen.routing.' + key, options, { width: 240 }))
+          }),
+          h('div', { className: 'ab-small ab-muted', style: { marginTop: 8 } }, '工作台中明确选择服务会覆盖这些自动优先设置；本地画图脚本只在「本地接口」启用并保存后显示。')),
         h(Card, { title: '生图服务', desc: '每个服务一种协议。「能力」是你声明这个服务/模型能做什么（会和协议本身能做的取交集）；声明错了，用的时候会被服务拒绝并告诉对方。改完记得保存，再点「检查」。',
           right: h(Btn, { small: true, onClick: () => { const p = newProfile(c.profiles.length + 1); setProfiles([...c.profiles, p]); setOpen(p.id) } }, '＋ 加一个服务') },
           c.profiles.length === 0 ? h(Empty, { icon: '🎨', text: '还没有生图服务' }) : c.profiles.map((p, i) => h('div', { key: p.id, className: 'ab-psec' },
@@ -3371,7 +3390,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h('div', { className: 'ab-spacer' }),
               h(ProfileCheck, { id: p.id, toast, onResult: (r) => setChecks((prev) => ({ ...prev, [p.id]: r })) }),
               h(Btn, { small: true, kind: 'ghost', onClick: () => setOpen(open === p.id ? '' : p.id) }, open === p.id ? '收起' : '编辑'),
-              h(Btn, { small: true, kind: 'danger', onClick: () => { if (confirm('删掉「' + p.name + '」？保存后生效。')) setProfiles(c.profiles.filter((_, k) => k !== i)) } }, '删除')),
+              h(Btn, { small: true, kind: 'danger', onClick: () => { if (confirm('删掉「' + p.name + '」？保存后生效；如果它是优先服务，相应选择会清除。')) setProfiles(c.profiles.filter((_, k) => k !== i)) } }, '删除')),
             p.protocol === 'studio' && checks[p.id]?.studio ? h('div', { className: 'ab-note', style: { marginTop: 8 } },
               h('b', null, '上次检查（基于已保存设置）'),
               h('div', null, checks[p.id].message),
@@ -3511,23 +3530,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         } catch (error) { toast('提交未收到确认，请先刷新任务列表核对，避免重复下单', 'err') }
         finally { setBusy(false) }
       }
+      // 自动选择时保留原图编辑用途；只有手选的服务仅声明参考图时才建议参考再生成。
+      const reuseAsReference = () => {
+        const profile = st.config.imageGen.profiles.find((p) => p.id === form.profileId)
+        return !!(form.profileId && profile?.capabilities?.modes?.includes('reference') && !profile.capabilities.modes.includes('edit'))
+      }
       const editFrom = (j) => {
-        const profileId=form.profileId||j.input?.profileId||st.config.imageGen.defaultProfile
-        const profile=st.config.imageGen.profiles.find(p=>p.id===profileId)
-        const referenceOnly=profile?.capabilities?.modes?.includes('reference')&&!profile.capabilities.modes.includes('edit')
-        setForm({ ...form, profileId, prompt: '', refs: [{ assetId: j.output.assetIds[0], role: referenceOnly?'identity':'base' }], maskAssetId: '', parentJobId: j.id, chatId: j.chatId })
-        toast(referenceOnly?'已经放入参考图；当前服务支持参考再生成，请填写新画面要求':'已经放入底图，请填写修改要求', 'ok')
+        const referenceOnly = reuseAsReference()
+        setForm({ ...form, prompt: '', refs: [{ assetId: j.output.assetIds[0], role: referenceOnly ? 'identity' : 'base' }], maskAssetId: '', parentJobId: j.id, chatId: j.chatId })
+        toast(referenceOnly ? '已经放入参考图，请填写新画面要求；可调整图片用途' : '已经放入底图，请填写修改要求；可调整图片用途', 'ok')
       }
       const reuseArtwork = (item, scope) => {
-        const profileId = form.profileId || st.config.imageGen.defaultProfile
-        const profile = st.config.imageGen.profiles.find(p => p.id === profileId)
-        const referenceOnly = profile?.capabilities?.modes?.includes('reference') && !profile.capabilities.modes.includes('edit')
+        const referenceOnly = reuseAsReference()
         if (form.refs.length) return toast('请先移除当前输入图，再选择图库作品', 'err')
         setForm({ ...form, chatId: scope.chatId, refs: [{ galleryId: item.id, assetId: item.assetId, personaId: scope.personaId, role: referenceOnly ? 'identity' : 'base' }], maskAssetId: '', parentJobId: item.jobId })
         toast(referenceOnly ? '已带入参考图，请填写画面要求' : '已带入底图，请填写修改要求', 'ok')
       }
       const base = form.refs.find((r) => r.role === 'base')
-      const profiles = (st.config.imageGen.profiles || []).map((p) => ({ value: p.id, label: p.name, desc: p.protocol }))
+      const localEnabled = !!st.config.local?.image
+      const profiles = [...(localEnabled ? [{ value: 'local', label: '本地画图脚本', desc: '仅文生图；脚本文件存在时可用' }] : []),
+        ...(st.config.imageGen.profiles || []).filter((p) => !localEnabled || p.id !== 'local').map((p) => ({ value: p.id, label: p.name, desc: p.protocol }))]
+      if (form.profileId && !profiles.some((p) => p.value === form.profileId)) profiles.push({ value: form.profileId, label: '不可用：' + form.profileId, desc: '请选择自动或其他服务' })
       const unsaved = JSON.stringify(draft.imageGen) !== JSON.stringify(st.config.imageGen)
       return h(Fragment, null,
         h(Card, { title: '新任务', desc: '上传参考图并标明用途，有底图时可以涂蒙版指定修改区域。试运行仍会调用生图服务，结果保存在这里；开启实际发送后可补发到 QQ。' },
@@ -3546,7 +3569,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 base ? h(Btn, { small: true, kind: form.maskAssetId ? 'primary' : 'ghost', onClick: () => setMaskFor(base.assetId) }, form.maskAssetId ? '已画蒙版（点开改）' : '画蒙版') : null,
                 form.maskAssetId ? h(Btn, { small: true, kind: 'ghost', onClick: () => setForm({ ...form, maskAssetId: '' }) }, '不用蒙版') : null))),
           maskFor ? h(MaskPainter, { assetId: maskFor, maskAssetId: form.maskAssetId, toast, onCancel: () => setMaskFor(null), onDone: (id) => { setForm({ ...form, maskAssetId: id }); setMaskFor(null) } }) : null,
-          h(Row, { label: '用哪个服务' }, h(Select, { value: form.profileId, width: 220, options: [{ value: '', label: '自动挑（默认的优先）' }, ...profiles], onChange: (v) => setForm({ ...form, profileId: v }) })),
+          h(Row, { label: '用哪个服务', hint: '手选服务不支持时会提示；自动选择会按优先设置及请求能力挑选。' }, h(Select, { value: form.profileId, width: 220, options: [{ value: '', label: '自动挑（按优先设置与能力）' }, ...profiles], onChange: (v) => setForm({ ...form, profileId: v }) })),
           h(Row, { label: '画幅', hint: '与明确尺寸二选一' }, h(Select, { value: form.shape || '', options: [{value:'',label:'默认'},{value:'square',label:'方图'},{value:'portrait',label:'竖图'},{value:'landscape',label:'横图'}], onChange: v => setForm({...form,shape:v,size:v?'':form.size}) })),
           h(Row, { label: '尺寸' }, h(Select, { value: form.size, width: 200, options: [{ value: '', label: '用默认尺寸' }, { value: '1024x1024', label: '1024 × 1024' }, { value: '768x1024', label: '768 × 1024' }, { value: '1024x768', label: '1024 × 768' }], onChange: (v) => setForm({ ...form, size: v, shape: v ? '' : form.shape }) })),
           h(Row, { label: '发到' }, h(Select, { value: form.chatId, width: 220, options: chats.map((c) => ({ value: c, label: c === 'private:' + st.config.ownerQQ ? '主人私聊' : c.replace('group:', '群 ').replace('private:', '私聊 ') })), onChange: (v) => setForm({ ...form, chatId: v }) })),
