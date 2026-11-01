@@ -59,4 +59,33 @@ test('persona panel reference routes work with imagegen off and enforce persona 
   assert.ok(Buffer.isBuffer(image.raw()))
   assert.equal((await call(`/persona/references/asset?id=dafeiyu&assetId=${uploaded.asset.id}`)).ok, false)
   assert.equal((await call('/persona/references/upload', { id: 'other', data: 'data:text/html;base64,YQ==' })).ok, false)
+
+  let history = (await call('/persona/create', { id: 'history', name: '历史测试', layers: { appearance: {} } })).persona
+  const historyAsset = (await call('/persona/references/upload', { id: 'history', data })).asset.id
+  const picked = { appearance: { referenceVariants: [{ assetId: historyAsset, name: '旧装', tags: [] }], defaultReferenceAssetId: historyAsset } }
+  history = (await call('/persona/draft', { id: 'history', layers: picked, editRevision: history.editRevision })).persona
+  assert.equal((await call('/persona/references/delete', { id: 'history', assetId: historyAsset })).code, 'IN_USE')
+  history = (await call('/persona/publish', { id: 'history', editRevision: history.editRevision })).persona
+  const oldRevision = (await call('/persona/revision?id=history&revision=1')).revision
+  history = (await call('/persona/draft', { id: 'history', layers: { appearance: {} }, editRevision: history.editRevision })).persona
+  assert.equal((await call('/persona/references/delete', { id: 'history', assetId: historyAsset })).code, 'IN_USE')
+  history = (await call('/persona/publish', { id: 'history', editRevision: history.editRevision })).persona
+  const removed = await call('/persona/references/delete', { id: 'history', assetId: historyAsset })
+  assert.equal(removed.ok, true)
+  assert.ok(!removed.library.items.some(x => x.id === historyAsset))
+  assert.equal((await call('/persona/references/delete', { id: 'history', assetId: historyAsset })).code, 'NOT_FOUND')
+  assert.equal((await call('/persona/draft', { id: 'history', layers: picked, editRevision: history.editRevision })).ok, false)
+  assert.equal((await call('/persona/rollback', { id: 'history', revision: 1, editRevision: history.editRevision - 1 })).code, 'STALE')
+  assert.ok(!(await call('/persona/references?id=history')).items.some(x => x.id === historyAsset), 'failed rollback cannot restore membership')
+  const copied = (await call('/persona/duplicate', { id: 'history', newId: 'history_copy' })).persona
+  assert.ok(!(await call('/persona/references?id=history_copy')).items.some(x => x.id === historyAsset))
+  assert.equal((await call('/persona/draft', { id: copied.id, layers: picked, editRevision: copied.editRevision })).ok, false)
+  const rolledBack = await call('/persona/rollback', { id: 'history', revision: 1, editRevision: history.editRevision })
+  assert.equal(rolledBack.ok, true)
+  assert.ok((await call('/persona/references?id=history')).items.some(x => x.id === historyAsset && x.inLibrary))
+  assert.deepEqual((await call('/persona/revision?id=history&revision=1')).revision, oldRevision)
+  assert.equal((await call('/persona/references/delete', { id: 'history', assetId: historyAsset })).code, 'IN_USE')
+  assert.equal((await call('/persona/references/delete', { id: 'dafeiyu', assetId: initial.defaultAssetId })).code, 'BUILTIN_REFERENCE')
+  assert.equal((await call('/persona/references/delete', { id: 'other', assetId: initial.defaultAssetId })).code, 'NOT_FOUND')
+  assert.equal((await call('/persona/references/delete')).ok, false, 'GET cannot modify the library')
 })

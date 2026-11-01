@@ -12,7 +12,7 @@ const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Obje
 const asset = (id, more = {}) => ({ id, mime: 'image/jpeg', available: true, inLibrary: true, ...more })
 const list = (items = [], builtin = 'builtin') => ({ ok: true, items: [...(builtin ? [asset(builtin, { inLibrary: false })] : []), ...items], defaultAssetId: builtin, useDefaultReferenceAvailable: true })
 
-function mount({ get, post, appearance = {}, personaId = 'dafeiyu' } = {}) {
+function mount({ get, post, appearance = {}, personaId = 'dafeiyu', draftAppearance, publishedAppearance, confirm = () => true } = {}) {
   const instances = new Map(), calls = [], notices = []; let slots, cursor, effects = [], seen, tree, identity = 0
   const hooks = {
     useState(initial) { const state = slots, i = cursor++; if (!(i in state)) state[i] = typeof initial === 'function' ? initial() : initial; return [state[i], v => { state[i] = typeof v === 'function' ? v(state[i]) : v }] },
@@ -23,12 +23,12 @@ function mount({ get, post, appearance = {}, personaId = 'dafeiyu' } = {}) {
   class FileReader {
     readAsDataURL(file) { queueMicrotask(() => { if (file.fail) this.onerror(); else { this.result = file.data || 'data:image/jpeg;base64,YQ=='; this.onload() } }) }
   }
-  const context = { ...hooks, h, FileReader, URLSearchParams, API: '/fake', Btn: 'Btn',
+  const context = { ...hooks, h, FileReader, URLSearchParams, API: '/fake', Btn: 'Btn', confirm,
     async get(path) { calls.push({ path }); return get ? get(path) : list() },
     async post(path, body) { calls.push({ path, body: plain(body) }); return post ? post(path, body) : { ok: true, asset: asset('new-photo') } },
   }
   runInNewContext(source + '\nglobalThis.parts={PersonaReferences,PersonaReferenceTags}', context)
-  const props = { personaId, appearance: structuredClone(appearance), profile: { id: 'one', name: 'One', capabilities: { maxInputs: 1 } },
+  const props = { personaId, appearance: structuredClone(appearance), draftAppearance, publishedAppearance, profile: { id: 'one', name: 'One', capabilities: { maxInputs: 1 } },
     isCurrent: () => true, toast: (...args) => notices.push(args), onChange: update => { props.appearance = update(props.appearance) } }
   const invoke = (type, args, key) => { if (!instances.has(key)) instances.set(key, []); seen.add(key); slots = instances.get(key); cursor = 0; return type(args) }
   const expand = (node, key) => {
@@ -160,6 +160,106 @@ test('late library and upload responses cannot update a different or reselected 
   oldList.resolve(list([asset('stale-list')])); oldUpload.resolve({ ok: true, asset: asset('stale-upload') }); await ui.flush()
   assert.doesNotMatch(ui.label(ui.render()), /stale-list|stale-upload/)
   assert.deepEqual(ui.notices, []); assert.equal(ui.props.appearance.referenceVariants, undefined)
+})
+
+test('deleting requires clearing unsaved, saved draft and published uses; builtin stays available', async () => {
+  const ap = { text: '保留外观', referenceVariants: [{ assetId: 'local', name: '裙装', tags: [] }], defaultReferenceAssetId: 'local' }
+  const ui = mount({ appearance: ap, draftAppearance: { referenceAssetIds: ['draft'] },
+    publishedAppearance: { referenceVariants: [{ assetId: 'online' }] }, get: () => list([asset('local'), asset('draft'), asset('online'), asset('free')]) })
+  await ui.flush()
+  for (const id of ['local', 'draft', 'online']) assert.equal(ui.btn('从图库删除', ui.card(id)).disabled, true)
+  assert.equal(ui.btn('从图库删除', ui.card('free')).disabled, false)
+  assert.equal(ui.nodes(ui.card('builtin')).some(n => n.type === 'Btn' && ui.label(n) === '从图库删除'), false)
+  assert.match(ui.label(ui.render()), /编辑框已选/); assert.match(ui.label(ui.render()), /草稿或线上仍使用/)
+  assert.match(ui.label(ui.render()), /历史版本的底层图片仍保留/)
+  assert.deepEqual(plain(ui.props.appearance), ap); assert.equal(ui.calls.filter(c => c.body).length, 0)
+  ui.choose('local', false); assert.equal(ui.btn('从图库删除', ui.card('local')).disabled, false)
+  assert.equal(ui.props.appearance.text, '保留外观')
+})
+
+test('cancelled deletion leaves the library unchanged and backend conflicts explain next steps', async () => {
+  const cancelled = mount({ get: () => list([asset('one')]), confirm: () => false }); await cancelled.flush()
+  await cancelled.btn('从图库删除', cancelled.card('one')).onClick(); await cancelled.flush()
+  assert.ok(cancelled.card('one')); assert.equal(cancelled.calls.filter(c => c.body).length, 0)
+  const conflict = mount({ get: () => list([asset('one')]), post: () => ({ ok: false, code: 'IN_USE' }) }); await conflict.flush()
+  await conflict.btn('从图库删除', conflict.card('one')).onClick(); await conflict.flush()
+  assert.ok(conflict.card('one')); assert.match(conflict.label(conflict.render()), /取消选择并保存草稿或发布/)
+  assert.deepEqual(conflict.calls.filter(c => c.body).map(c => c.path), ['/persona/references/delete'])
+})
+
+test('an unselected missing photo can still be removed from the library', async () => {
+  const ui = mount({ get: () => list([asset('missing', { available: false })]), post: () => ({ ok: true, library: list([]) }) })
+  await ui.flush(); assert.match(ui.label(ui.card('missing')), /不可用/)
+  assert.equal(ui.btn('从图库删除', ui.card('missing')).disabled, false)
+  await ui.btn('从图库删除', ui.card('missing')).onClick(); await ui.flush()
+  assert.doesNotMatch(ui.label(ui.render()), /missing/)
+})
+
+test('deletion blocks stale clicks and uploads, defeats older reads, and reupload restores the photo', async () => {
+  const oldList = deferred(), deleteReply = deferred(); let deleted = false
+  const ui = mount({ get: () => oldList.promise, post: path => {
+    if (path === '/persona/references/upload') return { ok: true, asset: asset('new-photo') }
+    if (path === '/persona/references/delete') { deleted = true; return deleteReply.promise }
+  } })
+  ui.render()
+  const upload = () => ui.byAria('上传人设参考照片').onChange({ target: { files: [{ type: 'image/jpeg', size: 10 }], value: 'x' } })
+  upload(); await ui.flush(); assert.ok(ui.card('new-photo'))
+  const staleCheck = ui.nodes(ui.card('new-photo')).find(n => n.type === 'input' && n.props.type === 'checkbox').props
+  const deleting = ui.btn('从图库删除', ui.card('new-photo')).onClick(); ui.render()
+  assert.equal(deleted, true); assert.match(ui.label(ui.render()), /删除中/)
+  staleCheck.onChange({ target: { checked: true } }); upload(); ui.render()
+  assert.equal(ui.props.appearance.referenceVariants, undefined)
+  assert.deepEqual(ui.calls.filter(c => c.body).map(c => c.path), ['/persona/references/upload', '/persona/references/delete'])
+  deleteReply.resolve({ ok: true, library: list([]) }); await deleting; await ui.flush()
+  oldList.resolve(list([asset('new-photo')])); await ui.flush()
+  assert.doesNotMatch(ui.label(ui.render()), /new-photo/)
+  upload(); await ui.flush(); assert.ok(ui.card('new-photo'))
+  assert.equal(ui.props.appearance.referenceVariants, undefined)
+})
+
+test('authoritative deletion responses clear stale local upload caches and preserve unrelated edits', async () => {
+  const ui = mount({ appearance: { text: '未保存的外观', extra: 'keep' }, get: () => list([asset('other')]),
+    post: path => path.endsWith('/upload') ? { ok: true, asset: asset('new-photo') } : { ok: true, library: list([]) } })
+  await ui.flush()
+  ui.byAria('上传人设参考照片').onChange({ target: { files: [{ type: 'image/jpeg', size: 10 }], value: 'x' } }); await ui.flush()
+  assert.ok(ui.card('new-photo'))
+  await ui.btn('从图库删除', ui.card('other')).onClick(); await ui.flush()
+  assert.doesNotMatch(ui.label(ui.render()), /new-photo|other/)
+  assert.deepEqual(plain(ui.props.appearance), { text: '未保存的外观', extra: 'keep' })
+})
+
+test('a fresh library read removes an upload deleted elsewhere', async () => {
+  let reads = 0
+  const ui = mount({ get: () => ++reads === 1 ? { ok: false, message: '读取失败' } : list([]) })
+  await ui.flush()
+  ui.byAria('上传人设参考照片').onChange({ target: { files: [{ type: 'image/jpeg', size: 10 }], value: 'x' } }); await ui.flush()
+  assert.ok(ui.card('new-photo'))
+  await ui.btn('重试读取').onClick(); await ui.flush()
+  assert.doesNotMatch(ui.label(ui.render()), /new-photo/)
+})
+
+test('a stale retry started during deletion cannot resurrect a removed photo', async () => {
+  const retry = deferred(), deletion = deferred(); let reads = 0
+  const ui = mount({ get: () => ++reads === 1 ? { ok: false, message: '读取失败' } : retry.promise,
+    post: path => path.endsWith('/upload') ? { ok: true, asset: asset('new-photo') } : deletion.promise })
+  await ui.flush()
+  ui.byAria('上传人设参考照片').onChange({ target: { files: [{ type: 'image/jpeg', size: 10 }], value: 'x' } }); await ui.flush()
+  const staleRetry = ui.btn('重试读取')
+  const pendingDelete = ui.btn('从图库删除', ui.card('new-photo')).onClick(); ui.render()
+  const pendingRead = staleRetry.onClick()
+  deletion.resolve({ ok: true, library: list([]) }); await pendingDelete; await ui.flush()
+  retry.resolve(list([asset('new-photo')])); await pendingRead; await ui.flush()
+  assert.doesNotMatch(ui.label(ui.render()), /new-photo/)
+})
+
+test('late deletion responses cannot change a different or reselected persona', async () => {
+  const reply = deferred()
+  const ui = mount({ get: path => list([asset(new URL(path, 'http://test').searchParams.get('id') + '-photo')]), post: () => reply.promise })
+  await ui.flush(); const pending = ui.btn('从图库删除', ui.card('dafeiyu-photo')).onClick()
+  ui.switchTo('other'); await ui.flush(); ui.switchTo('dafeiyu'); await ui.flush()
+  reply.resolve({ ok: true, library: list([asset('stale-photo')]) }); await pending; await ui.flush()
+  assert.ok(ui.card('dafeiyu-photo')); assert.doesNotMatch(ui.label(ui.render()), /stale-photo/)
+  assert.deepEqual(ui.notices, [])
 })
 
 test('persona draft saving preserves reference edits and edits made during the save', async () => {

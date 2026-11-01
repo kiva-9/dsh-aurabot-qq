@@ -66,6 +66,124 @@ test('scoped library validates bytes, handles dedup and repairs from matching by
   assert.throws(() => f.references.upload('cat', url(bytes)), /归档/)
 })
 
+test('removing a library item retains grants, rejects saved selections, and is isolated per persona', t => {
+  const f = fixture(t), bytes = png(3, 3, 19)
+  const a = f.references.upload('dafeiyu', url(bytes))
+  assert.equal(f.references.upload('cat', url(bytes)).id, a.id, 'deduplicated bytes have independent memberships')
+  const chosen = { appearance: { referenceAssetIds: [a.id] } }, empty = { appearance: {} }
+  let p = f.store.get('dafeiyu')
+  p = f.store.saveDraft('dafeiyu', { layers: chosen }, { editRevision: p.editRevision })
+  assert.throws(() => f.references.remove('dafeiyu', a.id), e => e.code === 'IN_USE')
+  p = f.store.publish('dafeiyu', { editRevision: p.editRevision })
+  p = f.store.saveDraft('dafeiyu', { layers: empty }, { editRevision: p.editRevision })
+  assert.throws(() => f.references.remove('dafeiyu', a.id), e => e.code === 'IN_USE', 'the published version still uses it')
+  p = f.store.publish('dafeiyu', { editRevision: p.editRevision })
+
+  assert.throws(() => f.storage.db.tx(() => { f.references.remove('dafeiyu', a.id); throw new Error('abort') }), /abort/)
+  assert.ok(f.references.list('dafeiyu').items.some(x => x.id === a.id && x.inLibrary), 'outer transaction rolled back')
+  const library = f.references.remove('dafeiyu', a.id)
+  assert.ok(!library.items.some(x => x.id === a.id))
+  assert.ok(f.references.list('cat').items.some(x => x.id === a.id && x.inLibrary))
+  assert.deepEqual(f.references.asset('dafeiyu', a.id).bytes, bytes, 'historical and queued job grants remain valid')
+  assert.throws(() => f.references.assertSelection('dafeiyu', chosen), /上传/)
+  assert.throws(() => f.references.remove('dafeiyu', a.id), e => e.code === 'NOT_FOUND')
+  assert.throws(() => f.references.remove('dafeiyu', 'other-persona-only'), e => e.code === 'NOT_FOUND')
+  assert.throws(() => f.references.remove('dafeiyu', f.references.defaultFor('dafeiyu').id), e => e.code === 'BUILTIN_REFERENCE')
+
+  // Restart reads the same membership state and an identical upload reauthorizes it.
+  const restarted = createPersonaReferences({ storage: f.storage, store: f.store })
+  assert.ok(!restarted.list('dafeiyu').items.some(x => x.id === a.id))
+  assert.equal(restarted.upload('dafeiyu', url(bytes)).id, a.id)
+  restarted.assertSelection('dafeiyu', chosen)
+  assert.ok(restarted.list('dafeiyu').items.some(x => x.id === a.id && x.inLibrary))
+  f.store.archive('cat')
+  assert.throws(() => restarted.remove('cat', a.id), e => e.code === 'ARCHIVED')
+})
+
+test('missing files can be removed and repaired; a recreated persona does not inherit old authorization', t => {
+  const f = fixture(t), bytes = png(2, 3, 21), a = f.references.upload('cat', url(bytes))
+  unlinkSync(f.storage.assets.pathOf(f.storage.assets.get(a.id)))
+  assert.equal(f.references.list('cat').items.find(x => x.id === a.id).available, false)
+  f.references.remove('cat', a.id)
+  f.store.archive('cat')
+  f.store.remove('cat')
+  f.store.create({ id: 'cat', layers: { appearance: {} } })
+  assert.throws(() => f.references.asset('cat', a.id), /没有这张/)
+  assert.throws(() => f.references.assertSelection('cat', { appearance: { referenceAssetIds: [a.id] } }), /上传/)
+  assert.equal(f.references.upload('cat', url(bytes)).id, a.id)
+  assert.deepEqual(f.references.asset('cat', a.id).bytes, bytes)
+  assert.ok(f.references.list('cat').items.some(x => x.id === a.id && x.inLibrary))
+})
+
+test('an upload cannot grant bytes to a persona recreated during asset storage', t => {
+  const f = fixture(t), put = f.storage.assets.put
+  f.storage.assets.put = (...args) => {
+    const asset = put(...args)
+    f.store.archive('cat')
+    f.store.remove('cat')
+    f.store.create({ id: 'cat', layers: {} })
+    return asset
+  }
+  assert.throws(() => f.references.upload('cat', url(png(2, 3, 26))), e => e.code === 'PERSONA_CHANGED')
+  assert.deepEqual(f.references.list('cat').items, [])
+})
+
+test('all saved reference fields, including a legacy orphan default, prevent removal', t => {
+  const f = fixture(t), a = f.references.upload('cat', url(png(2, 3, 23)))
+  const different = f.references.upload('cat', url(png(2, 3, 24)))
+  let p = f.store.get('cat')
+  const selected = { appearance: { referenceAssetIds: [a.id], referenceVariants: [{ assetId: different.id, name: '', tags: [] }] } }
+  p = f.store.saveDraft('cat', { layers: selected }, { editRevision: p.editRevision })
+  assert.throws(() => f.references.remove('cat', a.id), e => e.code === 'IN_USE', 'inactive legacy array still counts')
+  assert.throws(() => f.references.remove('cat', different.id), e => e.code === 'IN_USE')
+  // Simulate old persisted data predating validation; an orphan default still
+  // counts as a use and is checked before publishing a historical version.
+  f.storage.db.run('UPDATE personas SET draft_json = ? WHERE id = ?', JSON.stringify({ appearance: { defaultReferenceAssetId: a.id } }), 'cat')
+  assert.throws(() => f.references.remove('cat', a.id), e => e.code === 'IN_USE')
+  assert.throws(() => f.references.assertLayersUsable('cat', { appearance: { defaultReferenceAssetId: 'missing' } }), /缺失|损坏/)
+})
+
+test('old histories migrate once, retain immutable revisions after removal, and can be restored', t => {
+  const root = mkdtempSync(join(tmpdir(), 'aurabot-old-history-'))
+  const storage = createStorage({ file: ':memory:', filesDir: join(root, 'assets') })
+  t.after(() => { storage.close(); rmSync(root, { recursive: true, force: true }) })
+  const store = createPersonaStore({ storage }), a = storage.assets.put(png(2, 2, 25), { mime: 'image/png', sourceKind: 'inbound' })
+  let p = store.create({ id: 'old', layers: { appearance: { referenceAssetIds: [a.id] } }, publish: true })
+  p = store.saveDraft('old', { layers: { appearance: {} } }, { editRevision: p.editRevision })
+  p = store.publish('old', { editRevision: p.editRevision })
+  const oldBytes = storage.db.get('SELECT layers_json FROM persona_revisions WHERE persona_id = ? AND revision = 1', 'old').layers_json
+  let refs = createPersonaReferences({ storage, store })
+  assert.ok(refs.list('old').items.some(x => x.id === a.id && x.inLibrary))
+  refs.remove('old', a.id)
+  refs = createPersonaReferences({ storage, store })
+  assert.ok(!refs.list('old').items.some(x => x.id === a.id))
+  assert.equal(storage.db.get('SELECT layers_json FROM persona_revisions WHERE persona_id = ? AND revision = 1', 'old').layers_json, oldBytes)
+  storage.db.tx(() => {
+    const old = store.revision('old', 1)
+    refs.assertLayersUsable('old', old.layers)
+    store.rollback('old', 1, { editRevision: p.editRevision })
+    refs.restoreSelection('old', old.layers)
+  })
+  assert.ok(refs.list('old').items.some(x => x.id === a.id && x.inLibrary))
+  assert.equal(storage.db.get('SELECT layers_json FROM persona_revisions WHERE persona_id = ? AND revision = 1', 'old').layers_json, oldBytes)
+})
+
+test('a queued selfie still resolves its frozen reference after publication changes and library removal', async t => {
+  const f = fixture(t), a = f.references.upload('dafeiyu', url(png(3, 2, 22)))
+  const selected = { appearance: { referenceVariants: [{ assetId: a.id, name: '旧装', tags: [] }], defaultReferenceAssetId: a.id } }
+  let p = f.store.get('dafeiyu')
+  p = f.store.saveDraft('dafeiyu', { layers: selected }, { editRevision: p.editRevision })
+  p = f.store.publish('dafeiyu', { editRevision: p.editRevision })
+  f.setPersona('dafeiyu', selected.appearance)
+  const job = f.enqueue()
+  p = f.store.saveDraft('dafeiyu', { layers: { appearance: {} } }, { editRevision: p.editRevision })
+  f.store.publish('dafeiyu', { editRevision: p.editRevision })
+  f.references.remove('dafeiyu', a.id)
+  await f.runner.drain()
+  assert.equal(f.calls.length, 1)
+  assert.notEqual(f.runner.get(job.id).state, 'failed')
+})
+
 test('existing published references are grandfathered without rewriting revisions; new raw IDs are quarantined', t => {
   const root = mkdtempSync(join(tmpdir(), 'aurabot-persona-ref-migration-'))
   const storage = createStorage({ file: ':memory:', filesDir: join(root, 'assets') })
@@ -108,6 +226,27 @@ test('a deliberately saved builtin remains authorized after the shipped portrait
   assert.notEqual(refs.defaultFor('dafeiyu').id, old.id)
   assert.equal(refs.asset('dafeiyu', old.id).asset.id, old.id)
   refs.assertLayersUsable('dafeiyu', store.revision('dafeiyu', 2).layers)
+})
+
+test('a broken shipped portrait prevents ambiguous deletion until its identity can be verified', t => {
+  const root = mkdtempSync(join(tmpdir(), 'aurabot-builtin-missing-'))
+  const storage = createStorage({ file: ':memory:', filesDir: join(root, 'assets') })
+  t.after(() => { storage.close(); rmSync(root, { recursive: true, force: true }) })
+  const file = join(root, 'builtin.jpg')
+  writeFileSync(file, JPG)
+  const store = createPersonaStore({ storage })
+  store.create({ id: 'dafeiyu', layers: { appearance: {} }, publish: true })
+  const refs = createPersonaReferences({ storage, store, defaultFile: file })
+  const builtin = refs.upload('dafeiyu', `data:image/jpeg;base64,${JPG.toString('base64')}`)
+  const other = refs.upload('dafeiyu', url(png(2, 2, 27)))
+  assert.equal(refs.defaultFor('dafeiyu').id, builtin.id)
+  unlinkSync(file)
+  assert.throws(() => refs.remove('dafeiyu', builtin.id), e => e.code === 'BUILTIN_UNAVAILABLE')
+  assert.throws(() => refs.remove('dafeiyu', other.id), e => e.code === 'BUILTIN_UNAVAILABLE')
+  assert.deepEqual(refs.asset('dafeiyu', builtin.id).bytes, JPG)
+  writeFileSync(file, JPG)
+  assert.throws(() => refs.remove('dafeiyu', builtin.id), e => e.code === 'BUILTIN_REFERENCE')
+  assert.ok(!refs.remove('dafeiyu', other.id).items.some(x => x.id === other.id))
 })
 
 test('selfies choose one frozen outfit, respect explicit identity, and fail clearly without a usable reference', t => {

@@ -25,7 +25,7 @@ test('settings panel renders scoped controls and edits policy without sending re
 test('navigation and polish expose explicit preview before applying changes',()=>{
   assert.match(source,/搜索页面（Alt\+K）/)
   assert.match(source,/e\.altKey.*e\.key\.toLowerCase\(\) === 'k'/)
-  assert.match(source,/post\('\/persona\/polish',\{text:original,section:section\.split/)
+  assert.match(source,/post\('\/persona\/polish',\s*\{\s*text:\s*original,\s*section:\s*section\.split/)
   assert.match(source,/采用到草稿/)
   assert.match(source,/setCandidate\(r\.text\)/)
 })
@@ -34,7 +34,8 @@ test('polish suggestions require an explicit choice and cannot replace edited te
   const code = source.slice(source.indexOf('    function PolishLayer('), source.indexOf('    function Persona('))
   const states = [], calls = [], chosen = []; let cursor = 0
   const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(Boolean) })
-  const ctx = { h, Btn: 'Btn', useState: v => { const i = cursor++; if (!(i in states)) states[i] = v; return [states[i], x => { states[i] = x }] },
+  const ctx = { h, Btn: 'Btn', setTimeout, clearTimeout, useState: v => { const i = cursor++; if (!(i in states)) states[i] = v; return [states[i], x => { states[i] = x }] },
+    useRef: v => { const i = cursor++; return states[i] ||= { current: v } }, useEffect() {},
     post: async (path, body) => { calls.push({ path, body }); return { ok: true, text: '润色建议' } } }
   runInNewContext(code + '\nglobalThis.render=PolishLayer', ctx)
   const render = text => { cursor = 0; return ctx.render({ section: 'identity.core', text, onChoose: v => chosen.push(v), toast() {} }) }
@@ -45,6 +46,23 @@ test('polish suggestions require an explicit choice and cannot replace edited te
   assert.equal(stale.props.disabled, true)
   const apply = all(render('原文')).find(n => n.type === 'Btn' && n.children.includes('采用到草稿'))
   assert.equal(apply.props.disabled, false); apply.props.onClick(); assert.deepEqual(chosen, ['润色建议'])
+})
+
+test('structured layer ignores a late suggestion after a card switch even when text is identical', async () => {
+  const code = source.slice(source.indexOf('    function PolishLayer('), source.indexOf('    function Persona('))
+  const states = [], chosen = []; let cursor = 0, generation = 0, resolve
+  const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(Boolean) })
+  const ctx = { h, Btn: 'Btn', setTimeout, clearTimeout, useEffect() {},
+    useState: value => { const i = cursor++; if (!(i in states)) states[i] = value; return [states[i], next => { states[i] = next }] },
+    useRef: value => { const i = cursor++; return states[i] ||= { current: value } },
+    post: () => new Promise(r => { resolve = r }) }
+  runInNewContext(code + '\nglobalThis.render=PolishLayer', ctx)
+  const render = () => { cursor = 0; const atRender = generation; return ctx.render({ section: 'identity.core', text: '同样的原文', isCurrent: () => atRender === generation, onChoose: value => chosen.push(value) }) }
+  const all = root => { const out = []; const walk = n => { if (n && typeof n === 'object') { out.push(n); (n.children || []).forEach(walk) } }; walk(root); return out }
+  const pending = all(render()).find(n => n.type === 'Btn' && n.children.includes('AI 润色此层')).props.onClick()
+  generation++; render(); generation++; render(); resolve({ ok: true, text: '过期建议' }); await pending
+  const nodes = all(render()); assert.equal(nodes.some(n => n.type === 'Btn' && n.children.includes('采用到草稿')), false)
+  assert.deepEqual(chosen, [])
 })
 
 test('persona edits made during draft saving survive and prevent publishing stale content', async () => {
@@ -67,8 +85,11 @@ test('persona edits made during draft saving survive and prevent publishing stal
   runInNewContext(code+'\nglobalThis.render=Persona',ctx)
   const render=()=>{stateIndex=0;refIndex=0;return ctx.render({st:{config:{persona:{current:'fish'}}},toast(){},reload(){}})}
   const all=root=>{const out=[];const walk=n=>{if(n&&typeof n==='object'){out.push(n);(n.children||[]).forEach(walk)}};walk(root);return out}
-  const publish=all(render()).find(n=>n.type==='Btn'&&n.children.includes('发布'))
+  const initial=all(render()), publish=initial.find(n=>n.type==='Btn'&&n.children.includes('发布'))
+  const oldPolish=initial.find(n=>n.type==='PolishLayer').props
+  assert.equal(oldPolish.isCurrent(),true)
   const pending=publish.props.onClick()
+  assert.equal(oldPolish.isCurrent(),false)
   const editor=all(render()).find(n=>n.type==='textarea'&&String(n.props.placeholder||'').startsWith('身份'))
   editor.props.onChange({target:{value:'保存期间的新编辑'}})
   finish({ok:true,persona:{...card,editRevision:2}})
