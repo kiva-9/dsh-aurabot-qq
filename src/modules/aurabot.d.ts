@@ -1,4 +1,4 @@
-// Aurabot 2.0.0-rc.2 · 扩展 API 2。
+// Aurabot 2.0.0-rc.3 · 扩展 API 2。
 // 运行时复制到 modules/aurabot.d.ts；自己的模块引用 import('../aurabot').AurabotModule。
 // 这些是接口提示，不是运行时授权。api.core/lib/dsh 内部能力不承诺稳定。
 

@@ -147,6 +147,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-thumb{width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--ab-line);background:var(--ab-card-2);flex:none}.ab-thumb.big{width:240px;height:auto;max-height:320px;object-fit:contain}
 .ab-mask{margin:10px 0;padding:10px;border:1px dashed var(--ab-line-2);border-radius:10px}.ab-mask-stage{position:relative;display:inline-block;max-width:100%;margin-top:6px}.ab-mask-stage img{display:block;max-width:100%;max-height:420px}.ab-mask-stage canvas{position:absolute;inset:0;width:100%;height:100%;opacity:.55;cursor:crosshair;touch-action:none}
 .ab-psec{border-top:1px solid var(--ab-line);margin-top:14px;padding-top:10px}.ab-psec h4{margin:0 0 6px;font-size:13px;font-weight:600}
+.ab-pref-list{display:flex;flex-wrap:wrap;gap:10px;margin:8px 0}.ab-pref-item{display:flex;flex-direction:column;gap:6px;width:200px;max-width:100%;padding:8px;border:1px solid var(--ab-line);border-radius:10px;background:var(--ab-card-2)}
+.ab-pref-item label{display:flex;align-items:flex-start;gap:5px;cursor:pointer;overflow-wrap:anywhere}.ab-pref-item label.ab-pref-field{display:block;cursor:default}.ab-pref-item .ab-input{width:100%;box-sizing:border-box}.ab-pref-preview-button{border:0;padding:0;background:transparent;cursor:pointer;text-align:left}.ab-pref-preview-button:focus-visible{outline:2px solid var(--ab-sea);outline-offset:3px}.ab-pref-preview-button img{display:block;width:182px;max-width:100%;height:120px;object-fit:contain;border-radius:6px;background:var(--ab-card)}
+.ab-pref-large img{display:block;max-width:100%;max-height:360px;object-fit:contain;border-radius:8px;margin:8px 0}.ab-pref-id{font-size:11px;overflow-wrap:anywhere;color:var(--ab-sub)}
+.ab-legacy-sections{display:grid;gap:8px;margin-top:8px}.ab-legacy-section{min-width:0;border:1px solid var(--ab-line);border-left:3px solid var(--ab-sky);border-radius:9px;background:var(--ab-card-2);overflow:hidden}.ab-legacy-heading{display:flex;align-items:center;gap:8px;width:100%;padding:9px 10px;border:0;background:transparent;color:var(--ab-text);font:inherit;text-align:left;cursor:pointer}.ab-legacy-heading:focus-visible{outline:2px solid var(--ab-sea);outline-offset:-3px}.ab-legacy-heading b{flex:1;min-width:0;overflow-wrap:anywhere}.ab-legacy-content{padding:0 10px 10px}.ab-legacy-excerpt{margin:0 10px 9px;overflow-wrap:anywhere}
 @media (max-width:760px){.ab-persona{grid-template-columns:1fr}}
 .ab-plist{display:flex;flex-direction:column;gap:6px}
 .ab-pitem{text-align:left;border:1px solid var(--ab-line);background:var(--ab-card);border-radius:10px;padding:10px 12px;cursor:pointer;color:var(--ab-text);font:inherit}
@@ -737,6 +741,200 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div',null,h('b',null,'建议文本'),h('pre',{className:'ab-pre'},candidate),h(Btn,{small:true,disabled:String(text||'')!==source,onClick:()=>{onChoose(candidate);setCandidate('')}},'采用到草稿'),h(Btn,{small:true,kind:'ghost',onClick:()=>setCandidate('')},'保留原文'),String(text||'')!==source?h('p',{className:'ab-note warn'},'原文已变化，请重新生成建议。'):null)) : null)
     }
 
+    function PersonaReferenceTags({ tags, label, disabled, onChange }) {
+      const [value, setValue] = useState('')
+      const clean = value.trim()
+      const canAdd = clean && clean.length <= 32 && tags.length < 8 && !tags.includes(clean)
+      const add = () => { if (canAdd) { onChange([...tags, clean]); setValue('') } }
+      return h('div', { className: 'ab-small' },
+        h('div', null, '标签（最多 8 个）'),
+        h('div', { className: 'ab-flex', style: { gap: 4, margin: '4px 0' } }, tags.map(tag =>
+          h('span', { key: tag, className: 'ab-badge' }, tag, ' ', h('button', { type: 'button', disabled, onClick: () => onChange(tags.filter(t => t !== tag)), 'aria-label': '移除' + label + '的标签' + tag, style: { border: 0, background: 'transparent', color: 'inherit', cursor: 'pointer' } }, '×')))),
+        h('input', { className: 'ab-input', value, maxLength: 32, disabled: disabled || tags.length >= 8, placeholder: '如：夏装、制服', 'aria-label': label + '的新标签', onChange: e => setValue(e.target.value), onKeyDown: e => { if (e.key === 'Enter') { e.preventDefault(); add() } } }),
+        h(Btn, { small: true, disabled: disabled || !canAdd, onClick: add }, '添加标签'))
+    }
+
+    /** 参考图库按人设隔离；上传只入库，勾选才会修改编辑框里的草稿。 */
+    function PersonaReferences({ personaId, appearance, onChange, isCurrent, disabled, profile, toast }) {
+      const [library, setLibrary] = useState(null)
+      const [uploaded, setUploaded] = useState([])
+      const [loading, setLoading] = useState(false)
+      const [loadError, setLoadError] = useState('')
+      const [uploadError, setUploadError] = useState('')
+      const [uploading, setUploading] = useState(false)
+      const [preview, setPreview] = useState(null)
+      const [broken, setBroken] = useState([])
+      const alive = useRef(false)
+      const epoch = useRef(0)
+      const listSeq = useRef(0)
+      const owner = useRef(personaId)
+      owner.current = personaId
+      const valid = (token) => alive.current && epoch.current === token && owner.current === personaId && (!isCurrent || isCurrent())
+      const load = async () => {
+        const token = epoch.current, request = ++listSeq.current
+        setLoading(true); setLoadError('')
+        try {
+          const r = await get('/persona/references?id=' + encodeURIComponent(personaId))
+          if (!valid(token) || request !== listSeq.current) return
+          if (!r.ok || !Array.isArray(r.items)) { setLibrary(null); setLoadError(r.message || '参考图库读取失败，请重试'); return }
+          setLibrary(r)
+          setBroken([])
+        } catch (error) {
+          if (valid(token) && request === listSeq.current) { setLibrary(null); setLoadError('参考图库读取失败，请重试') }
+        } finally {
+          if (valid(token) && request === listSeq.current) setLoading(false)
+        }
+      }
+      useEffect(() => {
+        alive.current = true
+        epoch.current++
+        setLibrary(null); setUploaded([]); setPreview(null); setBroken([]); setUploadError('')
+        load()
+        return () => { alive.current = false; epoch.current++; listSeq.current++ }
+      }, [personaId])
+
+      const upload = async (file) => {
+        if (!file) return
+        setUploadError('')
+        if (!['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(file.type)) return setUploadError('请选择 JPEG、PNG、GIF 或 WebP 图片')
+        if (!file.size || file.size > 5 * 1024 * 1024) return setUploadError('图片大小须大于 0 且不超过 5 MB')
+        const token = epoch.current
+        setUploading(true)
+        try {
+          const data = await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result)
+            reader.onerror = () => reject(new Error('图片读取失败'))
+            reader.onabort = () => reject(new Error('图片读取被取消'))
+            reader.readAsDataURL(file)
+          })
+          if (!valid(token)) return
+          if (typeof data !== 'string' || !/^data:image\/(jpeg|png|gif|webp);base64,/i.test(data)) throw new Error('图片读取失败，请重新选择')
+          const r = await post('/persona/references/upload', { id: personaId, data })
+          if (!valid(token)) return
+          if (!r.ok || !r.asset?.id) { setUploadError(r.message || '图片上传失败'); return }
+          setUploaded(items => [...items.filter(item => item.id !== r.asset.id), { ...r.asset, available: true, inLibrary: true }])
+          setBroken(ids => ids.filter(id => id !== r.asset.id))
+          toast('图片已加入这张人设的图库；请勾选后保存并发布', 'ok')
+        } catch (error) {
+          if (valid(token)) setUploadError(error.message || '图片上传失败，请重试')
+        } finally {
+          if (valid(token)) setUploading(false)
+        }
+      }
+
+      const variants = Array.isArray(appearance?.referenceVariants) ? appearance.referenceVariants : []
+      const legacy = Array.isArray(appearance?.referenceAssetIds) ? appearance.referenceAssetIds : []
+      const selectedIds = variants.map(item => item.assetId)
+      const chosenDefault = appearance?.defaultReferenceAssetId || ''
+      const useDefault = appearance?.useDefaultReference !== false
+      const canDefault = !!library?.useDefaultReferenceAvailable
+      const builtinId = library?.defaultAssetId || ''
+      const map = new Map((library?.items || []).map(item => [item.id, item]))
+      uploaded.forEach(item => map.set(item.id, item))
+      const relevant = new Set([...selectedIds, ...legacy, ...(chosenDefault ? [chosenDefault] : [])])
+      const items = Array.from(map.values())
+      relevant.forEach(id => { if (!map.has(id) && id !== builtinId) items.push({ id, available: false }) })
+      const unavailable = id => !id || broken.includes(id) || (id !== builtinId && (!map.has(id) || map.get(id).available === false))
+      const legacyConvertible = !!library && legacy.every(id => map.has(id) && (map.get(id).inLibrary !== false || id === builtinId))
+      const activeIds = variants.length ? selectedIds : legacy
+      const defaultIsBuiltin = !chosenDefault && useDefault && canDefault && (variants.length > 0 || legacy.length === 0)
+      const defaultId = chosenDefault || (!variants.length && legacy.length === 1 ? legacy[0] : '') || (defaultIsBuiltin ? builtinId : '')
+      const defaultInvalid = !!chosenDefault && !activeIds.includes(chosenDefault)
+      const defaultReady = !defaultInvalid && !unavailable(defaultId)
+      const availableCount = activeIds.filter(id => !unavailable(id)).length
+      const source = id => API + '/persona/references/asset?' + new URLSearchParams({ id: personaId, assetId: id })
+      const markBroken = id => setBroken(ids => ids.includes(id) ? ids : [...ids, id])
+      const updateVariant = (id, patch) => onChange(current => ({ ...current,
+        referenceVariants: (current.referenceVariants || []).map(item => item.assetId === id ? { ...item, ...patch } : item) }))
+      const toggle = (id, checked) => onChange(current => {
+        let list = Array.isArray(current.referenceVariants) ? current.referenceVariants : []
+        if (checked) {
+          const converting = !list.length && (current.referenceAssetIds || []).length > 0
+          if (converting) {
+            if (!legacyConvertible) return current
+            list = current.referenceAssetIds.map(assetId => ({ assetId, name: '', tags: [] }))
+          }
+          if (!list.some(item => item.assetId === id)) {
+            if (list.length >= 8) return current
+            list = [...list, { assetId: id, name: '', tags: [] }]
+          }
+          return { ...current, referenceVariants: list, ...(converting ? { referenceAssetIds: [] } : {}), ...(current.defaultReferenceAssetId && !list.some(item => item.assetId === current.defaultReferenceAssetId) ? { defaultReferenceAssetId: '' } : {}) }
+        }
+        return { ...current, referenceVariants: list.filter(item => item.assetId !== id), ...(current.defaultReferenceAssetId === id ? { defaultReferenceAssetId: '' } : {}) }
+      })
+      const chooseFallback = enabled => onChange(current => {
+        const list = Array.isArray(current.referenceVariants) ? current.referenceVariants : []
+        const old = Array.isArray(current.referenceAssetIds) ? current.referenceAssetIds : []
+        // 转换旧版图后清空旧选择，避免移除最后一个候选时旧图悄悄恢复。
+        return { ...current, ...(!list.length && old.length ? { referenceVariants: old.map(assetId => ({ assetId, name: '', tags: [] })), referenceAssetIds: [] } : {}), defaultReferenceAssetId: '', useDefaultReference: enabled }
+      })
+      const image = (id, label) => unavailable(id)
+        ? h('div', { className: 'ab-note warn' }, '图片不可用')
+        : h('button', { type: 'button', className: 'ab-pref-preview-button', onClick: () => setPreview({ id, label }), 'aria-label': '放大查看' + label },
+          h('img', { src: source(id), alt: label, onError: () => markBroken(id) }))
+      const limit = Number(profile?.capabilities?.maxInputs)
+      const hasLimit = profile && profile.capabilities?.maxInputs !== undefined && Number.isSafeInteger(limit) && limit >= 0
+      const radioName = 'persona-reference-default-' + personaId
+
+      return h('section', { 'aria-label': '自拍参考照片', style: { margin: '12px 0' } },
+        h('h4', null, '自拍参考照片与造型'),
+        h('p', { className: 'ab-desc' }, '照片属于这张人设，所有绑定它的聊天都会使用。给不同服装添加名称和标签，她会根据请求选择一个造型；每次自拍只使用一张照片。上传只加入图库，候选与默认选择须存草稿并发布才生效。'),
+        h('div', { className: 'ab-small ab-muted' }, hasLimit
+          ? '默认生图服务「' + (profile.name || profile.id) + '」配置声明最多 ' + limit + ' 张输入图；每次自拍使用 1 张，实际服务限制可能更低。'
+          : '每次自拍使用 1 张参考照片；生图服务须支持参考图片。'),
+        loading && !library ? h('p', { className: 'ab-small', role: 'status' }, '正在读取参考图库…') : null,
+        loadError ? h('div', { className: 'ab-note err', role: 'alert' }, loadError, ' ', h(Btn, { small: true, onClick: load }, '重试读取')) : null,
+        library ? h('div', { className: 'ab-small', role: 'status', style: { marginTop: 8 } },
+          '当前有 ' + availableCount + ' 个可用造型候选' + (variants.length ? '（已选 ' + variants.length + '/8）' : legacy.length ? '（旧版照片）' : '') + '；默认参考照片' + (defaultReady ? (defaultIsBuiltin ? '：大肥鱼原图' : '已就绪') : '未就绪') + '。') : null,
+        library && activeIds.some(unavailable) ? h('div', { className: 'ab-note warn', role: 'alert' }, '有造型照片不可用，请移除或重新上传并选择；处理后才能发布。') : null,
+        library && !defaultReady ? h('div', { className: 'ab-note warn', role: 'alert' }, defaultInvalid || chosenDefault || (defaultIsBuiltin && !builtinId)
+          ? '默认自拍参考照片不可用，请重新选择默认照片。' : '没有可用的默认自拍参考照片，未指定造型时无法自拍。请上传照片并设为默认' + (canDefault ? '，或选择默认大肥鱼原图' : '') + '。') : null,
+        library && hasLimit && limit < 1 ? h('div', { className: 'ab-note warn' }, '默认生图服务未声明可接收参考图；自拍需要能接收至少一张图片的服务。') : null,
+        legacy.length && !variants.length ? h('div', { className: 'ab-note' },
+          '这张卡有 ' + legacy.length + ' 张旧版参考照片。' + (legacy.length > 1 && !chosenDefault ? '请先指定默认，或转为造型候选。' : '可转为造型候选并填写名称与标签。') + (legacyConvertible ? '转换时会把旧版选择移到候选中。' : '部分旧版照片未授权，请重新上传或清除旧版选择。'),
+          ' ', h(Btn, { small: true, disabled: disabled || legacy.length > 8 || !legacyConvertible, onClick: () => onChange(current => ({ ...current,
+            referenceVariants: (current.referenceAssetIds || []).map(assetId => ({ assetId, name: '', tags: [] })),
+            referenceAssetIds: [], defaultReferenceAssetId: current.defaultReferenceAssetId || (current.referenceAssetIds?.length === 1 ? current.referenceAssetIds[0] : '') })) }, '转为造型候选'),
+          ' ', h(Btn, { small: true, disabled, onClick: () => onChange(current => ({ ...current, referenceAssetIds: [], defaultReferenceAssetId: '' })) }, '清除旧版参考照片')) : null,
+        legacy.length && variants.length ? h('div', { className: 'ab-note warn' }, '这张卡同时保留旧版照片；移除最后一个造型前，请先选择如何处理旧版照片。', ' ',
+          h(Btn, { small: true, disabled, onClick: () => onChange(current => ({ ...current, referenceAssetIds: [] })) }, '清除旧版参考照片'), ' ',
+          h(Btn, { small: true, disabled, onClick: () => onChange(current => ({ ...current, referenceVariants: [], defaultReferenceAssetId: '' })) }, '恢复使用旧版照片')) : null,
+        library && canDefault ? h('div', { className: 'ab-pref-list' },
+          h('div', { className: 'ab-pref-item' },
+            image(builtinId, '默认大肥鱼原图'),
+            h('label', null, h('input', { type: 'radio', name: radioName, checked: defaultIsBuiltin, disabled: disabled || (!variants.length && legacy.length > 0 && (legacy.length > 8 || !legacyConvertible)), onChange: () => chooseFallback(true) }), '默认使用大肥鱼原图'),
+            h('span', { className: 'ab-small ab-muted' }, defaultIsBuiltin ? '当前默认' : '可设为默认')) ) : null,
+        library ? h('label', { className: 'ab-small', style: { display: 'block', margin: '6px 0' } },
+          h('input', { type: 'radio', name: radioName, checked: !chosenDefault && !defaultIsBuiltin && !(!variants.length && legacy.length === 1), disabled: disabled || (!variants.length && legacy.length > 0 && (legacy.length > 8 || !legacyConvertible)), onChange: () => chooseFallback(false) }), ' 不指定默认照片') : null,
+        h('div', { className: 'ab-flex', style: { alignItems: 'center', marginTop: 8 } },
+          h('label', { className: 'ab-small' }, '上传照片（JPEG、PNG、GIF、WebP，最多 5 MB） ',
+            h('input', { type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp', disabled: disabled || uploading, 'aria-label': '上传人设参考照片', onChange: e => { const file = e.target.files && e.target.files[0]; e.target.value = ''; upload(file) } })),
+          uploading ? h('span', { className: 'ab-small', role: 'status' }, '上传中…') : null),
+        uploadError ? h('div', { className: 'ab-note err', role: 'alert' }, uploadError) : null,
+        library && !items.length ? h('p', { className: 'ab-small ab-muted' }, '这张人设还没有上传照片。') : null,
+        library ? h('p', { className: 'ab-small ab-muted' }, '最多选择 8 张作为造型候选。未勾选的照片保留在图库中；内置原图也可以加入候选并填写名称和标签。') : null,
+        h('div', { className: 'ab-pref-list' }, items.map((item, i) => {
+          const label = item.id === builtinId ? '大肥鱼原图' : '照片 ' + items.slice(0, i + 1).filter(value => value.id !== builtinId).length
+          const variant = variants.find(value => value.assetId === item.id)
+          const legacyActive = !variants.length && legacy.includes(item.id)
+          const atLimit = (variants.length || (legacyConvertible ? legacy.length : 0)) >= 8 && !legacyActive
+          const currentDefault = chosenDefault === item.id || (!chosenDefault && legacyActive && legacy.length === 1)
+          return h('div', { key: item.id, className: 'ab-pref-item' },
+            h('b', { className: 'ab-small' }, label + (item.id === builtinId ? '（内置）' : '')),
+            image(item.id, label),
+            h('label', null, h('input', { type: 'checkbox', checked: !!variant, disabled: disabled || (!!variant && variants.length === 1 && legacy.length > 0) || (!variant && ((item.inLibrary === false && item.id !== builtinId) || unavailable(item.id) || atLimit || (!variants.length && legacy.length > 0 && !legacyConvertible))), onChange: e => toggle(item.id, e.target.checked), 'aria-label': '将' + label + '加入造型候选 ' + item.id }), '加入造型候选'),
+            (variant || legacyActive) ? h('label', null, h('input', { type: 'radio', name: radioName, checked: currentDefault, disabled: disabled || unavailable(item.id), onChange: () => onChange(current => ({ ...current, defaultReferenceAssetId: item.id })) }), '设为默认') : null,
+            h('details', null, h('summary', { className: 'ab-small ab-muted' }, '图片详情'), h('div', { className: 'ab-pref-id' }, item.id)),
+            unavailable(item.id) ? h('span', { className: 'ab-small', style: { color: 'var(--ab-err)' } }, variant ? '不可用，可取消候选' : '不可用') : null,
+            variant ? h('label', { className: 'ab-pref-field ab-small' }, '造型名称', h('input', { className: 'ab-input', value: variant.name || '', maxLength: 80, disabled, placeholder: '如：夏日裙装', 'aria-label': label + '的造型名称', onChange: e => updateVariant(item.id, { name: e.target.value }) })) : null,
+            variant ? h(PersonaReferenceTags, { key: item.id, label, tags: variant.tags || [], disabled, onChange: tags => updateVariant(item.id, { tags }) }) : null)
+        })),
+        preview && !unavailable(preview.id) ? h('div', { className: 'ab-pref-large', role: 'region', 'aria-label': '照片大图预览' },
+          h('b', null, preview.label), h('img', { src: source(preview.id), alt: preview.label + '大图', onError: () => markBroken(preview.id) }),
+          h(Btn, { small: true, kind: 'ghost', onClick: () => setPreview(null) }, '关闭大图')) : null)
+    }
+
     function PersonaRvc({ voice, onChange }) {
       const rvc = voice?.rvc || {}
       const change = (key, value) => {
@@ -755,6 +953,86 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Row, { label: '转换超时（毫秒）' }, h('input', { className:'ab-input sm', type:'number', min:1000, max:300000, value:rvc.timeoutMs ?? '', placeholder:'跟随全局', onChange:e => change('timeoutMs', e.target.value === '' ? undefined : Number(e.target.value)) })))
     }
 
+    /** 找到独占一行的旧版标题，记录原文偏移；围栏代码里的标题不拆分。 */
+    function parseLegacySections(text) {
+      const headings = [], lines = /[^\r\n]*(?:\r\n|\r|\n|$)/g
+      let line, fence = null
+      while ((line = lines.exec(text)) && line[0].length) {
+        const raw = line[0], content = raw.replace(/(?:\r\n|\r|\n)$/, ''), start = line.index
+        const marker = /^[ \t]*(`{3,}|~{3,})/.exec(content)
+        if (fence) {
+          if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && /^\s*$/.test(content.slice(marker[0].length))) fence = null
+          continue
+        }
+        if (marker) { fence = marker[1]; continue }
+        const title = /^[\s\u200b-\u200d\ufeff]*【([^】\r\n]{1,30})】[\s\u200b-\u200d\ufeff]*$/.exec(content)
+        if (title) headings.push({ title: title[1].trim() || '未命名', start, end: start + raw.length, hasNewline: raw.length > content.length })
+      }
+      if (!headings.length) return []
+      const sections = []
+      const add = (title, start, end, needsNewline = false) => {
+        const trailing = /(?:(?:\r\n|\r|\n)[\t ]*)+$/.exec(text.slice(start, end))
+        sections.push({ title, start, end: end - (trailing ? trailing[0].length : 0), needsNewline })
+      }
+      if (headings[0].start) add('标题前的原文', 0, headings[0].start)
+      headings.forEach((heading, i) => add(heading.title, heading.end, headings[i + 1]?.start ?? text.length, !heading.hasNewline))
+      return sections
+    }
+
+    /** textarea 会把 CRLF 展示为 LF；只替换实际改变的范围，原有行尾保持不变。 */
+    function editLegacyTextarea(original, input, fallbackNewline = '\n') {
+      const chars = [], offsets = [0]
+      for (let i = 0; i < original.length;) {
+        if (original[i] === '\r') { i += original[i + 1] === '\n' ? 2 : 1; chars.push('\n') }
+        else { chars.push(original[i]); i++ }
+        offsets.push(i)
+      }
+      const before = chars.join(''), after = String(input).replace(/\r\n?/g, '\n')
+      if (before === after) return original
+      let prefix = 0, suffix = 0
+      while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++
+      while (suffix < before.length - prefix && suffix < after.length - prefix && before[before.length - suffix - 1] === after[after.length - suffix - 1]) suffix++
+      const newline = (original.match(/\r\n|\r|\n/) || [fallbackNewline])[0]
+      const oldBreaks = original.slice(offsets[prefix], offsets[before.length - suffix]).match(/\r\n|\r|\n/g) || []
+      let breakIndex = 0
+      const inserted = after.slice(prefix, after.length - suffix).replace(/\n/g, () => oldBreaks[breakIndex++] || newline)
+      return original.slice(0, offsets[prefix]) + inserted + original.slice(offsets[before.length - suffix])
+    }
+
+    /** 标题、段间空白和未编辑的行原样保留；只有编辑文本才修改草稿。 */
+    function LegacyPersonaEditor({ value, onChange }) {
+      const text = String(value ?? '')
+      const sections = parseLegacySections(text)
+      const [rawMode, setRawMode] = useState(() => sections.length === 0)
+      const [open, setOpen] = useState([0])
+      const newline = (text.match(/\r\n|\r|\n/) || ['\n'])[0]
+      const update = (part, input) => {
+        const old = text.slice(part.start, part.end)
+        let next = editLegacyTextarea(old, input, newline)
+        if (next === old) return
+        if (part.needsNewline && next) next = newline + next
+        onChange(text.slice(0, part.start) + next + text.slice(part.end))
+      }
+      const raw = rawMode || !sections.length
+      return h('div', null,
+        h('p', { className: 'ab-desc' }, '这张卡从旧版人格原样导入，下面的分层内容会补在原文后面。这里编辑聊天人设原文；自拍参考图和外观补充在下方「样子与声音」管理。'),
+        sections.length ? h('button', { type: 'button', className: 'ab-btn ghost sm', 'aria-pressed': raw, onClick: () => setRawMode(!raw) }, raw ? '按章节编辑' : '编辑完整原文') : h('p', { className: 'ab-small ab-muted' }, '没有找到独占一行的【标题】，可直接编辑完整原文。'),
+        raw ? h('textarea', { className: 'ab-textarea', style: { minHeight: 260, marginTop: 8 }, 'aria-label': '完整旧版人设原文', value: text.replace(/\r\n?/g, '\n'), onChange: e => update({ start: 0, end: text.length }, e.target.value) }) :
+          h('div', { className: 'ab-legacy-sections' }, sections.map((part, i) => {
+            const body = text.slice(part.start, part.end), expanded = open.includes(i)
+            const excerpt = body.replace(/\s+/g, ' ').trim()
+            const region = 'ab-legacy-section-' + i
+            return h('section', { key: i, className: 'ab-legacy-section' },
+              h('button', { type: 'button', className: 'ab-legacy-heading', 'aria-expanded': expanded, 'aria-controls': region,
+                onClick: () => setOpen(items => items.includes(i) ? items.filter(n => n !== i) : [...items, i]) },
+                h('b', null, part.title), h('span', { className: 'ab-muted ab-small' }, body.length + ' 字'), h('span', { 'aria-hidden': true }, expanded ? '▾' : '▸')),
+              expanded ? h('div', { id: region, className: 'ab-legacy-content' }, h('textarea', { className: 'ab-textarea', rows: Math.max(3, Math.min(16, body.split(/\r\n|\r|\n/).length + 1)), value: body.replace(/\r\n?/g, '\n'),
+                'aria-label': '编辑第 ' + (i + 1) + ' 节 ' + part.title, onChange: e => update(part, e.target.value) })) :
+                h('div', { id: region, className: 'ab-legacy-excerpt ab-muted ab-small' }, excerpt ? excerpt.slice(0, 96) + (excerpt.length > 96 ? '…' : '') : '（空）'))
+          })),
+        h('div', { className: 'ab-muted ab-small', style: { marginTop: 6 } }, text.length + ' 字'))
+    }
+
     function Persona({ st, toast, reload }) {
       const [list, setList] = useState(null)
       const [bindings, setBindings] = useState([])
@@ -768,8 +1046,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [creating, setCreating] = useState(null) // { id, name }
       const loadSeq = useRef(0)
       const editSeq = useRef(0)
+      const selectionSeq = useRef(0)
       const selectedRef = useRef(sel)
       selectedRef.current = sel
+      const selectionAtRender = selectionSeq.current
 
       const loadList = async () => {
         const r = await get('/persona/list')
@@ -779,7 +1059,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const seq = ++loadSeq.current // 切卡时丢掉迟到的加载结果
         const beforeEdit = editSeq.current
         const r = await get('/persona/full?id=' + encodeURIComponent(id))
-        if (seq !== loadSeq.current) return
+        if (seq !== loadSeq.current || id !== selectedRef.current) return
         if (!r.ok || !r.persona) { setCard(null); setForm(null); return }
         setCard(r.persona)
         setRevs(r.revisions || [])
@@ -791,15 +1071,23 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       useEffect(() => { loadList() }, [])
       useEffect(() => { if (sel) loadCard(sel) }, [sel])
 
-      const pick = (id) => {
-        if (id === sel) return
-        if (dirty && !confirm('这张卡有没保存的改动，切走会丢掉。继续？')) return
-        selectedRef.current = id
-        editSeq.current++
-        setView('edit')
+      const switchTo = (id) => {
+        if (id !== selectedRef.current) { selectedRef.current = id; selectionSeq.current++ }
         setSel(id)
       }
-      const setL = (path, v) => { editSeq.current++; setForm({ ...form, layers: setPath(form.layers, path, v) }); setDirty(true) }
+      const pick = (id) => {
+        if (id === selectedRef.current) return
+        if (dirty && !confirm('这张卡有没保存的改动，切走会丢掉。继续？')) return
+        editSeq.current++
+        setView('edit')
+        switchTo(id)
+      }
+      const setL = (path, v) => { editSeq.current++; setForm(current => ({ ...current, layers: setPath(current.layers, path, v) })); setDirty(true) }
+      const setAppearance = (update) => {
+        editSeq.current++
+        setForm(current => ({ ...current, layers: setPath(current.layers, 'appearance', update(current.layers.appearance || {})) }))
+        setDirty(true)
+      }
       const L = (path) => getPath(form.layers, path)
       const handle = async (r, okMsg, beforeEdit = editSeq.current, savedEdits = false) => {
         if (r.ok) {
@@ -854,29 +1142,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 const layers = blankLayers()
                 layers.identity.name = creating.name
                 const r = await post('/persona/create', { id: creating.id, name: creating.name, layers })
-                if (await handle(r, '建好了，填好内容再发布')) { setCreating(null); if (dirty) toast('新卡已建立，当前未保存的编辑已保留'); else setSel(creating.id) }
+                if (await handle(r, '建好了，填好内容再发布')) { setCreating(null); if (dirty) toast('新卡已建立，当前未保存的编辑已保留'); else switchTo(creating.id) }
               } }, '新建'))) : h('div', { className: 'ab-flex' },
             h(Btn, { kind: 'ghost', onClick: () => setCreating({ id: 'persona-' + Date.now().toString(36), name: '新人设' }) }, '＋ 新建'),
-            h(ImportPersona, { toast, onDone: async (id) => { await loadList(); if (dirty) toast('导入完成，当前未保存的编辑已保留'); else setSel(id) } })),
+            h(ImportPersona, { toast, onDone: async (id) => { await loadList(); if (dirty) toast('导入完成，当前未保存的编辑已保留'); else switchTo(id) } })),
           h('label', { className: 'ab-small ab-muted', style: { display: 'block', marginTop: 6 } }, h('input', { type: 'checkbox', checked: showArchived, onChange: (e) => setShowArchived(e.target.checked) }), ' 显示已归档的卡'),
           h(PersonaBindings, { st, list: list || [], bindings, toast, onChange: (b) => { setBindings(b); reload() } }),
           h(AvatarCard, { st, toast, reload }),
         ),
-        !card || !form ? h(Card, null, h(Empty, { icon: list && !list.length ? '🃏' : '⏳', text: list && !list.length ? '还没有人设卡' : '加载中…' })) : h(Card, {
+        !card || !form || card.id !== sel ? h(Card, null, h(Empty, { icon: list && !list.length ? '🃏' : '⏳', text: list && !list.length ? '还没有人设卡' : '加载中…' })) : h(Card, {
           title: form.name || card.id,
           desc: (card.published ? '线上是第 ' + card.published.revision + ' 版' : '还没发布过') + (card.draft ? '，有没发布的草稿' : '') + (dirty ? '，编辑框里有没保存的改动' : '') + '。改动先存成草稿，点「发布」后从下一轮回复起生效；发布过的版本不会被改，可以随时回滚。',
           right: h(Seg, { value: view, onChange: setView, options: [{ value: 'edit', label: '编辑' }, { value: 'preview', label: '预览' }, { value: 'history', label: '历史 ' + revs.length }] }),
         },
         card.archivedAt ? h('div', { className: 'ab-note' }, '这张卡已归档，不能改也不能绑定。', h(Btn, { small: true, onClick: async () => handle(await post('/persona/unarchive', { id: card.id }), '取消归档了') }, '取消归档'), ' ',
-          h(Btn, { small: true, kind: 'danger', onClick: async () => { if (!confirm('彻底删除这张卡和它的所有版本？删除后不能恢复。')) return; const r = await post('/persona/remove', { id: card.id }); if (r.ok) { toast('删掉了'); setSel(st.config.persona.current); loadList() } else toast(r.message, 'err') } }, '彻底删除')) : null,
+          h(Btn, { small: true, kind: 'danger', onClick: async () => { if (!confirm('彻底删除这张卡和它的所有版本？删除后不能恢复。')) return; const r = await post('/persona/remove', { id: card.id }); if (r.ok) { toast('删掉了'); switchTo(st.config.persona.current); loadList() } else toast(r.message, 'err') } }, '彻底删除')) : null,
         view === 'edit' ? h('div', null,
-          h(Row, { label: '卡片名字' }, h('input', { className: 'ab-input', value: form.name, onChange: (e) => { editSeq.current++; setForm({ ...form, name: e.target.value }); setDirty(true) } })),
+          h(Row, { label: '卡片名字' }, h('input', { className: 'ab-input', value: form.name, onChange: (e) => { const name = e.target.value; editSeq.current++; setForm(current => ({ ...current, name })); setDirty(true) } })),
           h(Row, { label: '标签', hint: '逗号隔开，只用来分类' }, h(ListArea, { value: L('tags') || [], onChange: (v) => setL('tags', v), placeholder: '甜美，粘人' })),
           legacy ? h('div', { className: 'ab-psec' },
             h('h4', null, '旧版原文'),
-            h('p', { className: 'ab-desc' }, '这张卡是从旧版人格原样导入的：整篇正文就是全部设定。下面的分层内容（如果填了）会补在原文后面。'),
-            h('textarea', { className: 'ab-textarea', style: { minHeight: 260 }, value: legacy.body, onChange: (e) => setL('legacy.body', e.target.value) }),
-            h('div', { className: 'ab-muted ab-small' }, legacy.body.length + ' 字')) : null,
+            h(LegacyPersonaEditor, { key: card.id + ':' + selectionAtRender, value: legacy.body, onChange: value => setL('legacy.body', value) })) : null,
           h('div', { className: 'ab-psec', style: { borderLeft: '3px solid #4978bc', paddingLeft: 12 } },
             h('h4', null, '她是谁'),
             h(Row, { label: '名字', hint: '她怎么称呼自己' }, h('input', { className: 'ab-input', value: L('identity.name') || '', onChange: (e) => setL('identity.name', e.target.value) })),
@@ -896,6 +1182,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('h4', null, '样子与声音'),
             h('textarea', { className: 'ab-textarea', style: { minHeight: 70 }, placeholder: '外观描述（画她自己时也会用到）', value: L('appearance.text') || '', onChange: (e) => setL('appearance.text', e.target.value) }),
             h(PolishLayer, { section: 'appearance.text', text: L('appearance.text') || '', onChoose: v => setL('appearance.text', v), toast }),
+            h(PersonaReferences, { key: card.id + ':' + selectionAtRender, personaId: card.id, appearance: L('appearance') || {}, onChange: setAppearance,
+              isCurrent: () => selectedRef.current === card.id && selectionSeq.current === selectionAtRender, disabled: !!card.archivedAt,
+              profile: (st.config.imageGen?.profiles || []).find(p => p.id === st.config.imageGen?.defaultProfile), toast }),
             h(Row, { label: '音色', hint: '留空用「语音」页的默认音色' }, h('input', { className: 'ab-input', value: L('voice.voice') || '', onChange: (e) => setL('voice.voice', e.target.value) })),
             h(Row, { label: '语速' }, h(Range, { min: 0.5, max: 2, step: 0.1, value: L('voice.speed') || 1, onChange: (v) => setL('voice.speed', v), fmt: (v) => Number(v).toFixed(1) + '×' })),
             h(PersonaRvc, { voice: L('voice'), onChange: v => setL('voice', v) })),
@@ -907,7 +1196,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-flex', style: { marginTop: 12, flexWrap: 'wrap' } },
             h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (dirty && !confirm('丢掉编辑框里没保存的改动？')) return; loadCard(card.id) } }, '重新载入'),
             card.draft && card.published ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('丢掉草稿，回到线上的第 ' + card.published.revision + ' 版？')) return; handle(await post('/persona/discard', { id: card.id, editRevision: card.editRevision }), '草稿丢掉了') } }, '丢弃草稿') : null,
-            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const nid = card.id + '-copy'; const r = await post('/persona/duplicate', { id: card.id, newId: nid }); if (await handle(r, '复制了一张')) { if (dirty) toast('复制完成，当前未保存的编辑已保留'); else setSel(nid) } } }, '复制一张'),
+            h(Btn, { small: true, kind: 'ghost', onClick: async () => { const nid = card.id + '-copy'; const r = await post('/persona/duplicate', { id: card.id, newId: nid }); if (await handle(r, '复制了一张')) { if (dirty) toast('复制完成，当前未保存的编辑已保留'); else switchTo(nid) } } }, '复制一张'),
             h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await get('/persona/export?id=' + encodeURIComponent(card.id)); if (!r.ok) return toast(r.message, 'err'); const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(r.card, null, 2)], { type: 'application/json' })); a.download = card.id + '.persona.json'; a.click() } }, '导出'),
             !card.archivedAt ? h(Btn, { small: true, kind: 'ghost', onClick: async () => { if (!confirm('归档这张卡？归档后不能改也不能绑定，随时可以取消归档。')) return; const r = await post('/persona/archive', { id: card.id, editRevision: card.editRevision }); if (r.code === 'IN_USE') toast('还绑定在：' + r.scopes.map(scopeLabel).join('、') + '。先在左边「绑定」里换成别的卡', 'err'); else handle(r, '归档了') } }, '归档') : null,
             h('div', { className: 'ab-spacer' }),

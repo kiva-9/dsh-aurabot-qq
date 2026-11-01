@@ -45,6 +45,9 @@ export function appearanceOf(layers) {
   return {
     text: layers?.appearance?.text || '',
     referenceAssetIds: layers?.appearance?.referenceAssetIds || [],
+    useDefaultReference: layers?.appearance?.useDefaultReference !== false,
+    referenceVariants: layers?.appearance?.referenceVariants || [],
+    defaultReferenceAssetId: layers?.appearance?.defaultReferenceAssetId || '',
   }
 }
 

@@ -1,7 +1,6 @@
 // 生图任务：登记 → 等参考图就绪 → 按服务能力检查 → 提交 / 查进度 → 结果存成资产并记下血缘 → 发到 QQ。
 // 聊天这一轮马上结束（「在画了」），画好了后台直接发；失败、不确定的结果用中性的话告诉对方。
 
-import { readFileSync } from 'node:fs'
 import { adapterFor } from '../providers/image/index.js'
 import { checkRequest, ProviderError, MODE_LABEL } from '../providers/image/common.js'
 import { toJson, fromJson } from '../storage/db.js'
@@ -10,6 +9,7 @@ import { canSee } from '../domain/scope.js'
 import { resolveShape } from '../image/shapes.js'
 import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
+import { ensureDefaultReference, imageReferenceBytes } from '../persona/references.js'
 
 /**
  * @param {object} o
@@ -19,7 +19,7 @@ import { appearanceOf } from '../persona/compiler.js'
  * @param {object} [o.local] 本地接口（profile id 为 local 时用）
  * @param {object} [o.adapterDeps] 测试时注入 fetchImpl
  */
-export function createImageService({ storage, getConfig, hub, local, toImageBuffer, log, adapterDeps = {}, onDelivered }) {
+export function createImageService({ storage, getConfig, hub, local, toImageBuffer, log, adapterDeps = {}, onDelivered, personaReferences, defaultReference = () => ensureDefaultReference(storage) }) {
   const cfg = () => getConfig().imageGen
 
   // 配置快照不进入 input_json：任务接口可展示输入，但绝不能把服务密钥一并返回。
@@ -67,10 +67,10 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     for (const ref of input.refs) {
       if (!['base', 'identity', 'style', 'composition'].includes(ref.role)) throw new ProviderError('invalid', '输入图用途不合法', { maybeCharged: false })
       if (!ref.assetId && !ref.occurrenceId) throw new ProviderError('invalid', '输入图缺少有效引用', { maybeCharged: false })
-      if (ref.assetId && !storage.assets.get(ref.assetId)) throw new ProviderError('invalid', '有一张输入图找不到了，请重新选择', { maybeCharged: false })
+      if (ref.assetId) imageReferenceBytes(storage, ref.assetId)
     }
     if (input.refs.filter((r) => r.role === 'base').length > 1) throw new ProviderError('invalid', '只能指定一张底图，其他图请选参考用途', { maybeCharged: false })
-    if (input.maskAssetId && !storage.assets.get(input.maskAssetId)) throw new ProviderError('invalid', '蒙版找不到了，请重新绘制', { maybeCharged: false })
+    if (input.maskAssetId) imageReferenceBytes(storage, input.maskAssetId)
   }
 
   function prepare(args) {
@@ -81,12 +81,48 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     const persona = args.personaSnapshot || hub.personaFor?.(args.chatId)
     if (persona?.error) throw new ProviderError('invalid', '当前聊天的人设绑定无效，请先修正', { maybeCharged: false })
     input.persona = persona ? { personaId: persona.personaId, revision: persona.revision, bindingRevision: persona.bindingRevision } : null
+    if (input.selfReferenceId != null && (typeof input.selfReferenceId !== 'string' || !input.selfReferenceId.trim() || input.selfReferenceId.trim() !== input.selfReferenceId || input.selfReferenceId.length > 500)) throw new ProviderError('invalid', '指定的人设外观款式 ID 无效', { maybeCharged: false })
+    const requested = input.selfReferenceId ?? ''
+    if (requested && input.drawSelf !== true) throw new ProviderError('invalid', '选择人设外观款式时需要明确画当前角色', { maybeCharged: false })
     if (input.drawSelf === true) {
       if (!persona) throw new ProviderError('invalid', '当前聊天没有可用的人设快照', { maybeCharged: false })
       input.appearance = structuredClone(appearanceOf(persona.layers))
-      // 用户已经指定长相/底图时以其选择为准，不能再悄悄塞入另一个人物。
-      if (!input.refs.some(r => ['base', 'identity'].includes(r.role))) {
-        for (const assetId of input.appearance.referenceAssetIds) input.refs.push({ assetId, role: 'identity', reason: `人设 ${persona.personaId} v${persona.revision} 外观参考` })
+      const variants = input.appearance.referenceVariants || []
+      const legacy = input.appearance.referenceAssetIds || []
+      const candidates = variants.length ? variants : legacy.map(assetId => ({ assetId, name: '', tags: [] }))
+      let selected = requested && candidates.find(v => v.assetId === requested)
+      if (requested && !selected && persona.personaId === 'dafeiyu') {
+        try { const builtin = defaultReference(); if (builtin.id === requested) selected = { assetId: builtin.id, name: '内置大肥鱼形象', tags: [], builtin: true } } catch {}
+      }
+      if (requested && !selected) throw new ProviderError('invalid', '指定的人设外观款式不属于当前角色或当前版本，请重新选择', { maybeCharged: false })
+      const explicitIdentity = input.refs.some(r => ['base', 'identity'].includes(r.role) && !r.personaReference)
+      if (requested && explicitIdentity) throw new ProviderError('invalid', '不能同时指定人设外观款式和其他人物长相参考或底图，请选择一种', { maybeCharged: false })
+      if (explicitIdentity) {
+        // 继续编辑时继承的旧人设参考不能覆盖用户明确指定的身份或底图。
+        input.refs = input.refs.filter(r => !r.personaReference)
+        input.explicitSelfIdentity = true
+      } else {
+        // Every draw uses exactly one persona identity; never blend outfit candidates.
+        input.refs = input.refs.filter(r => !r.personaReference)
+        const defaultId = input.appearance.defaultReferenceAssetId || ''
+        if (defaultId && !candidates.some(v => v.assetId === defaultId)) throw new ProviderError('invalid', '人设默认款不属于当前外观列表，请到人格面板重新选择', { maybeCharged: false })
+        let chosen = selected || (defaultId && candidates.find(v => v.assetId === defaultId))
+        if (!chosen && !variants.length && legacy.length === 1) chosen = candidates[0]
+        if (!chosen && !variants.length && legacy.length > 1) throw new ProviderError('invalid', '这个人设有多张旧参考图，请到人格面板设置唯一默认款', { maybeCharged: false })
+        let assetId, builtin = false
+        if (chosen?.builtin) { assetId = chosen.assetId; builtin = true }
+        else if (chosen) {
+          assetId = chosen.assetId
+          try {
+            if (!personaReferences) throw new Error('人设参考图库不可用')
+            personaReferences.asset(persona.personaId, assetId)
+          } catch { throw new ProviderError('invalid', '所选人设外观参考图缺失、损坏或未授权，请到人格面板重新选择', { maybeCharged: false }) }
+        } else if (persona.personaId === 'dafeiyu' && input.appearance.useDefaultReference !== false) {
+          try { assetId = defaultReference().id; builtin = true }
+          catch { throw new ProviderError('invalid', '大肥鱼默认外观参考图缺失或损坏，请到人格面板上传图片', { maybeCharged: false }) }
+        } else throw new ProviderError('invalid', '当前人设没有可用的默认外观参考图，请到人格面板选择一套或明确提供人物长相参考图', { maybeCharged: false })
+        input.selfReference = { assetId, name: chosen?.name || '', tags: chosen?.tags || [], builtin }
+        input.refs.push({ assetId, role: 'identity', personaReference: true, reason: `人设 ${persona.personaId} v${persona.revision} 外观参考` })
       }
       if (input.refs.length && input.mode === 'text') input.mode = 'reference'
     }
@@ -180,6 +216,14 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         if (o.state !== 'ready' || !o.assetId) throw new ProviderError('invalid', `第 ${ref.n || '?'} 张参考图没下载下来（${o.error || o.state}），没法照着画`, { maybeCharged: false })
         ref.assetId = o.assetId
       }
+      validateInput(job.input)
+      for (const ref of job.input.refs || []) {
+        if (!ref.personaReference || job.input.selfReference?.builtin) continue
+        try {
+          if (!personaReferences) throw new Error('人设参考图库不可用')
+          personaReferences.asset(job.input.persona?.personaId, ref.assetId)
+        } catch { throw new ProviderError('invalid', '所选人设外观参考图缺失、损坏或未授权，请到人格面板重新选择', { maybeCharged: false }) }
+      }
       const save = () => storage.db.run('UPDATE jobs SET input_json = ? WHERE id = ?', toJson(job.input), job.id)
       if (execution.commit) execution.commit(save); else save()
       return { ready: true }
@@ -221,7 +265,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         storage.db.run(`INSERT INTO generation_lineage(job_id, parent_job_id, inputs_json, outputs_json, intent, params_json) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(job_id) DO UPDATE SET outputs_json = excluded.outputs_json`,
       job.id, job.parentJobId, toJson((job.input.refs || []).map((r) => ({ assetId: r.assetId, role: r.role, occurrenceId: r.occurrenceId || null, sourceMessageId: r.sourceMessageId || null, selectionReason: r.reason || '', ...(r.avatar ? { avatar: r.avatar } : {}) }))),
-        toJson(assetIds), String(job.input.prompt || '').slice(0, 500), toJson({ mode: job.input.mode, size: job.input.size, profileId: job.profileId, persona: job.input.persona }))
+        toJson(assetIds), String(job.input.prompt || '').slice(0, 500), toJson({ mode: job.input.mode, size: job.input.size, profileId: job.profileId, persona: job.input.persona, selfReference: job.input.selfReference || null }))
         for (const [segIndex, assetId] of assetIds.entries()) {
           const old = storage.db.get("SELECT id FROM asset_occurrences WHERE json_extract(remote_json,'$.jobId')=? AND seg_index=?", job.id, segIndex)
           if (old) continue
@@ -276,17 +320,17 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     const c = cfg()
     const inputs = []
     for (const ref of job.input.refs || []) {
-      const a = storage.assets.get(ref.assetId)
-      if (!a) throw new ProviderError('invalid', '参考图找不到了', { maybeCharged: false })
-      inputs.push({ buf: readFileSync(storage.assets.pathOf(a)), mime: a.mime, role: ref.role })
+      const { asset, bytes } = imageReferenceBytes(storage, ref.assetId)
+      inputs.push({ buf: bytes, mime: asset.mime, role: ref.role })
     }
     let mask = null
     if (job.input.maskAssetId) {
-      const a = storage.assets.get(job.input.maskAssetId)
-      if (!a) throw new ProviderError('invalid', '蒙版找不到了', { maybeCharged: false })
-      mask = { buf: readFileSync(storage.assets.pathOf(a)), mime: a.mime }
+      const { asset, bytes } = imageReferenceBytes(storage, job.input.maskAssetId)
+      mask = { buf: bytes, mime: asset.mime }
     }
-    const prompt = [job.input.appearance?.text, job.input.stylePrompt ?? c.stylePrompt, job.input.prompt].filter(Boolean).join('，')
+    const selfIndex = (job.input.refs || []).findIndex(r => r.personaReference)
+    const identityHint = selfIndex >= 0 ? `保留第 ${selfIndex + 1} 张参考图中的人物身份、面部特征和衣装；动作和场景按本次要求，若本次明确要求换装则以本次要求为准，其他参考图仅用于其指定用途` : ''
+    const prompt = [job.input.explicitSelfIdentity ? '' : job.input.appearance?.text, identityHint, job.input.stylePrompt ?? c.stylePrompt, job.input.prompt].filter(Boolean).join('，')
     return { mode: job.input.mode, prompt, negativePrompt: job.input.negativePrompt || '', size: job.input.size || c.size, n: 1, inputs, mask, idempotencyKey: `${job.id}:${attempt.n}` }
   }
 
