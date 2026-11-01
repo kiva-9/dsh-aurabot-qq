@@ -3330,6 +3330,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { value: 'openai', label: 'OpenAI 兼容', desc: '/images/generations + /images/edits：OpenAI、硅基流动、各家中转' },
       { value: 'gemini', label: 'Gemini 原生', desc: 'generateContent，能看多张参考图' },
       { value: 'comfyui', label: 'ComfyUI 工作流', desc: '自己的工作流，按节点绑定输入' },
+      { value: 'studio', label: '本机 Studio 工作台', desc: '连接本机 Studio 服务（7860），不需要填写工作流' },
       { value: 'http', label: '自己配的 HTTP', desc: '任意服务：请求/返回格式自己填（同步或异步）' },
     ]
     const IMG_MODES = [{ value: 'text', label: '文生图' }, { value: 'reference', label: '参考图生成' }, { value: 'edit', label: '原图编辑' }, { value: 'mask', label: '蒙版编辑' }]
@@ -3341,6 +3342,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const f = useField(draft, setDraft)
       const c = draft.imageGen
       const [open, setOpen] = useState(c.profiles[0] ? c.profiles[0].id : '')
+      const [checks, setChecks] = useState({})
       const setProfiles = (list) => setDraft(setPath(draft, 'imageGen.profiles', list))
       const upd = (i, path, v) => setProfiles(c.profiles.map((p, k) => (k === i ? setPath(p, path, v) : p)))
       return h('div', { className: 'ab-grid ab-imagegen' },
@@ -3367,17 +3369,24 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               p.id === c.defaultProfile ? h('span', { className: 'ab-badge' }, '默认') : null,
               h('span', { className: 'ab-muted ab-small' }, (p.capabilities.modes || []).map((m) => (IMG_MODES.find((x) => x.value === m) || {}).label).join('、')),
               h('div', { className: 'ab-spacer' }),
-              h(ProfileCheck, { id: p.id, toast }),
+              h(ProfileCheck, { id: p.id, toast, onResult: (r) => setChecks((prev) => ({ ...prev, [p.id]: r })) }),
               h(Btn, { small: true, kind: 'ghost', onClick: () => setOpen(open === p.id ? '' : p.id) }, open === p.id ? '收起' : '编辑'),
               h(Btn, { small: true, kind: 'danger', onClick: () => { if (confirm('删掉「' + p.name + '」？保存后生效。')) setProfiles(c.profiles.filter((_, k) => k !== i)) } }, '删除')),
+            p.protocol === 'studio' && checks[p.id]?.studio ? h('div', { className: 'ab-note', style: { marginTop: 8 } },
+              h('b', null, '上次检查（基于已保存设置）'),
+              h('div', null, checks[p.id].message),
+              Number.isInteger(checks[p.id].studio.queue) ? h('div', null, '工作台队列：' + checks[p.id].studio.queue) : null,
+              checks[p.id].studio.models.length ? checks[p.id].studio.models.map((model) => h('div', { key: model.id }, model.name ? model.name + '：' : '', h('code', null, model.id))) : h('div', null, '未列出可用模型。'),
+              checks[p.id].studio.selected?.prompt_hint ? h('div', null, '所选模型提示：' + checks[p.id].studio.selected.prompt_hint) : null,
+            ) : null,
             open === p.id ? h(ProfileEditor, { p, upd: (path, v) => upd(i, path, v) }) : null)),
         ),
         h(ImageJobs, { st, toast, draft }),
       )
     }
 
-    function ProfileCheck({ id, toast }) {
-      return h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await post('/imagegen/test', { id }); toast(r.message, r.ok ? 'ok' : 'err') } }, '检查配置')
+    function ProfileCheck({ id, toast, onResult }) {
+      return h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await post('/imagegen/test', { id }); onResult(r); toast(r.message, r.ok ? 'ok' : 'err') } }, '检查配置')
     }
 
     function ProfileEditor({ p, upd }) {
@@ -3388,18 +3397,23 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Row, { label: '名字' }, txt('name')),
         h(Row, { label: 'ID', hint: '自动生成，用于区分服务' }, h('code', null, p.id)),
         h(Row, { label: '协议' }, h(Select, { value: p.protocol, options: IMG_PROTOCOLS, width: 240, onChange: (v) => upd('protocol', v) })),
-        p.protocol !== 'http' ? h(Row, { label: '服务地址', hint: p.protocol === 'gemini' ? '留空 = Google 官方地址' : p.protocol === 'comfyui' ? '例如 http://127.0.0.1:8188' : '一般以 /v1 结尾' }, txt('baseUrl', { size: 'wide', placeholder: p.protocol === 'comfyui' ? 'http://127.0.0.1:8188' : p.protocol === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : 'https://api.siliconflow.cn/v1' })) : null,
-        h(Row, { label: 'API Key', hint: '只存在本机，不会显示出来' }, txt('apiKey', { type: 'password', placeholder: p.apiKeySet ? '已保存（不改就留空）' : '没有就留空' })),
-        p.protocol === 'openai' || p.protocol === 'gemini' ? h(Row, { label: '模型' }, txt('model', { size: 'wide', placeholder: p.protocol === 'gemini' ? 'gemini-2.5-flash-image' : 'gpt-image-1 / Kwai-Kolors/Kolors' })) : null,
-        h(Row, { label: '能做什么', hint: '按这个服务 / 模型实际支持的勾' },
+        p.protocol !== 'http' ? h(Row, { label: '服务地址', hint: p.protocol === 'studio' ? '先启动 Studio 生图脚本；只填本机工作台地址，不是 ComfyUI 的 8188 端口' : p.protocol === 'gemini' ? '留空 = Google 官方地址' : p.protocol === 'comfyui' ? '例如 http://127.0.0.1:8188' : '一般以 /v1 结尾' }, txt('baseUrl', { size: 'wide', placeholder: p.protocol === 'studio' ? 'http://127.0.0.1:7860' : p.protocol === 'comfyui' ? 'http://127.0.0.1:8188' : p.protocol === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : 'https://api.siliconflow.cn/v1' })) : null,
+        p.protocol !== 'studio' ? h(Row, { label: 'API Key', hint: '只存在本机，不会显示出来' }, txt('apiKey', { type: 'password', placeholder: p.apiKeySet ? '已保存（不改就留空）' : '没有就留空' })) : null,
+        ['openai', 'gemini', 'studio'].includes(p.protocol) ? h(Row, { label: '模型', hint: p.protocol === 'studio' ? '从检查结果复制完整模型 ID；不同模型可各建一个服务' : undefined }, txt('model', { size: 'wide', placeholder: p.protocol === 'studio' ? '保存后检查配置，复制模型 ID' : p.protocol === 'gemini' ? 'gemini-2.5-flash-image' : 'gpt-image-1 / Kwai-Kolors/Kolors' })) : null,
+        p.protocol === 'studio' ? h('div', { className: 'ab-note' }, '工作台提供文生图、原图和蒙版编辑；参考图生成仅部分模型支持，最多 3 张，工作台会合并参考图、不区分角色。请按检查结果勾选能力。使用所选模型提示的英文标签或自然语言；Aurabot 不会调用工作台的提示词转换。已提交任务在工作台侧不能单独取消。') : null,
+        h(Row, { label: '能做什么', hint: p.protocol === 'studio' ? '仅勾选所选模型支持且需要使用的模式；保存后检查' : '按这个服务 / 模型实际支持的勾' },
           h('div', { className: 'ab-flex' }, IMG_MODES.map((m) => h('label', { key: m.value, className: 'ab-small' }, h('input', { type: 'checkbox', checked: (p.capabilities.modes || []).includes(m.value), onChange: (e) => upd('capabilities.modes', e.target.checked ? [...(p.capabilities.modes || []), m.value] : (p.capabilities.modes || []).filter((k) => k !== m.value)) }), ' ' + m.label)))),
-        h(Row, { label: '最多几张输入图' }, h('input', { className: 'ab-input sm', type: 'number', min: 0, max: 16, value: p.capabilities.maxInputs ?? 4, onChange: (e) => upd('capabilities.maxInputs', Number(e.target.value)) })),
+        h(Row, { label: '最多几张输入图', hint: p.protocol === 'studio' ? '工作台参考图最多 3 张；原图和蒙版编辑只能用一张底图' : undefined }, h('input', { className: 'ab-input sm', type: 'number', min: 0, max: 16, value: p.capabilities.maxInputs ?? 4, onChange: (e) => upd('capabilities.maxInputs', Number(e.target.value)) })),
         h(Row, { label: '只支持这些尺寸', hint: '一行一个，留空 = 不限制' }, h(ListArea, { value: p.capabilities.sizes || [], onChange: (v) => upd('capabilities.sizes', v), placeholder: '1024x1024' })),
         p.protocol === 'openai' ? [
           h(Row, { key: 'rf', label: '返回格式', hint: '有的中转不认这个字段，就选「不发」' }, h(Select, { value: x.responseFormat || '', width: 200, options: [{ value: '', label: '不发这个字段' }, { value: 'b64_json', label: 'b64_json' }, { value: 'url', label: 'url' }], onChange: (v) => upd('extra.responseFormat', v) })),
           h(Row, { key: 'if', label: '多图字段名', hint: '编辑接口上传多张图时用的字段' }, h(Select, { value: x.imageField || '', width: 200, options: [{ value: '', label: '自动（多张用 image[]）' }, { value: 'image', label: 'image' }, { value: 'image[]', label: 'image[]' }], onChange: (v) => upd('extra.imageField', v) })),
         ] : null,
         p.protocol === 'gemini' ? h(Row, { label: '默认画幅', hint: '没指定尺寸时用' }, h(Select, { value: x.aspectRatio || '', width: 160, options: [{ value: '', label: '模型默认' }, ...['1:1', '3:4', '4:3', '9:16', '16:9'].map((v) => ({ value: v, label: v }))], onChange: (v) => upd('extra.aspectRatio', v) })) : null,
+        p.protocol === 'studio' ? [
+          h(Row, { key: 'denoise', label: '重绘强度', hint: '原图或蒙版编辑；0.05–1，留空用工作台默认值' }, h('input', { className: 'ab-input sm', type: 'number', min: 0.05, max: 1, step: 0.05, value: x.denoise ?? '', placeholder: '默认', onChange: (e) => upd('extra.denoise', e.target.value === '' ? '' : Number(e.target.value)) })),
+          h(Row, { key: 'weight', label: '参考图强度', hint: '仅参考图生成；0–1.5，留空用工作台默认值' }, h('input', { className: 'ab-input sm', type: 'number', min: 0, max: 1.5, step: 0.05, value: x.weight ?? '', placeholder: '默认', onChange: (e) => upd('extra.weight', e.target.value === '' ? '' : Number(e.target.value)) })),
+        ] : null,
         p.protocol === 'comfyui' ? [
           h(Row, { key: 'wf', label: '工作流（API 格式）', hint: 'ComfyUI 里「保存（API 格式）」导出的 JSON' }, json('extra.workflow', '{ "3": { "class_type": "KSampler", "inputs": { … } } }')),
           h(Row, { key: 'bd', label: '输入绑定', hint: '节点ID.inputs.字段：prompt / negativePrompt / width / height / seed / base / identity / style / composition / mask' }, json('extra.bindings', '{ "prompt": "6.inputs.text", "base": "10.inputs.image" }')),
