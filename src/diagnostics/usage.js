@@ -156,7 +156,7 @@ export function createUsageLedger({storage,getAccount}) {
       const first = db.get(`SELECT MIN(started_at) first FROM service_calls WHERE ${filter}`, ...args()).first
       // 无匹配记录不从 1970 年开始补点。
       if (first == null) return { range, from, to, timeZone: 'Etc/GMT-8', generatedAt: now, note: DASHBOARD_NOTE,
-        totals: { ...ZERO_TOKENS }, models: [], trend: { granularity: 'day', points: [] } }
+        totals: { ...ZERO_TOKENS }, models: [], roles: [], trend: { granularity: 'day', points: [] } }
       from = shanghaiDay(first)
     }
 
@@ -169,14 +169,17 @@ export function createUsageLedger({storage,getAccount}) {
       : "strftime('%Y-%m-%d', CAST(started_at / 1000 AS INTEGER), 'unixepoch', '+8 hours')"
     // 每个分组都来自相同的 SQLite 语句快照；输入值只作为绑定参数，不拼入 SQL。
     const rows = db.all(`WITH filtered AS (
-      SELECT service,model,started_at,input_tokens,output_tokens,cached_tokens,usage_complete FROM service_calls WHERE ${filter}
+      SELECT service,model,role,started_at,input_tokens,output_tokens,cached_tokens,usage_complete FROM service_calls WHERE ${filter}
     )
     SELECT 'total' kind,NULL key,${DASHBOARD_COLUMNS} FROM filtered
     UNION ALL SELECT 'model' kind,${GROUP_KEYS.model} key,${DASHBOARD_COLUMNS} FROM filtered GROUP BY key
+    UNION ALL SELECT 'role' kind,${GROUP_KEYS.role} key,${DASHBOARD_COLUMNS} FROM filtered GROUP BY key
     UNION ALL SELECT 'trend' kind,${timeKey} key,${DASHBOARD_COLUMNS} FROM filtered GROUP BY key`, ...args())
     const counts = ({ kind, key, ...values }) => values
     const totals = counts(rows.find(row => row.kind === 'total'))
     const models = rows.filter(row => row.kind === 'model').map(row => ({ key: row.key, ...counts(row) }))
+      .sort((a, b) => b.totalTokens - a.totalTokens || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    const roles = rows.filter(row => row.kind === 'role').map(row => ({ key: row.key, ...counts(row) }))
       .sort((a, b) => b.totalTokens - a.totalTokens || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     const grouped = new Map(rows.filter(row => row.kind === 'trend').map(row => [row.key, counts(row)]))
     const points = []
@@ -191,7 +194,7 @@ export function createUsageLedger({storage,getAccount}) {
         points.push({ key, ...(grouped.get(key) || ZERO_TOKENS) })
       }
     }
-    return { range, from, to, timeZone: 'Etc/GMT-8', generatedAt: now, note: DASHBOARD_NOTE, totals, models, trend: { granularity, points } }
+    return { range, from, to, timeZone: 'Etc/GMT-8', generatedAt: now, note: DASHBOARD_NOTE, totals, models, roles, trend: { granularity, points } }
   }
   return {record,report,aggregate,dashboard}
 }

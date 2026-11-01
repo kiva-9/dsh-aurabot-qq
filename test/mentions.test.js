@@ -56,8 +56,11 @@ test('只改文字段，其它段原样保留', () => {
 
 async function delivered(t, reply, { list = members, chatId = 'group:' + GROUP } = {}) {
   const sent = []
-  const f = await hubFixture(t, { stickers: { match: () => ({ id: 's1', md5: 'm', name: '开心' }), segmentFor: () => ({ type: 'image', data: { file: 'x' } }) },
-    config: { stickers: { enabled: true, autoChance: 0 } },
+  const item = { id: 's1', md5: 'm', name: '开心' }
+  const f = await hubFixture(t, { stickers: { segmentFor: () => ({ type: 'image', data: { file: 'x', sub_type: 1 } }),
+    decideForReply: async ({ suggestions }) => suggestions.length ? { decisionId: 'd1', decision: 'send', item } : { decision: 'skip' },
+    claimDecision: () => ({ decision: 'send', item }), validateDecision: () => true, settleDecision: () => true, completeTurn: () => true },
+    config: { stickers: { enabled: true, autoChance: 1 } },
     onebot: { call: async (action, params) => {
       if (action === 'get_group_member_list') { if (!list) throw new Error('限流'); return list }
       if (action.startsWith('send_')) { sent.push(params.message); return { message_id: 100 + sent.length } }

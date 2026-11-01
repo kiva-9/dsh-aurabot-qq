@@ -51,6 +51,7 @@ http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ data: [{ b64_json: readFileSync(join(ROOT, 'assets', 'dafeiyu.jpg')).toString('base64') }] }))
     }
     if (req.url === '/' || req.url === '/index.html') { res.setHeader('content-type', 'text/html; charset=utf-8'); return res.end(page) }
+    if (req.url === '/__preview__') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ preview: 'aurabot-isolated-panel', dataDir })) }
     if (req.url === '/client.js') { res.setHeader('content-type', 'text/javascript; charset=utf-8'); return res.end(readFileSync(join(ROOT, 'client', 'client.js'))) }
     if (req.url.startsWith('/aurabot/api')) {
       let body = ''

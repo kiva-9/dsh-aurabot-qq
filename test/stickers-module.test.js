@@ -54,14 +54,22 @@ test('chat兼容模式：管理路由保留聊天隔离、上传目标及逐项�
   assert.equal((await query('/stickers/queue', { chatId: 'group:2' })).runtime.enabled, true)
   assert.equal((await post('/sticker/analysis/reconcile', { chatId: 'group:2', taskId: 'missing' })).ok, false)
   assert.equal((await post('/sticker/sync/bind', { chatId: 'group:2', id: second.item.id, emojiId: 'id', confirmedExisting: true })).code, 'NOT_BINDABLE')
+  for (const chatId of ['group:1', 'group:2']) await store.decideForReply({ accountId: '100', chatId,
+    epoch: storage.epochs.current(chatId), requestIds: [], turnId: `empty-${chatId}`, replyText: '' })
+  assert.equal((await query('/stickers/decisions', { accountId: 'other' })).total, 0, '全聊须显式选择')
+  const current = await query('/stickers/decisions', { chatId: 'group:1', accountId: 'other' })
+  assert.equal(current.total, 1, '忽略外部账号参数并固定当前账号')
+  assert.equal(current.items[0].chatId, 'group:1')
+  assert.equal((await query('/stickers/decisions', { allChats: 'true' })).total, 2)
 })
 
-test('model candidates omit manual-only stickers; only an explicit outer request can send one', async t => {
+test('model candidates omit manual-only stickers; the send tool only registers a suggestion', async t => {
   const root = mkdtempSync(join(tmpdir(), 'sticker-manual-')), storage = createStorage({ file: join(root, 'db'), filesDir: join(root, 'assets') })
   const cfg = { botQQ: '100', ownerQQ: '200', stickers: { enabled: true, collect: true, caption: false, libraryScope: 'chat' } }
-  let build, currentRequest, sends = 0; const disposers = []
+  let build, currentRequest; const suggestions = [], disposers = []
   const api = { config: () => cfg, log: { warn() {} }, core: { storage, onebot: {}, stickerLegacyDir: join(root, 'legacy'), http: {}, hub: {
-    turnSendersAllOwner: () => true, turnActor: () => ({ actorId: '200', requestId: currentRequest.id }), sendSticker: async () => { sends++; return true } } },
+    turnSendersAllOwner: () => true, turnActor: () => ({ actorId: '200', requestId: currentRequest.id }),
+    suggestSticker: (session, value) => { suggestions.push({ session, value }); return { ok: true, code: 'PENDING_DECISION', message: '已登记建议，待本轮独立决策；尚未发送表情' } } } },
     route() {}, rule() {}, tool: f => { build = f }, onDispose: f => disposers.push(f) }
   const store = moduleDefinition.setup(api)
   t.after(async () => { for (const dispose of disposers) await dispose(); storage.close(); rmSync(root, { recursive: true, force: true }) })
@@ -75,8 +83,9 @@ test('model candidates omit manual-only stickers; only an explicit outer request
   currentRequest = request('发小猫', [{ type: 'forward', data: { text: '发小猫' } }])
   const tools = build({ chat: { kind: 'group', chatId: 'group:1' }, level: 'full', sessionId: 'session' })
   assert.equal((await tools.find(x => x.name === 'qq_list_stickers').execute({})).count, 0)
-  assert.equal((await tools.find(x => x.name === 'qq_send_sticker').execute({ name: '小猫' })).ok, false)
+  const first = await tools.find(x => x.name === 'qq_send_sticker').execute({ name: '小猫' })
+  assert.equal(first.ok, true); assert.match(first.message, /尚未发送/)
   currentRequest = request('请发小猫', [{ type: 'text', data: { text: '请发小猫' } }])
   assert.equal((await tools.find(x => x.name === 'qq_send_sticker').execute({ name: '小猫' })).ok, true)
-  assert.equal(sends, 1)
+  assert.deepEqual(suggestions, [{ session: 'session', value: '小猫' }, { session: 'session', value: '小猫' }])
 })

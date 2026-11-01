@@ -6,8 +6,9 @@ import { runInNewContext } from 'node:vm'
 // 执行真实组件的事件处理函数；模拟 React hooks 和面板接口，绝不启动 live 宿主。
 const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
 const component = client.slice(client.indexOf('    const STICKER_STATES='), client.indexOf('    function SpeakUp('))
+const fields = client.slice(client.indexOf('    const clone ='), client.indexOf('    const timeAgo =')) + client.slice(client.indexOf('    function useField('), client.indexOf('    // ---------------- 标签页'))
 const same = (a, b) => a && b && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))
-function mount({ total = 3, postResult, tasks = [], holdPost, scope = { account: '100', chat: 'group:1' }, page = false, libraryScope = 'account' } = {}) {
+function mount({ total = 3, postResult, tasks = [], holdPost, decisionsGet, realFields = false, scope = { account: '100', chat: 'group:1' }, page = false, libraryScope = 'account' } = {}) {
   let cursor = 0, tree, effects = [], itemRows = Array.from({ length: total }, (_, i) => ({ id: 'item-' + i, revision: i + 1, state: 'pending', name: '素材' + i, animated: false, analysis: { state: 'failed' } }))
   let slots = []
   const instances = new Map(), calls = [], notifications = [], working = []
@@ -19,11 +20,13 @@ function mount({ total = 3, postResult, tasks = [], holdPost, scope = { account:
   }
   const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(v => v !== null && v !== undefined && v !== false) })
   const context = { ...hooks, h, URLSearchParams, API: '/api', confirm: () => assert.fail('Stickers 不能调用原生 confirm'),
-    Btn: 'Btn', Card: 'Card', Select: 'Select', Empty: 'Empty', Row: 'Row', ScopePicker: 'ScopePicker',
+    Btn: 'Btn', Card: 'Card', Select: 'Select', Empty: 'Empty', Row: 'Row', ScopePicker: 'ScopePicker', Fragment: 'Fragment', Range: 'Range', Switch: 'Switch',
+    scopeChatOptions: st => [{ value: 'private:' + st.config.ownerQQ, label: '主人私聊' }, ...st.config.allow.groups.map(id => ({ value: 'group:' + id, label: '群聊 ' + id }))],
     useField: draft => new Proxy({}, { get: () => path => h('Field', { path, value: path.split('.').reduce((o, k) => o?.[k], draft) }) }),
     fileData: async () => 'data:image/png;base64,b2ZmbGluZQ==',
     async get(path) {
       calls.push({ path }); const url = new URL(path, 'http://local.invalid'), offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 30)
+      if (url.pathname === '/stickers/decisions') return decisionsGet ? decisionsGet(url) : { ok: true, items: [] }
       if (url.pathname === '/stickers/queue') return { ok: true, items: tasks.slice(offset, offset + limit), total: tasks.length, runtime: { enabled: true, collect: true, caption: true } }
       if (url.pathname === '/stickers/stats') return { ok: true, pending: total, approved: 0, rejected: 0, disabled: 0, deleted: 0 }
       return { ok: true, items: itemRows.slice(offset, offset + limit), total: itemRows.length }
@@ -34,9 +37,10 @@ function mount({ total = 3, postResult, tasks = [], holdPost, scope = { account:
       return postResult || (body.entries ? { ok: true, total: body.entries.length, succeeded: body.entries.length, failed: 0, results: body.entries.map(it => ({ id: it.id, ok: true, state: 'approved' })) } : { ok: true })
     },
   }
+  if (realFields) { delete context.useField; runInNewContext(fields, context) }
   runInNewContext(component + '\nglobalThis.parts={Stickers,StickerWorkspace,StickerConfirmation,StickerCell,StickerTask};', context)
   const config = { botQQ: '100', ownerQQ: '200', allow: { groups: ['1', '2'], private: [] }, stickers: { libraryScope, enabled: true, collect: true, caption: true, autoReview: true, autoChance: 0.1 } }
-  const props = { scope, st: { config }, draft: structuredClone(config), setDraft: () => assert.fail('浏览图库不能修改配置'), toast: (...args) => notifications.push(args), onWorking: v => working.push(v) }
+  const props = { scope, st: { config }, draft: structuredClone(config), setDraft: value => { if (!realFields) assert.fail('浏览图库不能修改配置'); props.draft = value }, toast: (...args) => notifications.push(args), onWorking: v => working.push(v) }
   const invoke = (type, props) => { const key = type.name + ':' + (props.key || 'single'); if (!instances.has(key)) instances.set(key, []); slots = instances.get(key); cursor = 0; return type(props) }
   const expand = node => {
     if (!node || typeof node !== 'object') return node
@@ -273,6 +277,13 @@ test('表情 UI：默认账号共用图库无需选群，自动开关只展示�
     assert.equal(ui.nodes().find(n => n.type === 'Field' && n.props.path === path).props.value, true)
   }
   assert.equal(ui.props.draft.stickers.autoChance, 0.1)
+  assert.match(ui.nodes().find(n => n.type === 'Row' && n.props.label === '主动发送表情的概率').props.hint, /模型建议、工具和自动配图/)
+  assert.match(ui.nodes().find(n => n.type === 'Row' && n.props.label === '主动发送表情的概率').props.hint, /豁免概率、轮次间隔和聊天冷却，仍受同图冷却/)
+  assert.match(ui.nodes().find(n => n.type === 'Row' && n.props.label === '相同素材冷却').props.hint, /明确要求也适用/)
+  for (const path of ['stickers.minGapTurns', 'stickers.chatCooldownMs', 'stickers.sameStickerCooldownMs', 'stickers.recentWindowSize', 'stickers.candidateCount', 'stickers.decisionTimeoutMs']) {
+    assert.ok(ui.nodes().some(n => n.type === 'Field' && n.props.path === path), path)
+  }
+  assert.ok(ui.nodes().some(n => n.type === 'Card' && n.props.title === '最近表情决策'))
   assert.equal(ui.calls.some(c => c.body), false)
   assert.ok(ui.nodes().some(n => n.type === 'details' && ui.label(n).startsWith('更多筛选与人工处理') && !n.props.open))
   const legacy = mount({ page: true, libraryScope: 'chat' }); await legacy.flush()
@@ -280,6 +291,110 @@ test('表情 UI：默认账号共用图库无需选群，自动开关只展示�
   assert.equal(picker.props.st, legacy.props.st)
   assert.equal(picker.props.scope.chat, 'private:200')
   assert.ok(legacy.nodes().some(n => n.type === 'details' && ui.label(n).startsWith('兼容模式：选择聊天图库') && !n.props.open))
+})
+
+test('表情决策：默认选定聊天，空态、异常、刷新、全聊及指定聊天均明确展示', async () => {
+  let result = { ok: true, items: [] }
+  const ui = mount({ page: true, decisionsGet: () => result }); await ui.flush()
+  let calls = ui.calls.filter(c => c.path.startsWith('/stickers/decisions?'))
+  assert.equal(new URL(calls.at(-1).path, 'http://local').searchParams.get('chatId'), 'private:200')
+  assert.ok(ui.nodes().some(n => n.type === 'Empty' && /还没有表情决策/.test(n.props.text)))
+  result = { ok: false, message: '诊断暂不可用' }
+  await ui.button('刷新决策').onClick(); ui.render()
+  assert.match(ui.label(ui.render()), /诊断暂不可用/)
+  result = { ok: true, items: [{ id: 'one', code: 'SENT', state: 'sent', reason: '已确认发送', itemId: 'chosen', itemName: '素材名', modelProvider: 'p', model: 'vision', elapsedMs: 250, chatId: 'group:1', updatedAt: 1790000000000 }, { id: 'two', code: 'MODEL_TIMEOUT', state: 'failed', reason: '判断超时' }] }
+  const select = () => ui.nodes().find(n => n.type === 'select' && n.props['aria-label'] === '查看表情决策的聊天')
+  select().props.onChange({ target: { value: 'all' } }); await ui.flush()
+  calls = ui.calls.filter(c => c.path.startsWith('/stickers/decisions?'))
+  const query = new URL(calls.at(-1).path, 'http://local').searchParams
+  assert.equal(query.get('allChats'), 'true'); assert.equal(query.has('chatId'), false)
+  const rendered = ui.label(ui.render())
+  for (const word of ['模型判断超时', '判断超时', '素材名', 'p / vision', '250 ms', 'group:1']) assert.ok(rendered.includes(word), word)
+  const thumbnail = ui.nodes().find(n => n.type === 'img' && n.props.alt === '选中的表情')
+  assert.equal(new URL(thumbnail.props.src, 'http://local').searchParams.get('id'), 'chosen')
+  select().props.onChange({ target: { value: 'custom' } }); ui.render()
+  const input = ui.input('指定表情决策聊天')
+  input.onChange({ target: { value: 'private:999' } }); ui.render()
+  ui.button('查看此聊天').onClick(); await ui.flush()
+  calls = ui.calls.filter(c => c.path.startsWith('/stickers/decisions?'))
+  assert.equal(new URL(calls.at(-1).path, 'http://local').searchParams.get('chatId'), 'private:999')
+  assert.equal(ui.calls.some(c => c.body), false)
+})
+
+test('表情设置：真实控件修改草稿时保留概率和其他配置', async () => {
+  const ui = mount({ page: true, realFields: true }); await ui.flush()
+  const row = label => ui.nodes().find(n => n.type === 'Row' && n.props.label === label)
+  const candidate = row('候选图片数').children.find(n => n.type === 'input')
+  candidate.props.onChange({ target: { value: '24' } }); ui.render()
+  assert.equal(ui.props.draft.stickers.candidateCount, 24)
+  assert.equal(ui.props.draft.stickers.autoChance, 0.1)
+  assert.equal(ui.props.draft.stickers.autoReview, true)
+  const probability = row('主动发送表情的概率').children.find(n => n.type === 'Range')
+  probability.props.onChange(18); ui.render()
+  assert.equal(ui.props.draft.stickers.autoChance, 0.18)
+  assert.equal(ui.props.draft.stickers.candidateCount, 24)
+  assert.equal(ui.props.draft.stickers.libraryScope, 'account')
+  assert.equal(ui.calls.some(c => c.body), false)
+})
+
+test('表情工作区：状态计数使用图库统计，切筛选清除选择，尺寸与详情可交互', async () => {
+  const ui = mount({ total: 3 }); await ui.flush()
+  const nav = ui.nodes().find(n => n.props['aria-label'] === '表情审核状态')
+  assert.ok(nav)
+  const pending = nav.children.find(n => ui.label(n) === '待处理3')
+  assert.ok(pending, '计数取自 stats 而不是当前任务筛选')
+  ui.button('全选当前页').onClick(); ui.render()
+  pending.props.onClick(); await ui.flush()
+  assert.match(ui.label(ui.render()), /已选 0 项/)
+  const path = ui.calls.filter(c => c.path.startsWith('/stickers?')).at(-1).path
+  assert.equal(new URL(path, 'http://local').searchParams.get('status'), 'pending')
+  const sizeGroup = ui.nodes().find(n => n.props['aria-label'] === '表情卡片尺寸')
+  sizeGroup.children.find(n => ui.label(n) === '大').props.onClick(); ui.render()
+  assert.ok(ui.nodes().some(n => n.props.className === 'ab-sticker-gallery large'))
+  const tile = ui.nodes().find(n => n.type === 'details' && n.children.some(c => c?.props?.['aria-label'] === '查看表情 素材0 的详情'))
+  tile.props.onToggle({ currentTarget: { open: true } }); ui.render()
+  assert.ok(ui.nodes().some(n => n.type === 'article' && n.props.className === 'ab-sticker-tile expanded'))
+  assert.ok(ui.nodes().some(n => n.type === 'img' && n.props.alt === '素材0 完整预览'))
+  assert.equal(ui.calls.some(c => c.body), false, '浏览、筛选和尺寸选择不写素材或配置')
+})
+
+test('表情详情：完整动画确认后才允许批准；编辑保存携带版本和独立用途字段', async () => {
+  const ui = mount({ total: 1 })
+  ui.setItems([{ id:'gif-review', revision:7, name:'动画', state:'pending', animated:true, description:'画面', tags:['问候'], suitable:['朋友'], unsuitable:['严肃'], frames:[{atMs:0}], analysis:{state:'done',evidence:{coverage:'sampled_partial'}}, review:{reason:'需要完整复核'} }])
+  await ui.flush()
+  assert.match(ui.label(ui.render()), /仅为部分动画内容/)
+  assert.equal(ui.button('批准使用').disabled, true)
+  ui.input('确认已查看完整动画').onChange({ target: { checked:true } }); ui.render()
+  assert.equal(ui.button('批准使用').disabled, false)
+  ui.input('表情画面描述').onChange({ target: { value:'新描述' } }); ui.render()
+  ui.input('表情适用情境').onChange({ target: { value:'问候、晚安' } }); ui.render()
+  await ui.button('保存表情信息').onClick(); await ui.flush()
+  const write = ui.calls.find(c => c.path === '/sticker/edit')
+  assert.equal(write.body.expectedRevision, 7)
+  assert.equal(write.body.patch.description, '新描述')
+  assert.deepEqual(write.body.patch.suitable, ['问候','晚安'])
+  assert.deepEqual(write.body.patch.unsuitable, ['严肃'])
+  assert.equal(write.body.reviewedOriginal, true)
+})
+
+test('表情决策：切换聊天、切换账号或卸载后迟到的旧结果不覆盖当前范围', async () => {
+  const pending = []
+  const ui = mount({ page: true, decisionsGet: url => new Promise(resolve => pending.push({ url, resolve })) }); await ui.flush()
+  assert.equal(pending.length, 1)
+  const select = () => ui.nodes().find(n => n.type === 'select' && n.props['aria-label'] === '查看表情决策的聊天')
+  select().props.onChange({ target: { value: 'group:1' } }); await ui.flush()
+  assert.equal(pending.length, 2)
+  pending[1].resolve({ ok: true, items: [{ id: 'current', code: 'PROBABILITY', reason: '当前范围' }] }); await new Promise(resolve => setImmediate(resolve)); ui.render()
+  pending[0].resolve({ ok: true, items: [{ id: 'old', code: 'SENT', reason: '旧聊天数据' }] }); await new Promise(resolve => setImmediate(resolve)); ui.render()
+  assert.match(ui.label(ui.render()), /当前范围/); assert.doesNotMatch(ui.label(ui.render()), /旧聊天数据/)
+  ui.button('刷新决策').onClick(); await ui.flush(); assert.equal(pending.length, 3)
+  ui.props.st.config.botQQ = '300'; ui.render(); await ui.flush()
+  const old = pending[2]
+  old.resolve({ ok: true, items: [{ id: 'old-account', code: 'SENT', reason: '旧账号数据' }] }); await new Promise(resolve => setImmediate(resolve)); ui.render()
+  assert.doesNotMatch(ui.label(ui.render()), /旧账号数据/)
+  ui.unmount()
+  for (const request of pending.slice(3)) request.resolve({ ok: true, items: [{ code: 'SENT', reason: '卸载之后' }] })
+  await new Promise(resolve => setImmediate(resolve))
 })
 
 test('表情 UI：账号图库读取/预览不发送 chatId；素材来源只是溯源，跨来源批量保留各自版本', async () => {

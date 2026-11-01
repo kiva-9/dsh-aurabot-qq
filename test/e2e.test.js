@@ -682,7 +682,7 @@ test('增量记忆：必须指定范围，原始旧聊天保留供审计', async
   assert.notEqual(status.checkpoint.state, 'done')
 })
 
-test('表情包全局共用：无需聊天即可上传，批准后跨群私聊发送、改名、同步 QQ、删除留墓碑', async () => {
+test('表情包全局共用：无需聊天即可上传，跨群私聊可用并经过决策，支持改名、同步和删除', async () => {
   await settle()
   const chatId = `private:${OWNER}`
   const up = (await fake.call('/sticker/upload', { data: fakePng(200, 200, 9).toString('base64'), name: '测试猫猫' })).json()
@@ -696,11 +696,13 @@ test('表情包全局共用：无需聊天即可上传，批准后跨群私聊�
   assert.equal(approved.sync.state, 'queued')
   await until(() => api.stickers.status(target.id, { admin: true }).qq.state === 'synced')
   const groupSent = sentTo('group', '555').length
-  assert.equal(await api.hub.sendSticker('group:555', { id: target.id }), true, '当前机器人已批准的表情可直接用于群聊')
-  assert.equal(sentTo('group', '555').slice(groupSent).some(c => c.params.message.some(s => s.type === 'image')), true)
+  assert.ok(api.stickers.segmentFor({ id: target.id }, 'group:555'), '当前机器人已批准的表情可用于群聊')
+  assert.equal(await api.hub.sendSticker('group:555', { id: target.id }), false, '无可信请求或正文时建议不能直接触发发送')
+  assert.equal(sentTo('group', '555').slice(groupSent).some(c => c.params.message.some(s => s.type === 'image')), false)
   const sent = sentTo('private', OWNER).length
-  assert.equal(await api.hub.sendSticker(chatId, { id: target.id }), true)
-  assert.equal(sentTo('private', OWNER).slice(sent).some((c) => c.params.message.some((s) => s.type === 'image')), true)
+  assert.ok(api.stickers.segmentFor({ id: target.id }, chatId))
+  assert.equal(await api.hub.sendSticker(chatId, { id: target.id }), false)
+  assert.equal(sentTo('private', OWNER).slice(sent).some((c) => c.params.message.some((s) => s.type === 'image')), false)
   mock.push(priv(OWNER, text(`表情改名测试 把「${target.name}」改个名`)))
   await until(() => fake.turns.at(-1)?.userText.includes('表情改名测试') && fake.turns.at(-1).toolCalls.length)
   assert.equal(fake.turns.at(-1).toolCalls[0].result.ok, true)

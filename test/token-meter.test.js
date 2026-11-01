@@ -170,8 +170,26 @@ test('dashboard 自定义范围含闰日和结束日，UTC+8 午夜边界与三�
   assert.deepEqual(result.trend.points.map(p => [p.key, p.totalTokens]), [['2024-02-28', 6], ['2024-02-29', 9], ['2024-03-01', 13]])
   for (const [field, value] of Object.entries(result.totals)) {
     assert.equal(result.models.reduce((sum, row) => sum + row[field], 0), value, `model ${field}`)
+    assert.equal(result.roles.reduce((sum, row) => sum + row[field], 0), value, `role ${field}`)
     assert.equal(result.trend.points.reduce((sum, row) => sum + row[field], 0), value, `trend ${field}`)
   }
+})
+
+test('表情决策角色在相同账号、聊天、日期和服务范围内独立展示，不重复计入总计', async t => {
+  const f = module(t, { owner: true })
+  f.call({ chatId: GROUP, role: 'stickerDecision', model: 'vision', ...tokens(10, 3, 2) })
+  f.call({ chatId: GROUP, role: 'vision', model: 'vision', ...tokens(4, 1) })
+  f.call({ chatId: GROUP, role: 'stickerDecision', service: 'search', ...tokens(999, 0) })
+  f.call({ chatId: OTHER, role: 'stickerDecision', ...tokens(77, 0) })
+  f.call({ chatId: GROUP, role: 'stickerDecision', startedAt: at('2026-10-29T12:00:00'), ...tokens(88, 0) })
+  f.setAccount('99999999'); f.call({ chatId: GROUP, role: 'stickerDecision', ...tokens(100, 0) }); f.setAccount(BOT)
+  const result = f.exports.dashboard({ range: 'custom', startDate: '2026-10-30', endDate: '2026-10-30', chatId: GROUP, now: NOW })
+  assert.deepEqual(result.roles.map(row => [row.key, row.calls, row.totalTokens]), [['stickerDecision', 1, 15], ['vision', 1, 5]])
+  assert.equal(result.models.length, 1)
+  assert.equal(result.totals.calls, 2)
+  assert.equal(result.totals.totalTokens, 20)
+  const response = await f.tool.execute({ range: 'all', breakdown: 'role' })
+  assert.match(response.message, /表情决策：/)
 })
 
 test('dashboard 模型、聊天、账号与缺失字段的覆盖数正确，查询不修改账本', t => {

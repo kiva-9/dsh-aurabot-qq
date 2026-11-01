@@ -2,3 +2,4 @@
 export { createStickerStore } from '../stickers/store.js'
 export { DEFAULT_TAGS, matchSticker, pickForReply, pickEvict, parseSelection } from '../stickers/selection.js'
 export { STICKER_SCHEMA, ensureStickerSchema } from '../stickers/schema.js'
+export { recordCompletedStickerTurn } from '../stickers/decision.js'

@@ -36,6 +36,22 @@ export const STICKER_SCHEMA = `
     uses INTEGER NOT NULL DEFAULT 0, last_used INTEGER NOT NULL,
     PRIMARY KEY(account,chat,sha256)
   );
+  CREATE TABLE IF NOT EXISTS sticker_decisions (
+    id TEXT PRIMARY KEY, account TEXT NOT NULL, chat TEXT NOT NULL, epoch INTEGER NOT NULL,
+    turn_key TEXT NOT NULL, state TEXT NOT NULL, item_id TEXT, item_revision INTEGER, sha256 TEXT,
+    explicit INTEGER NOT NULL DEFAULT 0, chance_roll REAL, code TEXT NOT NULL, reason TEXT NOT NULL,
+    selection_reason TEXT NOT NULL DEFAULT '', selection_policy TEXT NOT NULL DEFAULT '',
+    owner_json TEXT, requests_json TEXT NOT NULL DEFAULT '[]',
+    completed INTEGER NOT NULL DEFAULT 0, model_provider TEXT, model TEXT, elapsed_ms INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    UNIQUE(account,chat,epoch,turn_key)
+  );
+  CREATE INDEX IF NOT EXISTS sticker_decisions_chat ON sticker_decisions(account,chat,created_at);
+  CREATE TABLE IF NOT EXISTS sticker_decision_requests (
+    account TEXT NOT NULL, chat TEXT NOT NULL, epoch INTEGER NOT NULL, request_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL REFERENCES sticker_decisions(id),
+    PRIMARY KEY(account,chat,epoch,request_id)
+  );
   CREATE TABLE IF NOT EXISTS sticker_legacy (
     id TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
     body_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL

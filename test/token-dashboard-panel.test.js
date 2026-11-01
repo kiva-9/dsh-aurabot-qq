@@ -50,6 +50,18 @@ const response = (overrides = {}) => ({
   ...overrides,
 })
 
+test('按工作统计把表情决策显示为独立角色，沿用同一账本总数', async () => {
+  const d = dashboardHarness(); d.render()
+  d.pending[0].resolve(response({ roles: [{ key: 'stickerDecision', ...aggregate({ calls: 1, totalTokens: 25 }) }, { key: 'vision', ...aggregate({ calls: 1, totalTokens: 125 }) }] }))
+  await tick()
+  const tree = d.render(), work = card(tree, '按工作统计')
+  assert.ok(work)
+  assert.match(content(work), /表情决策/)
+  assert.match(content(work), /vision/)
+  assert.match(content(work), /25/)
+  assert.ok(all(tree).some(node => /^已记录合计 token：.*150/.test(node.props['aria-label'] || '')))
+})
+
 function dashboardHarness() {
   const states = [], refs = [], pending = [], requests = [], cleanups = []
   let stateIndex = 0, refIndex = 0, mounted = false, effects = [], updates = 0, writes = 0

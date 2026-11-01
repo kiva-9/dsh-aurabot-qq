@@ -271,6 +271,11 @@ export function apply(ctx) {
     segmentFor: (it, scope) => use('stickers')?.segmentFor?.(it, scope) ?? null,
     markUsed: (id, scope) => use('stickers')?.markUsed?.(id, scope),
     pickForReply: (t, scope) => use('stickers')?.pickForReply?.(t, scope) ?? null,
+    decideForReply: (context) => use('stickers')?.decideForReply?.(context) ?? null,
+    claimDecision: (permit) => use('stickers')?.claimDecision?.(permit) ?? null,
+    validateDecision: (permit) => use('stickers')?.validateDecision?.(permit) === true,
+    settleDecision: (result) => use('stickers')?.settleDecision?.(result),
+    completeTurn: (result) => use('stickers')?.completeTurn?.(result),
     collect: async (s, chatId) => (use('stickers')?.collect ? use('stickers').collect(s, chatId) : { ok: false, reason: '表情包模块关着' }),
     library: () => use('stickers')?.library?.({ admin: true, accountId: String(cfg.botQQ), status: 'all' }) ?? { items: [] },
   }

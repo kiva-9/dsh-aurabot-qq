@@ -38,6 +38,37 @@ export function pickForReply(items, replyText, options = {}) {
   return matchSticker(pool, replyText)
 }
 
+// Relevance is only a recall aid. The decision model sees the actual images,
+// and can reject every candidate. Random exploration includes old material
+// regardless of the order in which the repository happened to return it.
+export function rankDecisionCandidates(items, text, { count = 20, recent = [], random = Math.random } = {}) {
+  const query = norm(text).slice(0, 2000).replace(/\s+/g, '')
+  const grams = new Set()
+  for (let i = 0; i < query.length - 1; i++) grams.add(query.slice(i, i + 2))
+  const order = new Map(recent.map((sha, index) => [sha, recent.length - index]))
+  const scored = items.map(item => {
+    const material = norm([item.name, item.description, item.ocr, ...(item.tags || []), ...(item.emotions || []), ...(item.suitable || [])].join(' ')).slice(0, 2000)
+    let score = 0
+    const matched = new Set()
+    for (let i = 0; i < material.length - 1; i++) {
+      const gram = material.slice(i, i + 2)
+      if (grams.has(gram) && !matched.has(gram)) { matched.add(gram); score++ }
+    }
+    for (const word of [item.name, ...(item.tags || []), ...(item.emotions || []), ...(item.suitable || [])]) {
+      const value = norm(word)
+      if (value.length >= 2 && query.includes(value)) score += 3
+    }
+    score -= (order.get(item.sha256) || 0) * 2
+    return { item, score, tie: random() }
+  })
+  const limit = Math.min(Math.max(1, count), scored.length)
+  const relevantSlots = Math.ceil(limit * 0.75)
+  scored.sort((a, b) => b.score - a.score || a.tie - b.tie)
+  const relevant = scored.slice(0, relevantSlots)
+  const explored = scored.slice(relevantSlots).sort((a, b) => a.tie - b.tie).slice(0, limit - relevant.length)
+  return [...relevant, ...explored].map(x => x.item)
+}
+
 /** 可选模型选择器的边界：不合法 ID、解析失败、no_match 都不回退到第一张。 */
 export function parseSelection(value, candidates) {
   try {

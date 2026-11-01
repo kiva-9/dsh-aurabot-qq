@@ -7,7 +7,7 @@ import { dataDir } from '../../core/store.js'
 export default {
   id: 'stickers', name: '表情包', version: '2.0.0', tab: 'stickers',
   description: '默认同账号共用图库，自动采集识别；可选按聊天隔离，QQ 收藏同步独立跟踪',
-  files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/analysis.js', 'stickers/legacy.js', 'runtime/image-frames.js'],
+  files: ['features/stickers.js', 'stickers/store.js', 'stickers/repository.js', 'stickers/schema.js', 'stickers/selection.js', 'stickers/decision.js', 'stickers/preview.js', 'stickers/analysis.js', 'stickers/legacy.js', 'runtime/image-frames.js'],
   setup(api) {
     const { hub, onebot, http, storage } = api.core
     const legacyDir = api.core.stickerLegacyDir ?? dataDir('stickers')
@@ -24,16 +24,6 @@ export default {
       const owner = () => hub.turnSendersAllOwner(sessionId)
       const management = () => ({ admin: true, chatId, actorId: String(api.config().ownerQQ || '') })
       const denied = () => ({ ok: false, message: '只有主人能管理表情库' })
-      const explicitlyRequested = item => {
-        const actor = hub.turnActor?.(sessionId), request = actor?.requestId && storage.requests.get(actor.requestId)
-        if (!actor || actor.error || !request || request.actorId !== String(actor.actorId) || request.chatId !== chatId ||
-          request.epoch !== storage.epochs.current(chatId) || ['canceled', 'cancel_requested', 'closed', 'expired', 'ended', 'answered'].includes(request.state)) return false
-        return request.sourceMessageIds.some(id => {
-          const m = storage.messages.get(id), text = (m?.segments || []).filter(s => s?.type === 'text').map(s => String(s.data?.text || '')).join('')
-          return m && !m.recalledAt && m.account === String(api.config().botQQ) && m.chatId === chatId && m.authorId === request.actorId &&
-            /发|来一?张|来个|用|贴|展示/u.test(text) && [item.id, item.name].some(v => v && text.includes(v))
-        })
-      }
       const tools = [
         defineTool({ name: 'qq_collect_sticker_candidates', description: '在选择收藏模式中列出本轮消息里可选择的表情来源 ID。', execute: async () => {
           if (api.config().stickers.collectMode !== 'ask') return { ok: false, message: '当前不是选择收藏模式' }
@@ -51,13 +41,10 @@ export default {
           if (!m || m.recalledAt || m.account !== String(api.config().botQQ) || m.chatId !== chatId || m.authorId !== request.actorId || o.authorId !== m.authorId || !seg) return { ok: false, message: '来源不可用' }
           return store.collect(seg, { chatId, messageId: m.id, segmentIndex: o.segIndex, selectedOccurrence: true, occurrenceId: o.id, requestId: request.id, epoch: request.epoch })
         } }),
-        defineTool({ name: 'qq_send_sticker', description: '在当前聊天发送已批准且用途合适的表情；没有合适项就不发。',
-          properties: { name: str('名字或情绪关键词') }, required: ['name'], execute: async ({ name }) => {
-            const item = store.match(String(name || ''), { chatId, allowManual: true, cooldown: true })
-            if (!item) return { ok: false, message: '没有找到当前聊天可用且不在冷却中的表情' }
-            if (item?.manualOnly && !explicitlyRequested(item)) return { ok: false, message: '这张表情仅在用户明确指定时发送' }
-            const ok = await hub.sendSticker(chatId, String(name || ''), undefined, { allowManual: Boolean(item?.manualOnly), authorizeManual: () => Boolean(item && explicitlyRequested(item)) })
-            return { ok: Boolean(ok), message: ok ? '发了' : '没有找到当前聊天可用的表情' }
+        defineTool({ name: 'qq_send_sticker', description: '为本轮回复登记表情建议；最终是否发送及选哪张由独立决策决定。',
+          properties: { name: str('建议的名字或情绪关键词') }, required: ['name'], execute: async ({ name }, execution) => {
+            return hub.suggestSticker?.(sessionId, String(name || ''), { simulated: execution?.simulated === true }) ||
+              { ok: false, code: 'UNAVAILABLE', message: '当前无法登记表情建议' }
           } }),
         defineTool({ name: 'qq_list_stickers', description: '查看表情库中可用于当前聊天的表情；默认同一机器人账号的所有聊天共用图库。', properties: { query: str('可选名字或标签') },
           execute: async ({ query }) => {
@@ -105,6 +92,12 @@ export default {
 
     route('/stickers', async (req) => ({ ok: true, ...store.list(adminOptions(http.query(req))) }))
     route('/stickers/stats', async (req) => ({ ok: true, ...store.stats(adminOptions(http.query(req))) }))
+    route('/stickers/decisions', async (req) => {
+      const q = http.query(req)
+      return { ok: true, ...store.decisions({ admin: true, accountId: String(api.config().botQQ || ''),
+        ...(q.chatId ? { chatId: String(q.chatId) } : {}), allChats: q.allChats === 'true' || q.allChats === true,
+        limit: q.limit, offset: q.offset }) }
+    })
     route('/sticker/detail', async (req) => { const q = http.query(req); const item = store.get(idOf(q), adminOptions(q)); return { ok: Boolean(item), item } })
     route('/stickers/queue', async (req) => ({ ok: true, ...store.queueStatus(adminOptions(http.query(req))) }))
     route('/sticker/image', async (req, res) => {
@@ -134,7 +127,7 @@ export default {
       const bytes = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
       return store.addFromBuffer(bytes, { ...o, name: b.name || '', tags: b.tags || [], from: 'panel', toQQ: b.toQQ !== false })
     })
-    api.rule(() => '- 表情库默认同账号共用。新素材识别明确通过后自动可用；以实际状态为准，本地保存不等于审核或 QQ 收藏已成功。没有合适的可用表情就不发。')
+    api.rule(() => '- 表情库默认同账号共用。新素材识别明确通过后自动可用；本地保存不等于审核或 QQ 收藏已成功。表情由本轮独立决策统一处理，不必在每条回复中附标签；工具只登记建议，不能声称已经发送。')
     store.recover()
     store.start()
     api.onDispose?.(() => store.stop())
