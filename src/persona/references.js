@@ -13,6 +13,7 @@ const fail = (message, code = 'INVALID_REFERENCE') => Object.assign(new Error(me
 const idsOf = layers => [
   ...(Array.isArray(layers?.appearance?.referenceAssetIds) ? layers.appearance.referenceAssetIds : []),
   ...(Array.isArray(layers?.appearance?.referenceVariants) ? layers.appearance.referenceVariants.map(v => v?.assetId).filter(Boolean) : []),
+  ...(layers?.appearance?.defaultReferenceAssetId ? [layers.appearance.defaultReferenceAssetId] : []),
 ]
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex')
 
@@ -85,15 +86,22 @@ function decodeUpload(data) {
 /** Library IDs are associated explicitly with a persona, including deduplicated uploads. */
 export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_IMAGE }) {
   const key = id => `persona.references:${id}`
+  // Keep grants for immutable revisions and already queued jobs. Membership in
+  // the editable library is a separate, reversible per-persona decision.
+  const removedKey = id => `persona.references.removed:${id}`
   const registered = id => {
     const value = storage.meta.get(key(id), [])
+    return Array.isArray(value) ? value.filter(x => typeof x === 'string' && x) : []
+  }
+  const removed = id => {
+    const value = storage.meta.get(removedKey(id), [])
     return Array.isArray(value) ? value.filter(x => typeof x === 'string' && x) : []
   }
   const requirePersona = (id, { editable = false } = {}) => {
     store.checkId(id)
     const persona = store.get(id)
     if (!persona) throw fail('没有这个人设', 'NOT_FOUND')
-    if (editable && persona.archivedAt) throw fail('这张卡已归档，先取消归档再上传', 'ARCHIVED')
+    if (editable && persona.archivedAt) throw fail('这张卡已归档，先取消归档再修改参考图库', 'ARCHIVED')
     return persona
   }
   const mentioned = (id, persona) => {
@@ -121,20 +129,40 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
     const persona = requirePersona(id)
     let defaultAssetId = null
     try { defaultAssetId = defaultFor(id)?.id || null } catch { /* shown as unavailable */ }
-    const grants = registered(id)
-    const ids = [...new Set([...grants, ...idsOf(persona.draft?.layers), ...idsOf(persona.published?.layers)])]
+    const grants = registered(id), hidden = new Set(removed(id))
+    const ids = [...new Set([...grants.filter(assetId => !hidden.has(assetId)), ...idsOf(persona.draft?.layers), ...idsOf(persona.published?.layers)])]
     if (defaultAssetId && !ids.includes(defaultAssetId)) ids.unshift(defaultAssetId)
-    return { items: ids.map(assetId => ({ ...view(assetId, grants.includes(assetId) || assetId === defaultAssetId), inLibrary: grants.includes(assetId) })), defaultAssetId, useDefaultReferenceAvailable: id === 'dafeiyu' }
+    return { items: ids.map(assetId => ({ ...view(assetId, grants.includes(assetId) || assetId === defaultAssetId), inLibrary: grants.includes(assetId) && !hidden.has(assetId) })), defaultAssetId, useDefaultReferenceAvailable: id === 'dafeiyu' }
   }
   function upload(id, data) {
-    requirePersona(id, { editable: true })
+    const instance = storage.db.tx(() => { requirePersona(id, { editable: true }); return store.instanceVersion(id) })
     const { bytes, info } = decodeUpload(data)
-    const ids = registered(id)
     const asset = putReference(storage, bytes, info, 'persona-reference')
-    if (!ids.includes(asset.id)) {
-      storage.meta.set(key(id), [...ids, asset.id])
-    }
+    storage.db.tx(() => {
+      requirePersona(id, { editable: true })
+      if (store.instanceVersion(id) !== instance) throw fail('人设在上传期间发生变化，请重新上传', 'PERSONA_CHANGED')
+      const ids = registered(id), hidden = removed(id)
+      if (!ids.includes(asset.id)) storage.meta.set(key(id), [...ids, asset.id])
+      if (hidden.includes(asset.id)) storage.meta.set(removedKey(id), hidden.filter(x => x !== asset.id))
+    })
     return view(asset.id)
+  }
+  function remove(id, assetId) {
+    return storage.db.tx(() => {
+      const persona = requirePersona(id, { editable: true })
+      if (typeof assetId !== 'string' || !assetId || assetId.length > 500) throw fail('没有这张人设参考图', 'NOT_FOUND')
+      let defaultAssetId = null
+      try { defaultAssetId = defaultFor(id)?.id || null }
+      catch { throw fail('内置原图缺失或损坏，暂时无法确认它的身份；修复原图后再移除图库图片', 'BUILTIN_UNAVAILABLE') }
+      if (assetId === defaultAssetId) throw fail('内置原图不能从图库移除，可取消默认参考图的使用', 'BUILTIN_REFERENCE')
+      const grants = registered(id), hidden = removed(id)
+      if (!grants.includes(assetId) || hidden.includes(assetId)) throw fail('没有这张人设参考图', 'NOT_FOUND')
+      if ([...idsOf(persona.draft?.layers), ...idsOf(persona.published?.layers)].includes(assetId)) {
+        throw fail('这张图仍被已保存草稿或当前发布版本选用，请先取消选择并保存或发布', 'IN_USE')
+      }
+      storage.meta.set(removedKey(id), [...hidden, assetId])
+      return list(id)
+    })
   }
   function asset(id, assetId) {
     requirePersona(id)
@@ -145,7 +173,8 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
   }
   function assertSelection(id, layers) {
     requirePersona(id)
-    const allowed = new Set(registered(id))
+    const hidden = new Set(removed(id))
+    const allowed = new Set(registered(id).filter(assetId => !hidden.has(assetId)))
     if (idsOf(layers).some(assetId => !allowed.has(assetId))) {
       try { const builtin = defaultFor(id); if (builtin) allowed.add(builtin.id) } catch {}
     }
@@ -164,7 +193,7 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
   function assertLayersUsable(id, layers) {
     requirePersona(id)
     const appearance = layers?.appearance
-    const activeIds = appearance?.referenceVariants?.length ? appearance.referenceVariants.map(v => v.assetId) : (appearance?.referenceAssetIds || [])
+    const activeIds = [...new Set([...(appearance?.referenceVariants?.length ? appearance.referenceVariants.map(v => v.assetId) : (appearance?.referenceAssetIds || [])), ...(appearance?.defaultReferenceAssetId ? [appearance.defaultReferenceAssetId] : [])])]
     for (const assetId of activeIds) {
       try {
         if (!registered(id).includes(assetId)) throw new Error('未授权')
@@ -174,11 +203,20 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
     }
   }
   function assertPublish(id) { assertLayersUsable(id, requirePersona(id).draft?.layers) }
+  // A validated historical rollback makes its retained, previously hidden
+  // grants selectable again. Call in the same transaction as the rollback.
+  function restoreSelection(id, layers) {
+    const restored = new Set(idsOf(layers).filter(assetId => registered(id).includes(assetId)))
+    const hidden = removed(id)
+    if (hidden.some(assetId => restored.has(assetId))) storage.meta.set(removedKey(id), hidden.filter(assetId => !restored.has(assetId)))
+  }
   function copyGrants(fromId, toId) {
     requirePersona(fromId); requirePersona(toId)
-    storage.meta.set(key(toId), [...registered(fromId)])
+    const grants = registered(fromId)
+    storage.meta.set(key(toId), [...grants])
+    storage.meta.set(removedKey(toId), removed(fromId).filter(assetId => grants.includes(assetId)))
   }
-  return { list, upload, asset, defaultFor, assertSelection, grantSelection, assertPublish, assertLayersUsable, copyGrants }
+  return { list, upload, remove, asset, defaultFor, assertSelection, grantSelection, assertPublish, assertLayersUsable, restoreSelection, copyGrants }
 }
 
 /** Keep local file errors as known, uncharged input failures. */

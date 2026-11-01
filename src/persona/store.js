@@ -118,6 +118,9 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
       const lay = normalizeLayers(layers)
       db.run('INSERT INTO personas(id, name, origin, draft_json, draft_base, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
         id, str(name || lay.identity.name || id, 40), origin, JSON.stringify(lay), t, t)
+      // Persist a per-ID incarnation across deletion so an asynchronous edit
+      // cannot confuse a recreated card with the old card in the same millisecond.
+      storage.nextSeq(`persona.instance:${id}`)
       db.run('DELETE FROM persona_tombstones WHERE id = ?', id)
       if (publish) publishDraft(id, { note })
       return view(row(id))
@@ -212,6 +215,7 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
       db.run('DELETE FROM persona_revisions WHERE persona_id = ?', id)
       db.run('DELETE FROM personas WHERE id = ?', id)
       storage.meta.set(`persona.references:${id}`, [])
+      storage.meta.set(`persona.references.removed:${id}`, [])
       db.run('INSERT INTO persona_tombstones(id, deleted_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now())
       return true
     })
@@ -219,6 +223,9 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
 
   const list = ({ includeArchived = true } = {}) => db.all('SELECT * FROM personas ORDER BY created_at').map(view).filter((p) => includeArchived || !p.archivedAt)
   const get = (id) => view(row(id))
+  // Existing databases without this sequence represent the original instance.
+  const instanceVersion = (id) => Number(db.get('SELECT value FROM sequences WHERE name = ?', `persona.instance:${id}`)?.value || 0)
+  const editSnapshot = (id) => db.tx(() => ({ persona: get(id), instance: instanceVersion(id) }))
   const revisions = (id) => db.all('SELECT revision, note, created_at FROM persona_revisions WHERE persona_id = ? ORDER BY revision DESC', id).map((r) => ({ revision: Number(r.revision), note: r.note, createdAt: r.created_at }))
   function revision(id, rev) {
     const r = revisionRow(id, Number(rev))
@@ -300,5 +307,5 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
     return { error: '没有设置全局默认人设', scope: 'global' }
   }
 
-  return { create, saveDraft, publish, rollback, discardDraft, duplicate, archive, unarchive, remove, list, get, revisions, revision, exportCard, importCard, seed, bind, bindings, resolve, checkId }
+  return { create, saveDraft, publish, rollback, discardDraft, duplicate, archive, unarchive, remove, list, get, instanceVersion, editSnapshot, revisions, revision, exportCard, importCard, seed, bind, bindings, resolve, checkId }
 }
