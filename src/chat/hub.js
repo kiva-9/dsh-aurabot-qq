@@ -10,7 +10,7 @@ import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { checkLocalFile, displayName, FILE_BASE64_MAX } from '../delivery/files.js'
-import { parseMessageEvent } from './inbound.js'
+import { parseMessageEvent, isStickerSegment as isQQStickerSegment } from './inbound.js'
 import { expandMentions, hasMention, stripAtTags } from './mentions.js'
 import { createFaces, textToSegments, stripFaceTags, speakableText } from './faces.js'
 import { parseReply, bubbleDelay, wantsVoice, capItems, compactShortReplies } from './reply.js'
@@ -26,6 +26,7 @@ import { defaultModel, pickReasoningEffort, canSeeImages } from '../core/llm.js'
 import { resolveChatModel } from './chat-model.js'
 import { probeAgent } from '../runtime/host-contract.js'
 import { createOutbox } from '../delivery/outbox.js'
+import { recordCompletedStickerTurn } from '../features/stickers.js'
 import { createScheduler } from '../runtime/scheduler.js'
 import { createMediaResolver } from '../runtime/media.js'
 import { createWakeInbox } from '../runtime/wake-inbox.js'
@@ -69,6 +70,14 @@ const sessionKey = (id) => {
  */
 // 模拟测试：这里面发出去的消息只记下来，不真发
 const captureStore = new AsyncLocalStorage()
+const deliveryGuard = new AsyncLocalStorage()
+// Tool-driven deliveries share the current generation's identity without
+// trusting model-supplied chat, account, request or turn identifiers.
+const toolTurnScope = new AsyncLocalStorage()
+// This mark only exists on a freshly resolved outbox message, never in stored
+// data or in model/plugin supplied segments.
+const verifiedSticker = Symbol('verified sticker decision')
+const isStickerSegment = (segment) => segment?.type === 'sticker-ref' || segment?.type === 'sticker' || isQQStickerSegment(segment)
 // 工具调用时带的「在执行第几条消息」（群聊里主人和别人混在一轮时，靠它核对是不是主人的要求）
 const callRef = new AsyncLocalStorage()
 const FOR_MESSAGE = {
@@ -411,9 +420,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       execute: (args, exec) => {
         const st = turnState.get(sessionKey(sid))
         if (disposed || st?.plannerControl || st?.controller?.signal.aborted) return {ok:false,code:'PLANNER_STOPPED',message:'当前决策已经结束'}
+        const sourceChat = chatOfSession(sid)
+        const scope = st?.turnId && st.controller && running.has(sourceChat) ? {
+          chatId: sourceChat, accountId: st.account, turnId: st.turnId, signal: st.controller.signal,
+          requestIds: (st.requests || []).map(r => r.id), targetEpochs: st.stickerTargetEpochs,
+        } : null
+        const runTool = () => toolTurnScope.run(scope, () => tool.execute(args, exec))
         const planner=getPlanner()
         if (planner && st?.requests?.length && levelFor(getConfig(), {kind:chatOfSession(sid).split(':')[0],chatId:chatOfSession(sid),userId:chatOfSession(sid).slice(8)})!=='chat') {
-          if (tool.plannerBudgeted) return tool.execute(args,exec)
+          if (tool.plannerBudgeted) return runTool()
           try {
             const actor=turnActor(sid)
             if(actor.error)return {ok:false,code:'REQUEST_REQUIRED',message:actor.error}
@@ -430,7 +445,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
           }
         }
         if(st)st.lastAction=/search|extract|reference_candidates/.test(tool.name)?'search':/recall|memory|query_images/.test(tool.name)?'recall':/draw_image|song/.test(tool.name)?'submit_job':st.lastAction
-        return tool.execute(args, exec)
+        return runTool()
       },
     }
   }
@@ -445,8 +460,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   /** 真正发到 QQ。返回网关结果；按设置不发时返回 null；网关出错时抛出（带 outcome，outbox 据此决定重不重发）。 */
   async function transmit(chatId, message, note, { force = false } = {}) {
     if (disposed) return null
-    const cfg = getConfig()
-    const account = String(cfg.botQQ)
+    const permit = message[verifiedSticker]
+    const approvedSticker = permit && JSON.stringify(permit.segment)
     const tgt = targetOf(chatId)
     if (!tgt) return null
     // 扩展模块最后改一次（加签名、过滤敏感词、转发到别处……）；返回 null 就不发
@@ -460,6 +475,26 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
     }
     if (disposed) return null
+    const cfg = getConfig()
+    const account = String(cfg.botQQ)
+    if (permit) {
+      // hooks.send may await, so check again at the last boundary before QQ.
+      const guard = deliveryGuard.getStore()
+      if (typeof guard?.shouldSend !== 'function')
+        throw Object.assign(new Error('表情缺少当前发送守卫'), { outcome: 'rejected' })
+      const verdict = guard.shouldSend()
+      const allowed = verdict && typeof verdict.then === 'function' ? await verdict : verdict
+      const actual = message.filter(isStickerSegment)
+      const material = stickers?.segmentFor?.({ id: permit.itemId }, { chatId, accountId: permit.accountId })
+      if (!allowed || guard.signal?.aborted || !validStickerPermit(permit, chatId, permit.epoch) || actual.length !== 1 ||
+          JSON.stringify(actual[0]) !== approvedSticker || JSON.stringify(material) !== approvedSticker) {
+        throw Object.assign(new Error('表情决策或素材在发送前已失效'), { outcome: 'rejected' })
+      }
+    } else {
+      // A plugin cannot add an unapproved sticker to an otherwise normal send.
+      message = message.filter(s => !isStickerSegment(s))
+      if (!message.some(s => s?.type !== 'reply')) return null
+    }
     if (force) {}
     else if (!cfg.enabled) {
       log.info(`总开关关着，没发 → ${chatId}：${note}`)
@@ -501,14 +536,25 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
 
   /** 发送前把引用换成实际内容：asset:ID → 资产文件的 base64；sticker-ref → 表情库里那张。 */
-  async function resolveMessage(message, { chatId } = {}) {
+  function validStickerPermit(permit, chatId, epoch) {
+    const cfg = getConfig()
+    if (!permit || disposed || !cfg.enabled || cfg.dryRun || !cfg.stickers?.enabled ||
+        permit.accountId !== String(cfg.botQQ) || permit.chatId !== chatId || permit.epoch !== epoch ||
+        epoch !== storage.epochs.current(chatId)) return false
+    try { return stickers?.validateDecision?.(permit) === true } catch { return false }
+  }
+
+  async function resolveMessage(message, { chatId, epoch } = {}) {
     const out = []
+    let verified = null
     for (const seg of message) {
       if (seg.type === 'sticker-ref') {
-        const key = seg.data.id || seg.data.md5
-        const item = stickers.match(key, chatId)
-        const real = item && stickers.segmentFor(item, chatId)
+        const permit = seg.data?.permit, itemId = String(seg.data?.id || '')
+        if (verified || !itemId || permit?.itemId !== itemId || !validStickerPermit(permit, chatId, epoch))
+          throw Object.assign(new Error('表情缺少有效的发送决策'), { outcome: 'rejected' })
+        const real = stickers?.segmentFor?.({ id: itemId }, { chatId, accountId: permit.accountId })
         if (!real) throw Object.assign(new Error('这张表情找不到了'), { outcome: 'rejected' })
+        verified = { ...permit, itemId, segment: real }
         out.push(real)
         continue
       }
@@ -521,6 +567,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
       out.push(seg)
     }
+    if (verified) Object.defineProperty(out, verifiedSticker, { value: verified })
     return out
   }
 
@@ -528,7 +575,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
   /** 发一组 outbox 段；模拟测试里直接截下来，不落库。返回 outbox 的汇总和每段的结果。 */
   function sendItems(...args) { return disposed ? Promise.resolve({ delivered: 0, failed: 0, unknown: 0, skipped: 0, canceled: 1, pending: 0, messageIds: [], rows: [] }) : track(sendItemsNow)(...args) }
-  async function sendItemsNow(chatId, items, { epoch, requestId, batchId: stableBatchId, shouldSend, retry = false } = {}) {
+  async function sendItemsNow(chatId, items, { epoch, requestId, batchId: stableBatchId, shouldSend, signal, retry = false } = {}) {
     const cap = captureStore.getStore()
     if (cap) {
       const rows = []
@@ -539,7 +586,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       return { delivered: items.length, failed: 0, unknown: 0, canceled: 0, skipped: 0, messageIds: rows.map((r) => r.platformMsgId), rows }
     }
     const batchId = outbox.enqueue({ batchId: stableBatchId, chatId, requestId, epoch, items, requiresGuard: typeof shouldSend === 'function' })
-    const sum = await (retry ? outbox.retry(batchId, { shouldSend }) : outbox.deliver(batchId, { shouldSend }))
+    const sum = await deliveryGuard.run({ shouldSend, signal }, () => retry ? outbox.retry(batchId, { shouldSend }) : outbox.deliver(batchId, { shouldSend }))
     return { ...sum, rows: outbox.rows(batchId) }
   }
 
@@ -676,31 +723,18 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     return { ...r, name: data.name }
   }
 
-  function stickerItem(query, replyId, chatId, { allowManual = false } = {}) {
-    const item = stickers.match(query && typeof query === 'object' ? query.id || query.md5 : query, allowManual ? { chatId, allowManual: true, cooldown: true } : chatId)
-    if (!item) {
-      log.debug(`没找到「${query}」这张表情，跳过`)
-      return null
-    }
-    const segment = allowManual ? stickers.segmentFor(item, chatId) : { type: 'sticker-ref', data: { id: item.id, md5: item.md5, name: item.name || '' } }
-    if (!segment) return null
-    return { kind: 'sticker', message: [...quote(replyId), segment], note: `[表情] ${item.name || item.md5.slice(0, 8)}`, stickerId: item.id || item.md5 }
+  function stickerItem(item, permit, replyId) {
+    if (!item?.id || !permit?.decisionId || permit.itemId !== item.id) return null
+    return { kind: 'sticker', message: [...quote(replyId), { type: 'sticker-ref', data: { id: item.id, permit } }],
+      note: `[表情] ${item.name || String(item.id).slice(0, 8)}`, stickerId: item.id, permit }
   }
 
-  async function sendSticker(chatId, query, replyId, { allowManual = false, authorizeManual } = {}) {
-    const account = String(getConfig().botQQ), epoch = storage.epochs.current(chatId)
-    const stickerKey = query && typeof query === 'object' ? query.id || query.md5 : query
-    const current = () => !disposed && account === String(getConfig().botQQ) && epoch === storage.epochs.current(chatId) &&
-      (!allowManual || (typeof authorizeManual === 'function' && authorizeManual() === true)) &&
-      Boolean(stickers.match(stickerKey, allowManual ? { chatId, allowManual: true, cooldown: true } : chatId))
-    if (!current()) return false
-    const it = stickerItem(query, replyId, chatId, { allowManual })
-    if (!it) return false
-    const r = await sendItems(chatId, [it], { epoch, shouldSend: current })
-    if (!r.delivered) return false
-    stickers.markUsed?.(it.stickerId, chatId)
-    bump('stickers')
-    return true
+  // Compatibility entry point: it has the same decision and request checks as
+  // every other path; a caller's query or claimed authorization is only a hint.
+  async function sendSticker(chatId, query, _replyId, options = {}) {
+    const suggestion = query && typeof query === 'object' ? query.id || query.md5 || query.name : query
+    const r = await deliver(chatId, '', { ...options, allowEmpty: true, suggestions: [String(suggestion || '')] })
+    return Boolean(r?.deliveries?.some(delivery => delivery.rows?.some(row => row.kind === 'sticker' && row.state === 'delivered')))
   }
 
   async function imageItem(src) {
@@ -758,8 +792,16 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
    */
   async function deliver(chatId, text, opts = {}) {
     const cfg = getConfig()
-    const currentReply = () => !disposed && !opts.signal?.aborted &&
-      (opts.epoch === undefined || opts.epoch === storage.epochs.current(chatId)) &&
+    const toolScope = toolTurnScope.getStore(), sameChat = toolScope?.chatId === chatId
+    if (toolScope?.targetEpochs && !toolScope.targetEpochs.has(chatId)) toolScope.targetEpochs.set(chatId, storage.epochs.current(chatId))
+    const accountId = String(toolScope?.accountId ?? opts.accountId ?? cfg.botQQ)
+    const epoch = toolScope?.targetEpochs?.get(chatId) ?? opts.epoch ?? storage.epochs.current(chatId)
+    const requestIds = [...new Set(toolScope ? (sameChat ? toolScope.requestIds : []) : opts.requestIds || (opts.requestId ? [opts.requestId] : []))]
+    const turnId = String(toolScope?.turnId || opts.turnId || requestIds[0] || randomUUID())
+    const signals = [opts.signal, toolScope?.signal].filter(Boolean)
+    const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0]
+    const currentReply = () => !disposed && !signal?.aborted &&
+      accountId === String(getConfig().botQQ) && epoch === storage.epochs.current(chatId) &&
       (typeof opts.shouldSend !== 'function' || opts.shouldSend() !== false)
     const canceledReply = () => ({ confirmed: false, complete: false, canceled: true, deliveries: [] })
     if (!currentReply()) return canceledReply()
@@ -781,13 +823,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     // Replyer 只选择原文的合法切点；使用验证后的结构，保留原文和混排顺序。
     let plannedReply
     if (typeof replyer === 'function' && !opts.simulate) {
-      const rw = await replyer(text, { chatId, requestId: opts.requestId, persona: opts.persona, signal: opts.signal, shouldContinue: currentReply })
+      const rw = await replyer(text, { chatId, requestId: opts.requestId, persona: opts.persona, signal, shouldContinue: currentReply })
       if (rw?.rewritten) { text = rw.text; plannedReply = rw.reply }
       else if (rw?.reason && rw.reason !== '没开') log.debug(`${chatId}：回复没改写（${rw.reason}）`)
     }
     if (!currentReply()) return canceledReply()
     const r = plannedReply || parseReply(text)
-    if (r.silent) {
+    // An absent final message can still fulfill a verified explicit request;
+    // an actual silence token is an intentional choice and stays silent.
+    if (r.silent && (!opts.allowEmpty || String(text || '').trim())) {
       log.info(`${chatId}：她选择不说话`)
       if (chatId.startsWith('group:')) groupEngaged.delete(chatId.slice(6)) // 不想聊就退出这个话题
       return
@@ -805,13 +849,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       const chance = inGroup ? cfg.voice.groupAutoChance : cfg.voice.autoChance
       if (all.length <= cfg.voice.autoMaxChars && Math.random() < chance * mood(chatId).voice) items = [{ kind: 'voice', value: all }]
     }
-    // 群里别刷屏：最多 3 条，多出来的文字合进第 3 条（不丢尾巴）
-    if (inGroup && items.length > 3) items = capItems(items, 3)
-    // 按概率补一张表情（群里已经有两条以上就不补了）
-    if (cfg.stickers.enabled && !items.some((i) => i.kind === 'sticker') && !(inGroup && items.length >= 2) && Math.random() < cfg.stickers.autoChance * mood(chatId).sticker) {
-      const pick = stickers.pickForReply(texts.map((t) => t.value).join(' '), chatId)
-      if (pick) items.push({ kind: 'sticker', value: pick })
-    }
     if (hooks?.items) {
       try {
         const next = await hooks.items(items, { chatId, text, userText: opts.userText || '' })
@@ -821,6 +858,34 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         log.warn('扩展模块改写回复出错：', error.message)
       }
     }
+    // Tags, hooks and tools are hints only. One independent decision is made
+    // after all item hooks, using trusted request evidence from storage.
+    const suggestions = [...(opts.suggestions || []), ...items.filter(i => i?.kind === 'sticker').map(i => i.value)]
+      .map(v => String(v && typeof v === 'object' ? v.id || v.name || '' : v || '').slice(0, 120)).filter(Boolean).slice(0, 16)
+    items = items.filter(i => i && typeof i === 'object' && i.kind !== 'sticker')
+    // Hints must not displace text or quotations from the group bubble limit.
+    if (inGroup && items.length > 3) items = capItems(items, 3)
+    const decisionScope = { accountId, chatId, epoch, requestIds, turnId }
+    let stickerDecision = null, stickerPermit = null, stickerAttempted = false, stickerSettled = false, completedTurn = false
+    if (cfg.enabled && cfg.stickers?.enabled && !cfg.dryRun && !opts.simulate && !captureStore.getStore() && currentReply()) {
+      try {
+        stickerDecision = await stickers?.decideForReply?.({ ...decisionScope,
+          replyText: items.filter(i => i.kind === 'text' || i.kind === 'voice').map(i => String(i.value || '')).join('\n'),
+          suggestions, automaticAllowed: !inGroup || items.length < 3, isCurrent: currentReply, signal })
+        const roomForSticker = !inGroup || items.length < 3 || stickerDecision?.explicit === true
+        if (stickerDecision?.decision === 'send' && stickerDecision.item?.id && roomForSticker && currentReply()) {
+          const permit = { ...decisionScope, decisionId: stickerDecision.decisionId, itemId: stickerDecision.item.id }
+          const claimed = stickers?.claimDecision?.(permit)
+          if (claimed?.decision === 'send' && claimed.item?.id === permit.itemId && validStickerPermit(permit, chatId, epoch)) {
+            stickerPermit = permit
+            items.push({ kind: 'sticker', value: claimed.item, permit })
+          } else if (claimed?.decision === 'send') {
+            stickers?.settleDecision?.({ decisionId: permit.decisionId, status: 'cancelled' })
+          }
+        }
+      } catch (error) { log.warn(`${chatId}：表情决策失败，继续发送正文：`, error.message) }
+    }
+    try {
     // 引用回复：她写的编号换成那条群消息的 QQ 消息 ID（语音条不能带引用，就不引用了）
     const refs = inGroup ? groupRefs.get(chatId.slice(6)) || {} : {}
     // 组成 outbox 段；戳一戳不是消息：在它的位置先把前面的段发掉再戳
@@ -833,20 +898,40 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       let out = null
       if (it.kind === 'text') out = await richTextItem(chatId, it.value, replyId, missedMentions)
       if (out && it === autoQuote && !out.message.some((s) => s.type === 'at' && s.data.qq === opts.autoReply.uid)) out.message.splice(1, 0, { type: 'at', data: { qq: opts.autoReply.uid } }, { type: 'text', data: { text: ' ' } })
-      else if (it.kind === 'voice') out = (cfg.voice.enabled && await voiceItem(it.value, { ...opts.persona?.layers?.voice, chatId, requestId: opts.requestId, signal: opts.signal })) || await richTextItem(chatId, it.value, replyId, missedMentions)
-      else if (it.kind === 'sticker') out = stickerItem(it.value, replyId, chatId)
+      else if (it.kind === 'voice') out = (cfg.voice.enabled && await voiceItem(it.value, { ...opts.persona?.layers?.voice, chatId, requestId: opts.requestId, signal })) || await richTextItem(chatId, it.value, replyId, missedMentions)
+      else if (it.kind === 'sticker') out = stickerItem(it.value, it.permit, replyId)
       else if (it.kind === 'image') out = await imageItem(it.value)
       else if (it.kind === 'poke') { if (!opts.simulate) groups.push('poke', []); continue }
       if (!out) continue
       out.delayMs = opts.simulate ? 0 : Math.round(bubbleDelay(it.kind === 'text' ? it.value : '') * mood(chatId, { explicitRequest: !!opts.requestId }).delay)
-      groups.at(-1).push(out)
+      if (out.kind === 'sticker') {
+        if (groups.at(-1).length) groups.push([])
+        groups.at(-1).push(out)
+        groups.push([])
+      } else groups.at(-1).push(out)
     }
     const confirmed = [], deliveries = []
-    const expected = groups.reduce((n, group) => n + (Array.isArray(group) ? group.length : 0), 0)
+    const expectedText = groups.reduce((n, group) => n + (Array.isArray(group) ? group.filter(it => it.kind !== 'sticker').length : 0), 0)
     for (const g of groups) {
       if (g === 'poke') { if(!opts.shouldSend || opts.shouldSend())await pokeBack(chatId); continue }
       if (!g.length) continue
-      const res = await sendItems(chatId, g, { epoch: opts.epoch, requestId: opts.requestId, shouldSend: opts.shouldSend })
+      const stickerGroup = g[0].kind === 'sticker'
+      let lastGuardRow
+      const stickerGuard = stickerGroup ? (row) => {
+        if (row) lastGuardRow = row
+        return validStickerPermit(stickerPermit, chatId, epoch) && !signal?.aborted &&
+          (typeof opts.shouldSend !== 'function' || opts.shouldSend(lastGuardRow))
+      } : opts.shouldSend
+      let res
+      if (stickerGroup) stickerAttempted = true
+      try { res = await sendItems(chatId, g, { epoch, requestId: opts.requestId, shouldSend: stickerGuard, signal }) }
+      catch (error) {
+        if (!stickerGroup) throw error
+        // Outbox may have reached QQ before a local persistence error.
+        try { stickerSettled = stickers?.settleDecision?.({ decisionId: stickerPermit.decisionId, status: 'unknown' }) === true } catch {}
+        log.warn(`${chatId}：表情发送结果不确定，继续处理正文：`, error.message)
+        continue
+      }
       deliveries.push(res)
       for (const row of res.rows) {
         const it = g[row.seq]
@@ -854,7 +939,12 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         const ok = row.state === 'delivered'
         if (ok) confirmed.push({ ...it, platformMsgId: row.platformMsgId })
         if (it.kind === 'voice' && ok) bump('voice')
-        if (it.kind === 'sticker' && ok) { stickers.markUsed?.(it.stickerId, chatId); bump('stickers') }
+        if (it.kind === 'sticker') {
+          const status = ok ? 'sent' : row.state === 'unknown' || row.state === 'sending' || row.state === 'pending' ? 'unknown' :
+            row.state === 'canceled' ? 'cancelled' : 'failed'
+          try { stickerSettled = stickers?.settleDecision?.({ decisionId: stickerPermit.decisionId, status }) === true } catch (error) { log.warn('记录表情发送结果失败：', error.message) }
+          if (ok) bump('stickers')
+        }
         // 语音条网关不收：这一段改发文字
         if (it.kind === 'voice' && row.state === 'failed' && it.fallbackText) {
           log.warn('语音没发出去，改发文字')
@@ -875,6 +965,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       groupEngaged.set(gid, Date.now() + ENGAGE_MS) // 在群里说了话 = 加入了话题
     }
     const deliveredText = confirmed.map(i => i.kind === 'text' ? plainOf(i.message) : i.kind === 'voice' ? i.fallbackText || '[语音]' : `[${i.kind}]`).join('\n')
+    // Only confirmed gateway receipts are history; generated model text and
+    // unresolved/unknown outbox rows are never treated as sent messages.
+    try {
+      const key = `stickers:recent-sent:${JSON.stringify([accountId, chatId])}`
+      const old = JSON.parse(storage.db.get('SELECT value FROM meta WHERE key = ?', key)?.value || '[]')
+      const history = (Array.isArray(old) ? old : []).filter(x => x?.epoch === epoch).slice(-9)
+      history.push({ epoch, at: Date.now(), text: deliveredText.slice(0, 500) })
+      storage.db.run('INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', key, JSON.stringify(history))
+    } catch (error) { log.debug('记录已发送上下文失败：', error.message) }
     logChat(chatId, 'bot', deliveredText)
     lastChatAt = Date.now()
     if (chatId === `private:${cfg.ownerQQ}`) lastBotToOwner = { at: Date.now(), text: deliveredText,
@@ -883,7 +982,25 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       personaId: opts.persona?.personaId, personaRevision: opts.persona?.revision, epoch: opts.epoch,
       sourceMessageIds: opts.sourceMessageIds || (opts.requestId ? storage.requests.get(opts.requestId)?.sourceMessageIds || [] : []),
       confirmed: true, messageIds: confirmed.map(i => i.platformMsgId) })
-    return { confirmed: true, complete: confirmed.length === expected, deliveries, missedMentions }
+    completedTurn = expectedText ? confirmed.filter(it => it.kind !== 'sticker').length === expectedText : confirmed.some(it => it.kind === 'sticker')
+    return { confirmed: true, complete: completedTurn, deliveries, missedMentions }
+    } finally {
+      if (stickerDecision?.decisionId) {
+        // A claim that could not reach an outbox row is still consumed.
+        if (stickerPermit && !stickerSettled) {
+          try { stickers?.settleDecision?.({ decisionId: stickerPermit.decisionId, status: stickerAttempted ? 'unknown' : 'cancelled' }) } catch {}
+        } else if (!stickerPermit && stickerDecision.decision === 'send') {
+          try { stickers?.settleDecision?.({ decisionId: stickerDecision.decisionId, status: 'cancelled' }) } catch {}
+        }
+      }
+      if (!opts.simulate && !cfg.dryRun && !captureStore.getStore() && completedTurn) {
+        try {
+          const recorded = stickers?.completeTurn?.({ ...decisionScope, decisionId: stickerDecision?.decisionId, completed: true })
+          if (recorded === undefined) recordCompletedStickerTurn({ storage, ...decisionScope })
+        }
+        catch (error) { log.warn('记录表情回合失败：', error.message) }
+      }
+    }
   }
 
   /** 发出去的消息段 → 流水里的文字（表情和 @ 留个占位，别丢掉分开的几段文字）。 */
@@ -906,7 +1023,17 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     turnState.set(key, st)
     // 主人在 DSH 会话窗口直接打字：只有主人能操作 DSH，这一轮算主人说的（QQ 转进来的 source.kind 是 aurabot）
     if(event.type==='user/message'){if(event.data?.source?.kind==='user')st.directOwner=true;return}
-    if(event.type==='turn/start'){st.activeTurn=event.data?.turn;return}
+    if(event.type==='turn/start'){
+      // A turn started directly in DSH has no QQ request, but it still needs a
+      // stable identity shared by its tools and eventual delivery.
+      if (!running.has(chatId)) {
+        st.controller?.abort(); st.controller = new AbortController(); st.account = String(getConfig().botQQ)
+        st.epoch = storage.epochs.current(chatId); st.turnId = randomUUID(); st.requests = []; st.stickerSuggestions = []
+        st.stickerTargetEpochs = new Map([[chatId, st.epoch]]); st.toolCalls = 0; st.plannerControl = null; st.plannerContext = null
+        running.add(chatId)
+      }
+      st.activeTurn=event.data?.turn;return
+    }
     if(st.activeTurn!==undefined && event.data?.turn!==undefined && st.activeTurn!==event.data.turn)return
     if(event.type==='step/start')st.stepStartedAt=Date.now()
     if(event.type==='assistant/message'||event.type==='assistant/attempt'){
@@ -951,7 +1078,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       const epoch = st.epoch
       const persona = st.persona
       const requestId = st.requests?.[0]?.id ?? null
-      const requests=[...(st.requests||[])],control=st.plannerControl,context=st.plannerContext,controller=st.controller,part=st.participation,autoReply=st.autoReply
+      const requests=[...(st.requests||[])],control=st.plannerControl,context=st.plannerContext,controller=st.controller,part=st.participation,autoReply=st.autoReply,
+        turnId=st.turnId, accountId=st.account, suggestions=[...(st.stickerSuggestions||[])]
       st.autoReply=null
       st.participation=null
       if(context&&!control)try {
@@ -965,6 +1093,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       st.directOwner = false
       st.system = null
       st.wantVoice = false
+      st.stickerSuggestions = []
       if(control){release(chatId);return}
       if(part&&completed)participation.observeDecision(part.scope,{...part,decision:parseReply(text).items.length?'reply':'skip'})
       if (sys) {
@@ -978,7 +1107,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         release(chatId)
         return
       }
-      if (!text) {for(const q of requests)storage.requests.setState(q.id,'ended');return release(chatId)}
+      if (!text && !requests.length && !suggestions.length) return release(chatId)
       // 这一轮开始后换过人设 / 重开过：迟到的回复不发
       if (epoch !== undefined && epoch !== storage.epochs.current(chatId)) {
         log.info(`${chatId}：会话已经换过代次，上一代的回复不发`)
@@ -987,6 +1116,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       // 发完再放开：发送期间来的消息也攒到下一段
       const shouldSend=()=>!disposed&&!controller?.signal.aborted&&(!context||getPlanner()?.shouldContinue(context)!==false)
       track(deliver)(chatId, text, { wantVoice, userText: st.lastText || '', epoch, requestId, persona, shouldSend, signal: controller?.signal, autoReply,
+        turnId, accountId, suggestions, allowEmpty: requests.length > 0 || suggestions.length > 0,
         requestIds: requests.map(q => q.id),
         sourceMessageIds: requests.flatMap(q=>q.sourceMessageIds) }).then(result=>{
         if(disposed)return
@@ -1680,7 +1810,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!opts.steer || !st.persona) st.persona = opts.persona || null
     if (senderId) st.senders.add(String(senderId))
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
-    if (!opts.steer) { st.toolCalls = 0; st.controller?.abort(); st.controller = new AbortController(); st.plannerControl=null;st.decisionId=null;st.activeTurn=undefined;st.plannerContext=null;st.account=String(getConfig().botQQ);st.wakeId=opts.wakeId||null;st.turnId=opts.requests?.[0]?.id }
+    if (!opts.steer) { st.toolCalls = 0; st.controller?.abort(); st.controller = new AbortController(); st.plannerControl=null;st.decisionId=null;st.activeTurn=undefined;st.plannerContext=null;st.account=String(getConfig().botQQ);st.wakeId=opts.wakeId||null;st.turnId=opts.requests?.[0]?.id || randomUUID();st.stickerSuggestions=[];st.stickerTargetEpochs=new Map() }
     if(!opts.steer)st.participation=opts.participation||null
     // 插话时换了个人找她就不知道该引用谁了，不猜
     st.autoReply = !opts.steer || st.autoReply?.uid === opts.autoReply?.uid ? opts.autoReply || null : null
@@ -1690,6 +1820,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     // 这一轮在回哪些请求（插话时追加），以及开始时的会话代次
     st.requests = opts.steer ? [...(st.requests || []), ...(opts.requests || [])] : [...(opts.requests || [])]
     if (!opts.steer || st.epoch === undefined) st.epoch = storage.epochs.current(chat.chatId)
+    if (!opts.steer) st.stickerTargetEpochs.set(chat.chatId, st.epoch)
     // 上一句也留着：这一句太短（「嗯嗯」「然后呢」）时一起拿去想起相关的事
     if (st.lastText) st.prevText = st.lastText
     st.lastText = String(opts.queryText ?? content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')).slice(-600)
@@ -1848,6 +1979,18 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   /** 这一轮在回的请求：[{ id, actorId, sourceMessageIds, ... }]。 */
   function turnRequests(sessionId) {
     return turnState.get(sessionKey(sessionId))?.requests || []
+  }
+  function suggestSticker(sessionId, query, { simulated = false } = {}) {
+    if (simulated || captureStore.getStore()) return { ok: true, simulated: true, code: 'SIMULATED', message: '模拟：未发送表情，也未进行独立决策' }
+    const st = turnState.get(sessionKey(sessionId)), chatId = chatOfSession(sessionId), cfg = getConfig()
+    if (!st || !chatId || !running.has(chatId) || !st.turnId || !st.controller || st.controller.signal.aborted ||
+        st.account !== String(cfg.botQQ) || st.epoch !== storage.epochs.current(chatId))
+      return { ok: false, code: 'STALE_TURN', message: '当前回合已结束，无法登记表情建议' }
+    if (!cfg.enabled || cfg.dryRun || !cfg.stickers?.enabled)
+      return { ok: false, code: 'DISABLED', message: '当前设置不允许发送表情' }
+    const value = String(query || '').trim().slice(0, 120)
+    if (value && !(st.stickerSuggestions || []).includes(value)) st.stickerSuggestions = [...(st.stickerSuggestions || []), value].slice(0, 16)
+    return { ok: true, code: 'PENDING_DECISION', message: '已登记建议，待本轮独立决策；尚未发送表情' }
   }
   function plannerContext(sessionId,requestId) {
     const st=turnState.get(sessionKey(sessionId)),r=storage.requests.get(requestId)
@@ -2028,6 +2171,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     sendVoiceFile,
     sendFile,
     sendSticker,
+    suggestSticker,
     sendImage,
     sendSegments,
     pushToSession,

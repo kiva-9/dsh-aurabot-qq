@@ -46,10 +46,11 @@ export const DEFAULTS = {
     wsToken: '',
   },
   model: { provider: '', model: '', reasoningEffort: 'low', vision: 'auto' }, // 留空 = 跟随 DSH 默认；vision: auto/on/off
-  // 各个后台角色用哪个模型；留空 = 用上面的全局模型。replyer 留空 = 不另外改写（聊天会话直接写最终回复）
+  // 后台角色留空跟随全局模型；stickerDecision 先跟随 vision，replyer 留空则不另外改写。
   roles: {
     replyer: { provider: '', model: '', reasoningEffort: '' },
     vision: { provider: '', model: '', reasoningEffort: '' },
+    stickerDecision: { provider: '', model: '', reasoningEffort: '' },
     memory: { provider: '', model: '', reasoningEffort: '' },
     learning: { provider: '', model: '', reasoningEffort: '' },
     judge: { provider: '', model: '', reasoningEffort: '' },
@@ -93,7 +94,13 @@ export const DEFAULTS = {
     enabled: true,
     libraryScope: 'account', // 同一机器人账号共用图库；chat 保留按聊天隔离。
     autoReview: true, // 新素材经完整模型分析明确 approve 后自动可用。
-    autoChance: 0.35, // 文字回复自动配一张表情的概率
+    autoChance: 0.35, // 主动表情每轮共用概率；明确请求例外。
+    minGapTurns: 2, // 同一聊天中两次主动表情之间至少间隔的轮次。
+    chatCooldownMs: 60000, // 同一聊天的主动表情冷却。
+    sameStickerCooldownMs: 600000, // 同一聊天发送相同素材的冷却，明确请求也适用。
+    recentWindowSize: 6, // 近期已发素材的参考窗口。
+    candidateCount: 20, // 提供给视觉模型判断的最多候选数。
+    decisionTimeoutMs: 15000, // 视觉决策最多等待时间。
     collect: true, // 偷表情
     collectMode: 'auto',
     fromGroups: true,
@@ -249,6 +256,12 @@ export function normalize(raw) {
   const rvc = isObj(c.voice.rvc) ? c.voice.rvc : {}
   c.voice.rvc = { enabled: rvc.enabled === true, voice: String(rvc.voice || '').slice(0, 200), pitch: num(rvc.pitch, 0, -24, 24), fallback: rvc.fallback === 'error' ? 'error' : 'original', timeoutMs: num(rvc.timeoutMs, 120000, 1000, 300000) }
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
+  c.stickers.minGapTurns = Math.floor(num(c.stickers.minGapTurns, 2, 0, 100))
+  c.stickers.chatCooldownMs = Math.floor(num(c.stickers.chatCooldownMs, 60000, 0, 86400000))
+  c.stickers.sameStickerCooldownMs = Math.floor(num(c.stickers.sameStickerCooldownMs, 600000, 0, 86400000))
+  c.stickers.recentWindowSize = Math.floor(num(c.stickers.recentWindowSize, 6, 0, 100))
+  c.stickers.candidateCount = Math.floor(num(c.stickers.candidateCount, 20, 1, 32))
+  c.stickers.decisionTimeoutMs = Math.floor(num(c.stickers.decisionTimeoutMs, 15000, 1000, 120000))
   c.stickers.libraryScope = c.stickers.libraryScope === 'chat' ? 'chat' : 'account'
   c.stickers.autoReview = bool(c.stickers.autoReview, true)
   c.stickers.collectMode = ['auto', 'ask', 'owner'].includes(c.stickers.collectMode) ? c.stickers.collectMode : 'auto'

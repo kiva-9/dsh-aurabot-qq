@@ -8,6 +8,7 @@ import { matchSticker, pickForReply, allowedForContext } from './selection.js'
 import { modelAnalyzer, parseAnalysis } from './analysis.js'
 import { quarantineLegacy } from './legacy.js'
 import { sampleImageFrames } from '../runtime/image-frames.js'
+import { createStickerDecisionService } from './decision.js'
 
 const clamp = (v, fallback, min, max) => Math.max(min, Math.min(max, Number.isFinite(Number(v)) ? Math.floor(Number(v)) : fallback))
 const errorResult = (e) => ({ ok: false, code: e.code || 'STICKER_ERROR', reason: e.message, message: e.message })
@@ -22,7 +23,8 @@ const context = (o) => typeof o === 'string' ? { chatId: o } : {
 
 /** SQLite 是唯一状态源。注入 storage 与依赖，测试不访问用户 data 目录。 */
 export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebot, log, now = Date.now,
-  getPolicy, download = segmentBytes, fetch = fetchImage, analyze, sampleFrames = sampleImageFrames, autoStart = true, legacyDir } = {}) {
+  getPolicy, download = segmentBytes, fetch = fetchImage, analyze, sampleFrames = sampleImageFrames, autoStart = true, legacyDir,
+  decideModel, decisionPreview, random = Math.random } = {}) {
   const cfg = () => getConfig().stickers || {}
   const account = () => String(getConfig().botQQ || '')
   const libraryScope = () => cfg().libraryScope === 'chat' ? 'chat' : 'account'
@@ -172,6 +174,8 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
         summary: `[${(current.name || '表情').replace(/[\[\]\r\n]/g, ' ').slice(0, 80)}]` } }
     } catch { return null }
   }
+  const decisionService = createStickerDecisionService({ storage, repo, getConfig, account, scopeOf, available, decorate, segmentFor,
+    isStopped: () => stopped, now, random, dsh, ...(decideModel ? { ask: decideModel } : {}), ...(decisionPreview ? { preview: decisionPreview } : {}) })
   function preview(key, o = {}) {
     const it = managed(key, o)
     const frame = context(o).frame
@@ -644,7 +648,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     if (!timer) { timer = setInterval(kick, 1000); timer.unref?.() }
     kick()
   }
-  function stop() { stopped = true; clearInterval(timer); timer = null; for (const c of controllers) c.abort(new Error('表情模块停止')); return Promise.allSettled([...running.values()]) }
+  function stop() { stopped = true; decisionService.stopDecisions(); clearInterval(timer); timer = null; for (const c of controllers) c.abort(new Error('表情模块停止')); return Promise.allSettled([...running.values()]) }
   const recover = () => repo.recover(account())
   function queueStatus(options = {}) {
     admin(options)
@@ -834,7 +838,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     }
     return result
   }
-  return { collect, addFromBuffer, list, library: list, get, status: get, stats, preview, match, segmentFor, selectForReply,
+  return { collect, addFromBuffer, list, library: list, get, status: get, stats, preview, match, segmentFor, selectForReply, ...decisionService,
     pickForReply: (text, o, extra) => selectForReply(text, o, extra).item,
     markUsed: (key, o) => safe(() => { const it = rawFind(key, o); if (!it || !segmentFor(it, o)) return false; repo.used(scopeOf(o), it.sha256); return true }),
     edit, rename: (id, name, tags, o) => edit(id, { ...(name === undefined ? {} : { name }), ...(tags === undefined ? {} : { tags }) }, o),

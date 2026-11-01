@@ -7,10 +7,10 @@ const RANGE_LABEL = { today: '今天', '7d': '近 7 天', '30d': '近 30 天', a
 const count = (n) => n.toLocaleString('en-US')
 const line = (x) => `输入 ${count(x.inputTokens)} · 输出 ${count(x.outputTokens)} · 缓存 ${count(x.cachedTokens)} · 合计 ${count(x.totalTokens)} tokens`
 
-function render(result, where) {
+function render(result, where, groupBy) {
   if (!result.totals.calls) return `${where} · ${RANGE_LABEL[result.range]}：还没有可统计的模型调用记录。`
   const coverage = `覆盖 ${count(result.totals.calls)} 次调用` + (result.totals.incompleteCalls ? `；其中 ${count(result.totals.incompleteCalls)} 次没有返回完整用量，缺失字段未计入合计。` : '。')
-  return [`${where} · ${RANGE_LABEL[result.range]}`, line(result.totals), coverage, ...result.buckets.map((b) => `${b.key}：${line(b)}`)].join('\n')
+  return [`${where} · ${RANGE_LABEL[result.range]}`, line(result.totals), coverage, ...result.buckets.map((b) => `${groupBy === 'role' && b.key === 'stickerDecision' ? '表情决策' : b.key}：${line(b)}`)].join('\n')
 }
 
 export default {
@@ -52,11 +52,11 @@ export default {
         const owner = hub.turnSendersAllOwner(sessionId)
         if (scope === 'account') {
           if (!owner) return { ok: false, message: '整个账号的用量只有主人能查' }
-          return { ok: true, message: render(summary({ range, groupBy: breakdown }), '整个账号') }
+          return { ok: true, message: render(summary({ range, groupBy: breakdown }), '整个账号', breakdown) }
         }
         const target = String(other || chat.chatId)
         if (target !== chat.chatId && !(owner && inAllowList(target, api.config()))) return { ok: false, message: '只能查当前聊天；主人才能查白名单里别的聊天' }
-        return { ok: true, message: render(summary({ range, chatId: target, groupBy: breakdown }), target === chat.chatId ? '当前聊天' : target) }
+        return { ok: true, message: render(summary({ range, chatId: target, groupBy: breakdown }), target === chat.chatId ? '当前聊天' : target, breakdown) }
       },
     })]))
 

@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { cleanContent, cleanText } from './text.js'
 
-export const MODEL_ROLES = ['replyer', 'vision', 'memory', 'learning', 'judge']
+export const MODEL_ROLES = ['replyer', 'vision', 'stickerDecision', 'memory', 'learning', 'judge']
 export const DEFAULT_MODEL_TIMEOUT_MS = 120_000
 export const MAX_MODEL_TIMEOUT_MS = 600_000
 
@@ -324,9 +324,14 @@ export async function askModel (dsh, o = {}) {
     const llm = dsh?.llm || dsh?.get?.('llm')
     if (!llm || typeof llm.stream !== 'function') throw modelError('MODEL_UNAVAILABLE', '宿主没有 llm 服务')
     if (!t) throw modelError('MODEL_UNAVAILABLE', '拿不到默认模型')
-    // 明确不支持视觉时保留原先的 NO_VISION，不能丢图降级成文字请求。
-    if (o.images?.length && (await control.wait(() => modelVision(dsh, t.provider, t.model, control.signal))) === false) {
-      throw Object.assign(new Error(`「${o.role}」用的模型 ${t.model} 看不了图，换一个能看图的模型`), { code: 'NO_VISION' })
+    // 面板的视觉声明只属于全局选中的那个模型，独立角色不能继承其他模型的声明。
+    if (o.images?.length) {
+      const global = defaultModel(dsh, o.cfg)
+      const declared = global?.provider === t.provider && global?.model === t.model ? o.cfg?.model?.vision : undefined
+      const vision = declared === 'on' ? true : declared === 'off' ? false
+        : await control.wait(() => modelVision(dsh, t.provider, t.model, control.signal))
+      // 明确不支持时不能丢图降级成文字请求。
+      if (vision === false) throw Object.assign(new Error(`「${o.role}」用的模型 ${t.model} 看不了图，换一个能看图的模型`), { code: 'NO_VISION' })
     }
     let content = [{ type: 'text', text: o.text }]
     for (const img of o.images || []) content.push({ type: 'image', data: img.data, mediaType: img.mediaType, name: 'aurabot-image' })

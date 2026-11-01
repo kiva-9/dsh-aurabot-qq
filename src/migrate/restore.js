@@ -25,12 +25,36 @@ image_job_configs diagnostic_events memory_facts memory_evidence memory_fact_evi
 memory_scope_revisions memory_checkpoints memory_episodes memory_profiles memory_overrides memory_quarantine
 wp6_model_budget wp6_model_calls wp6_mood_states wp6_mood_events wp6_mood_seen wp6_learning_records wp6_learning_evidence
 wp6_learning_audit wp6_learning_versions wp6_learning_checkpoints wp6_learning_queue wp6_learning_seen wp6_learning_uses
-wp6_learning_shared_usage sticker_items sticker_quota sticker_sources sticker_tasks sticker_qq sticker_uses sticker_legacy
+wp6_learning_shared_usage sticker_items sticker_quota sticker_sources sticker_tasks sticker_qq sticker_uses sticker_legacy sticker_decisions sticker_decision_requests
 retrieval_source_outbox retrieval_source_scans retrieval_source_clock retrieval_source_discovery
 background_work_state service_calls service_call_requests service_call_outcomes restore_records restore_runs`.split(/\s+/))
 const USAGE_BASE = 'id account_id chat_id request_id service model role status billing started_at duration_ms input_tokens output_tokens cached_tokens input_count input_chars credits amount currency'
 const USAGE_EXTRA = 'provider finished_at attempts usage_complete business_status business_error operation_id stage source_ids_json error_code finish_reason'.split(' ')
 const BACKGROUND_NAMES = new Set(['memory','learning:expression','learning:jargon','mood'])
+const STICKER_DECISION_COLUMNS = 'id account chat epoch turn_key state item_id item_revision sha256 explicit chance_roll code reason selection_reason selection_policy owner_json requests_json completed model_provider model elapsed_ms created_at updated_at'
+const STICKER_REQUEST_COLUMNS = 'account chat epoch request_id decision_id'
+const STICKER_USE_COLUMNS = 'account chat sha256 uses last_used'
+// These structures are pinned to the reviewed decision implementation. Restore
+// does not silently adopt future fields or executable schema from a snapshot.
+const STICKER_DECISION_SCHEMA = `
+  CREATE TABLE sticker_decisions (
+    id TEXT PRIMARY KEY, account TEXT NOT NULL, chat TEXT NOT NULL, epoch INTEGER NOT NULL,
+    turn_key TEXT NOT NULL, state TEXT NOT NULL, item_id TEXT, item_revision INTEGER, sha256 TEXT,
+    explicit INTEGER NOT NULL DEFAULT 0, chance_roll REAL, code TEXT NOT NULL, reason TEXT NOT NULL,
+    selection_reason TEXT NOT NULL DEFAULT '', selection_policy TEXT NOT NULL DEFAULT '', owner_json TEXT,
+    requests_json TEXT NOT NULL DEFAULT '[]', completed INTEGER NOT NULL DEFAULT 0,
+    model_provider TEXT, model TEXT, elapsed_ms INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    UNIQUE(account,chat,epoch,turn_key)
+  );
+  CREATE INDEX sticker_decisions_chat ON sticker_decisions(account,chat,created_at);
+  CREATE TABLE sticker_decision_requests (
+    account TEXT NOT NULL, chat TEXT NOT NULL, epoch INTEGER NOT NULL, request_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL REFERENCES sticker_decisions(id), PRIMARY KEY(account,chat,epoch,request_id)
+  );`
+const STICKER_USE_SCHEMA = `CREATE TABLE sticker_uses (
+  account TEXT NOT NULL, chat TEXT NOT NULL, sha256 TEXT NOT NULL, uses INTEGER NOT NULL DEFAULT 0,
+  last_used INTEGER NOT NULL, PRIMARY KEY(account,chat,sha256)
+);`
 const RESTORE_PAUSE = 'RESTORE_REQUIRES_REVIEW'
 const MODULES = 'stickers voice mood memory learning retrieval media-memory search qq-tools group-admin imagegen speakup bili song tasks profile contacts'.split(' ')
 
@@ -148,6 +172,15 @@ function checkSchema(db, label) {
     memory_checkpoints:'scope_key scope recv_seq watermark last_success_at state lease_token lease_until error attempts',
     wp6_learning_checkpoints:'scope_key account_id chat_id persona_id kind scan_seq processed_seq overflow_from overflow_to next_attempt_at last_attempt_at attempts outcome last_error lease_owner lease_until'})) {
     if(has(db,table)) columns(db,table,names)
+  }
+  if (has(db,'sticker_decisions') !== has(db,'sticker_decision_requests'))
+    failure('UNSUPPORTED_SCHEMA', `${label}: incomplete sticker decision schema`)
+  for (const [table, names] of [['sticker_decisions',STICKER_DECISION_COLUMNS],['sticker_decision_requests',STICKER_REQUEST_COLUMNS],['sticker_uses',STICKER_USE_COLUMNS]]) {
+    if (!has(db,table)) continue
+    columns(db,table,names)
+    const expected = new Set(names.split(' '))
+    for (const column of db.prepare(`PRAGMA table_info(${quote(table)})`).all())
+      if (!expected.has(column.name)) failure('UNSUPPORTED_SCHEMA',`${label}: unhandled ${table} column ${column.name}`)
   }
   if(has(db,'service_calls')) for(const column of db.prepare('PRAGMA table_info(service_calls)').all())
     if(![...USAGE_BASE.split(' '),...USAGE_EXTRA].includes(column.name)) failure('UNSUPPORTED_SCHEMA',`${label}: unhandled usage column ${column.name}`)
@@ -276,6 +309,106 @@ function isolateBackground(current, candidate, { archive, insertRow, bump, adapt
   for(const row of states.values()) {insertRow('background_work_state',{...row,body:JSON.stringify(row.body)});bump('isolatedBackgroundScopes')}
   // Restored high-water marks must not swallow newly received messages after review.
   candidate.prepare("INSERT INTO sequences(name,value) VALUES('recv',?) ON CONFLICT(name) DO UPDATE SET value=MAX(value,excluded.value)").run(recvFloor)
+}
+
+function isolateStickerDecisions(current, candidate, { archive, insertRow, bump, at }) {
+  if (![current,candidate].some(db => has(db,'sticker_decisions') || has(db,'sticker_uses'))) return
+  const hadDecisionSchema = [current,candidate].some(db => has(db,'sticker_decisions'))
+  const decisions = new Map(), turns = new Map(), links = new Map(), uses = new Map()
+  const activeStates = new Set(['selecting','ready','claimed'])
+  const terminalStates = new Set(['sent','unknown','failed','cancelled','skipped'])
+  const validString = (value,label,max=300) => {
+    if (typeof value !== 'string' || !value || value.length > max) failure('INVALID_RECORD', `${label}: invalid string`)
+    return value
+  }
+  const stickerScope = row => rowScope({account:row.account,chat:row.chat,persona:''})
+  const requestIds = row => {
+    let value
+    try { value = JSON.parse(row.requests_json) } catch { failure('INVALID_RECORD','Sticker decision requests are not JSON') }
+    if (!Array.isArray(value) || value.length > 64 || value.some(v => typeof v !== 'string' || !v || v.length > 200) || new Set(value).size !== value.length)
+      failure('INVALID_RECORD','Invalid sticker decision request snapshot')
+    return value.sort()
+  }
+  const validateDecision = row => {
+    validString(row.id,'sticker decision id'); stickerScope(row); integer(row.epoch,'sticker epoch')
+    validString(row.turn_key,'sticker turn'); integer(row.created_at,'sticker created_at'); integer(row.updated_at,'sticker updated_at')
+    if (!activeStates.has(row.state) && !terminalStates.has(row.state)) failure('INVALID_RECORD','Unknown sticker decision state')
+    if (![0,1].includes(row.explicit) || ![0,1].includes(row.completed)) failure('INVALID_RECORD','Invalid sticker decision flags')
+    if (row.chance_roll !== null && (typeof row.chance_roll !== 'number' || !Number.isFinite(row.chance_roll) || row.chance_roll < 0 || row.chance_roll >= 1)) failure('INVALID_RECORD','Invalid sticker chance roll')
+    if (row.elapsed_ms !== null) integer(row.elapsed_ms,'sticker elapsed_ms')
+    for (const key of ['code','reason','selection_reason','selection_policy']) if (typeof row[key] !== 'string') failure('INVALID_RECORD',`Invalid sticker ${key}`)
+    for (const key of ['model_provider','model','owner_json']) if (row[key] !== null && typeof row[key] !== 'string') failure('INVALID_RECORD',`Invalid sticker ${key}`)
+    const selected = row.item_id !== null || row.sha256 !== null || row.item_revision !== null
+    if (selected) { validString(row.item_id,'sticker item id'); validString(row.sha256,'sticker sha256'); integer(row.item_revision,'sticker item revision',1) }
+    if (['ready','claimed','sent'].includes(row.state) && !selected) failure('INVALID_RECORD','Selected sticker decision has no item identity')
+    return requestIds(row)
+  }
+  for (const db of [candidate,current]) {
+    const source = db === current ? 'current' : 'backup', sourceDecisions = rows(db,'sticker_decisions'), sourceLinks = rows(db,'sticker_decision_requests')
+    const sourceById = new Map(sourceDecisions.map(row => [row.id,row]))
+    const sourceLinkKeys = new Set(sourceLinks.map(row => JSON.stringify([row.decision_id,row.request_id])))
+    for (const row of sourceDecisions) {
+      archive(source,'sticker_decisions',row)
+      const ids = validateDecision(row), snapshot = JSON.stringify(ids), turn = JSON.stringify([row.account,row.chat,row.epoch,row.turn_key])
+      if (ids.some(id => !sourceLinkKeys.has(JSON.stringify([row.id,id])))) failure('BROKEN_REFERENCES','Sticker request snapshot has no decision link')
+      if (turns.has(turn) && turns.get(turn) !== row.id) failure('IDENTITY_CONFLICT','Sticker turn has conflicting decision ids')
+      turns.set(turn,row.id)
+      const prior = decisions.get(row.id)
+      if (!prior) { decisions.set(row.id,{row:{...row,requests_json:snapshot}, states:new Set([row.state])}); continue }
+      const old = prior.row
+      if (old.account !== row.account || old.chat !== row.chat || old.epoch !== row.epoch || old.turn_key !== row.turn_key || old.requests_json !== snapshot || old.explicit !== row.explicit)
+        failure('IDENTITY_CONFLICT','Sticker decision id changed scope or request identity')
+      for (const key of ['chance_roll','item_id','item_revision','sha256'])
+        if (old[key] !== null && row[key] !== null && old[key] !== row[key]) failure('IDENTITY_CONFLICT',`Sticker decision changed ${key}`)
+      prior.states.add(row.state)
+      const newest = row.updated_at > old.updated_at || (row.updated_at === old.updated_at && source === 'current') ? row : old
+      prior.row = { ...newest, requests_json:snapshot, created_at:Math.min(old.created_at,row.created_at), updated_at:Math.max(old.updated_at,row.updated_at),
+        chance_roll:old.chance_roll ?? row.chance_roll, item_id:old.item_id ?? row.item_id, item_revision:old.item_revision ?? row.item_revision, sha256:old.sha256 ?? row.sha256,
+        selection_reason:newest.selection_reason || old.selection_reason || row.selection_reason, selection_policy:newest.selection_policy || old.selection_policy || row.selection_policy,
+        model_provider:newest.model_provider ?? old.model_provider ?? row.model_provider, model:newest.model ?? old.model ?? row.model }
+    }
+    for (const row of sourceLinks) {
+      archive(source,'sticker_decision_requests',row)
+      stickerScope(row); integer(row.epoch,'sticker link epoch'); validString(row.request_id,'sticker request',200); validString(row.decision_id,'sticker decision id')
+      const parent = sourceById.get(row.decision_id)
+      if (!parent || parent.account !== row.account || parent.chat !== row.chat || parent.epoch !== row.epoch) failure('BROKEN_REFERENCES','Sticker request link changed decision scope')
+      const key = JSON.stringify([row.account,row.chat,row.epoch,row.request_id]), old = links.get(key)
+      if (old && old.decision_id !== row.decision_id) failure('IDENTITY_CONFLICT','Sticker request has conflicting decision ids')
+      links.set(key,row)
+    }
+    for (const row of rows(db,'sticker_uses')) {
+      archive(source,'sticker_uses',row)
+      stickerScope(row); validString(row.sha256,'sticker sha256'); integer(row.uses,'sticker uses'); integer(row.last_used,'sticker last_used')
+      const key = JSON.stringify([row.account,row.chat,row.sha256]), old = uses.get(key)
+      uses.set(key, old ? { ...row, uses:Math.max(old.uses,row.uses), last_used:Math.max(old.last_used,row.last_used) } : row)
+    }
+  }
+  if (has(candidate,'sticker_decision_requests')) candidate.exec('DROP TABLE sticker_decision_requests')
+  if (has(candidate,'sticker_decisions')) candidate.exec('DROP TABLE sticker_decisions')
+  if ([current,candidate].some(db => has(db,'sticker_uses'))) {
+    if (has(candidate,'sticker_uses')) candidate.exec('DROP TABLE sticker_uses')
+    candidate.exec(STICKER_USE_SCHEMA)
+    for (const row of uses.values()) { insertRow('sticker_uses',row); bump('preservedStickerUses') }
+  }
+  if (hadDecisionSchema) {
+    candidate.exec(STICKER_DECISION_SCHEMA)
+    for (const entry of [...decisions.values()].sort((a,b) => a.row.created_at - b.row.created_at || a.row.id.localeCompare(b.row.id))) {
+      const row = entry.row, terminal = [...entry.states].filter(state => terminalStates.has(state))
+      const uncertain = activeStates.has(row.state) || new Set(terminal).size > 1
+      const state = uncertain ? 'unknown' : row.state
+      // Model-written reasons can quote a later-recalled message. Preserve the
+      // original only in the offline audit; the live diagnostic row contains no
+      // restored conversation or instruction text.
+      const isolated = { ...row, state, owner_json:null, completed:0, selection_reason:'', selection_policy:'',
+        reason:uncertain ? 'Offline restore: decision or delivery requires reconciliation' : 'Offline restore: decision history retained for safety',
+        ...(uncertain ? { code:'DELIVERY_UNKNOWN', updated_at:Math.max(at,row.updated_at) } : {}) }
+      const item = row.item_id && has(candidate,'sticker_items') ? candidate.prepare('SELECT sha256 FROM sticker_items WHERE id=?').get(row.item_id) : null
+      if (item && item.sha256 !== row.sha256) failure('IDENTITY_CONFLICT','Sticker decision item id has different content')
+      insertRow('sticker_decisions',isolated); bump('preservedStickerDecisions')
+      if (uncertain) bump('isolatedStickerInFlight')
+    }
+    for (const row of links.values()) { insertRow('sticker_decision_requests',row); bump('preservedStickerDecisionRequests') }
+  }
 }
 
 function reconcile(current, candidate, runId, at) {
@@ -531,6 +664,10 @@ function reconcile(current, candidate, runId, at) {
       if(['deleted','disabled','remove_evidence'].includes(row.action) && has(candidate,'wp6_learning_records'))
         candidate.prepare("UPDATE wp6_learning_records SET status=CASE WHEN ?='deleted' THEN 'deleted' ELSE CASE WHEN status='deleted' THEN status ELSE 'disabled' END END WHERE id=? AND scope_key=?").run(row.action,row.record_id,row.scope_key)
     }
+
+    // Merge both histories into native barriers before the normal chat epochs
+    // advance. No restored decision can carry a live send permit.
+    isolateStickerDecisions(current,candidate,{archive,insertRow,bump,at})
 
     // Never replay an older snapshot's queued external work. Unknown means it
     // may already have charged/sent since the backup, not a retryable failure.

@@ -12,6 +12,8 @@ import { createMemoryStore } from '../src/memory/index.js'
 import { prepareRestore, isolatedRestoreConfig } from '../src/migrate/restore.js'
 import { ensureSchema as learningSchema } from '../src/learning/schema.js'
 import { STICKER_SCHEMA } from '../src/stickers/schema.js'
+import { createStickerStore } from '../src/stickers/store.js'
+import { PNG } from './helpers/images.js'
 import { createUsageLedger } from '../src/diagnostics/usage.js'
 import { createLearning } from '../src/learning/index.js'
 import { createMood } from '../src/features/mood.js'
@@ -53,6 +55,17 @@ function fixture(t) {
   const run=options=>prepareRestore({currentDb,backupDb,outputDir,offline:true,...options})
   const open=file=>{const db=new DatabaseSync(file);cleanup.push(()=>{try{db.close()}catch{}});return db}
   return {root,currentDb,backupDb,outputDir,storage,memory,fact,backup,close,run,open,cleanup}
+}
+
+function stickerDecision(db, input = {}) {
+  const row = { id:'decision', account:scope.account, chat:scope.chat, epoch:0, turn_key:'turn', state:'selecting',
+    item_id:null, item_revision:null, sha256:null, explicit:0, chance_roll:0.2, code:'SELECTING', reason:'正在选择',
+    selection_reason:'', selection_policy:'', owner_json:'{"pid":1}', requests_json:'[]', completed:0,
+    model_provider:null, model:null, elapsed_ms:null, created_at:100, updated_at:100, ...input }
+  const keys=Object.keys(row)
+  db.run(`INSERT INTO sticker_decisions(${keys.join(',')}) VALUES(${keys.map(()=>'?').join(',')})`,...keys.map(key=>row[key]))
+  for(const id of JSON.parse(row.requests_json)) db.run('INSERT INTO sticker_decision_requests VALUES(?,?,?,?,?)',row.account,row.chat,row.epoch,id,row.id)
+  return row
 }
 
 test('restore merges post-backup deletes, withdrawal audits and recalls, while sources remain byte-identical',async t=>{
@@ -196,6 +209,99 @@ test('deleted items created after backup retain native domain barriers, includin
   assert.equal(media.status,'disabled');assert.equal(media.result,null);assert.equal(media.disabledHuman,null)
   assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0)
   assert.ok(result.counts.preservedOtherDeletions>=2)
+})
+
+test('sticker decision histories merge without replaying in-flight work or inventing successful uses',async t=>{
+  const f=fixture(t);f.fact();f.storage.db.exec(STICKER_SCHEMA)
+  stickerDecision(f.storage.db,{id:'evolved',turn_key:'turn-evolved',requests_json:'["request-evolved"]',completed:1})
+  f.storage.db.run('INSERT INTO sticker_uses VALUES(?,?,?,?,?)',scope.account,scope.chat,'hash-one',2,1000)
+  f.backup()
+  f.storage.db.run("UPDATE sticker_decisions SET state='sent',item_id='item-one',item_revision=1,sha256='hash-one',code='SENT',reason='确认送达',selection_reason='适合问候',updated_at=2000 WHERE id='evolved'")
+  f.storage.db.run('UPDATE sticker_uses SET uses=?,last_used=? WHERE account=? AND chat=? AND sha256=?',5,2000,scope.account,scope.chat,'hash-one')
+  stickerDecision(f.storage.db,{id:'inflight',turn_key:'turn-inflight',state:'claimed',item_id:'item-two',item_revision:1,sha256:'hash-two',requests_json:'["request-inflight"]',updated_at:3000})
+  f.storage.db.run('INSERT INTO sticker_decision_requests VALUES(?,?,?,?,?)',scope.account,scope.chat,0,'request-alias','inflight')
+  stickerDecision(f.storage.db,{id:'pending',turn_key:'turn-pending',state:'selecting',requests_json:'["request-pending"]',updated_at:4000})
+  await f.close()
+  const result=await f.run(),db=f.open(result.candidateDb)
+  const records=Object.fromEntries(db.prepare('SELECT * FROM sticker_decisions').all().map(row=>[row.id,row]))
+  assert.equal(records.evolved.state,'sent','a later confirmed terminal state supersedes an older selection')
+  assert.equal(records.evolved.sha256,'hash-one');assert.equal(records.evolved.selection_reason,'','old model text stays only in the offline archive')
+  assert.ok(!records.evolved.reason.includes('确认送达'))
+  assert.equal(records.inflight.state,'unknown');assert.equal(records.inflight.sha256,'hash-two')
+  assert.equal(records.pending.state,'unknown');assert.equal(records.pending.sha256,null)
+  assert.ok(Object.values(records).every(row=>row.owner_json===null && row.completed===0))
+  assert.ok(records.inflight.updated_at>=3000)
+  const usage=db.prepare('SELECT uses,last_used FROM sticker_uses WHERE account=? AND chat=? AND sha256=?').get(scope.account,scope.chat,'hash-one')
+  assert.deepEqual({...usage},{uses:5,last_used:2000})
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM sticker_uses WHERE sha256='hash-two'").get().n,0,'unknown is not counted as confirmed delivery')
+  assert.equal(db.prepare("SELECT decision_id FROM sticker_decision_requests WHERE request_id='request-alias'").get().decision_id,'inflight')
+  assert.ok(result.counts.isolatedStickerInFlight>=2)
+  assert.equal(db.prepare('PRAGMA foreign_key_check').all().length,0)
+})
+
+test('a backup predating sticker decision tables receives current repeat barriers',async t=>{
+  const f=fixture(t);f.fact();f.backup()
+  f.storage.db.exec(STICKER_SCHEMA)
+  stickerDecision(f.storage.db,{id:'new-decision',turn_key:'new-turn',state:'ready',item_id:'item',item_revision:1,sha256:'old-image',requests_json:'["new-request"]'})
+  f.storage.db.run('INSERT INTO sticker_uses VALUES(?,?,?,?,?)',scope.account,scope.chat,'old-image',4,1234)
+  await f.close()
+  const result=await f.run(),db=f.open(result.candidateDb)
+  assert.equal(db.prepare("SELECT state FROM sticker_decisions WHERE id='new-decision'").get().state,'unknown')
+  assert.equal(db.prepare("SELECT decision_id FROM sticker_decision_requests WHERE request_id='new-request'").get().decision_id,'new-decision')
+  assert.deepEqual({...db.prepare("SELECT uses,last_used FROM sticker_uses WHERE sha256='old-image'").get()},{uses:4,last_used:1234})
+})
+
+test('restored confirmed sticker usage continues to block an explicit repeat after asset review',async t=>{
+  const f=fixture(t);f.fact()
+  const cfg={botQQ:scope.account,ownerQQ:'alice',stickers:{enabled:true,caption:false,autoChance:0,cooldownMs:0,sameStickerCooldownMs:600_000,chatCooldownMs:0,minGapTurns:0}}
+  const store=createStickerStore({storage:f.storage,getConfig:()=>cfg,autoStart:false})
+  const {item}=await store.addFromBuffer(PNG,{chatId:scope.chat,name:'猫猫',toQQ:false})
+  assert.equal(store.approve(item.id,{admin:true}).ok,true)
+  f.backup()
+  const text=`发 ${item.id}`,message=f.storage.messages.ingest({account:scope.account,chatId:scope.chat,authorId:'alice',text,segments:[{type:'text',data:{text}}]})
+  const request=f.storage.requests.create({chatId:scope.chat,actorId:'alice',sourceMessageIds:[message.id]})
+  const turn={accountId:scope.account,chatId:scope.chat,epoch:request.epoch,turnId:request.id,requestIds:[request.id],replyText:''}
+  const choice=await store.decideForReply(turn),permit={...turn,decisionId:choice.decisionId,itemId:item.id}
+  assert.equal(store.claimDecision(permit).decision,'send')
+  assert.equal(store.settleDecision({decisionId:choice.decisionId,status:'sent'}),true)
+  await store.stop();await f.close()
+  const result=await f.run(),candidate=createStorage({file:result.candidateDb,filesDir:join(f.root,'reviewed-assets')})
+  const recovered=createStickerStore({storage:candidate,getConfig:()=>cfg,autoStart:false})
+  f.cleanup.push(async()=>{await recovered.stop();candidate.close()})
+  candidate.assets.put(PNG,{mime:'image/png',width:2,height:3,sourceKind:'upload'})
+  assert.equal(recovered.approve(item.id,{admin:true,reason:'fixture reviewed original'}).ok,true)
+  const incoming=candidate.messages.ingest({account:scope.account,chatId:scope.chat,authorId:'alice',text,segments:[{type:'text',data:{text}}]})
+  const next=candidate.requests.create({chatId:scope.chat,actorId:'alice',sourceMessageIds:[incoming.id]})
+  const decision=await recovered.decideForReply({accountId:scope.account,chatId:scope.chat,epoch:next.epoch,turnId:next.id,requestIds:[next.id],replyText:''})
+  assert.equal(decision.code,'NO_CANDIDATES','same-image cooldown survives offline preparation')
+  assert.equal(recovered.validateDecision(permit),false,'the old permit never revives')
+})
+
+test('conflicting sticker decision identity or request association refuses recovery',async t=>{
+  for(const kind of ['scope','request']) {
+    const f=fixture(t);f.fact();f.storage.db.exec(STICKER_SCHEMA)
+    stickerDecision(f.storage.db,{id:'decision-one',turn_key:'turn-one',requests_json:'["request-one"]'})
+    f.backup()
+    if(kind==='scope') {
+      f.storage.db.run("UPDATE sticker_decisions SET chat='group:2' WHERE id='decision-one'")
+      f.storage.db.run("UPDATE sticker_decision_requests SET chat='group:2' WHERE decision_id='decision-one'")
+    } else {
+      f.storage.db.exec('DELETE FROM sticker_decision_requests; DELETE FROM sticker_decisions')
+      stickerDecision(f.storage.db,{id:'decision-two',turn_key:'turn-two',requests_json:'["request-one"]'})
+    }
+    await f.close()
+    await assert.rejects(f.run(),{code:'IDENTITY_CONFLICT'})
+  }
+})
+
+test('partial or unrecognized sticker decision schemas are refused',async t=>{
+  for(const kind of ['partial','extra-column']) {
+    const f=fixture(t);f.fact();f.storage.db.exec(STICKER_SCHEMA);f.backup()
+    if(kind==='partial') f.storage.db.exec('DROP TABLE sticker_decision_requests')
+    else f.storage.db.exec('ALTER TABLE sticker_decisions ADD COLUMN future_policy TEXT')
+    await f.close()
+    await assert.rejects(f.run(),{code:'UNSUPPORTED_SCHEMA'})
+  }
 })
 
 test('current missing/purged records never imply approval or complete deletion history',async t=>{
