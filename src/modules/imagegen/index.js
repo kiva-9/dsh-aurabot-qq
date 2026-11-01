@@ -1,10 +1,11 @@
-// 内置模块：生图。她能画图、照着参考图画、改图（多个生图服务：OpenAI 兼容 / Gemini / ComfyUI / 自己配的 HTTP，或「本地接口」的画图脚本）。
+// 内置模块：生图。她能画图、照着参考图画、改图（OpenAI 兼容 / Gemini / ComfyUI / 本机 Studio / 自己配的 HTTP，或「本地接口」的画图脚本）。
 // 画图是后台任务：聊天这一轮马上回「在画了」，画好直接发出来；取消只能取消自己的。
 
 import { canUseArtwork, artworkList, resolveArtwork } from '../../image/gallery.js'
 import { createJobRunner, STATE_LABEL, ACTIVE } from '../../jobs/runner.js'
 import { createImageService } from '../../jobs/image.js'
 import { MODE_LABEL, ROLES } from '../../providers/image/common.js'
+import { probeStudioStatus } from '../../providers/image/studio.js'
 import { toImageBuffer } from '../../local/local.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { randomUUID } from 'node:crypto'
@@ -18,7 +19,7 @@ export default {
   version: '2.0.1',
   description: '画图、照参考图画、改图（qq_draw_image），后台任务，可取消',
   tab: 'imagegen',
-  files: ['jobs/image.js', 'jobs/runner.js', 'providers/image/index.js', 'providers/image/common.js', 'providers/image/openai.js', 'providers/image/gemini.js', 'providers/image/comfyui.js', 'providers/image/http.js'],
+  files: ['jobs/image.js', 'jobs/runner.js', 'providers/image/index.js', 'providers/image/common.js', 'providers/image/openai.js', 'providers/image/gemini.js', 'providers/image/comfyui.js', 'providers/image/studio.js', 'providers/image/studio-mask.js', 'providers/image/http.js'],
   setup(api) {
     const { hub, local, storage, http, onebot } = api.core
     const avatars = createAvatarReferences({ hub, onebot, storage, fetchAvatar: api.core.fetchAvatar, log: api.log })
@@ -338,6 +339,25 @@ export default {
       const p = svc.profiles().find((x) => x.id === b.id)
       if (!p) return { ok: false, message: '先保存再测试' }
       const info = svc.profileInfo(p)
+      if (p.protocol === 'studio') {
+        try {
+          // 只读取工作台状态；不创建生图任务，也不触发全局取消。
+          const status = await probeStudioStatus(p)
+          const models = status.models.map(({ id, name, features, prompt_hint }) => ({ id, name, features, prompt_hint }))
+          const studio = { models, queue: status.queue }
+          if (!status.ready) return { ok: false, message: 'Studio 已响应，但后端尚未就绪；请检查工作台和 ComfyUI。', studio }
+          if (!p.model) return { ok: false, message: 'Studio 已就绪；请从下列模型中填写完整模型 ID，保存后重新检查。', studio }
+          const model = models.find((m) => m.id === p.model)
+          if (!model) return { ok: false, message: 'Studio 已就绪，但找不到所填模型；请从下列模型核对完整 ID。', studio }
+          if (!info.ok) return { ok: false, message: info.message, studio }
+          const supported = { txt2img: 'text', img2img: 'edit', edit: 'mask', reference: 'reference' }
+          const modelModes = model.features.map((feature) => supported[feature]).filter(Boolean)
+          studio.selected = { ...model, modes: modelModes }
+          const unsupported = info.caps.modes.filter((mode) => !modelModes.includes(mode))
+          if (unsupported.length) return { ok: false, message: `Studio 已就绪，但所选模型不支持声明的${unsupported.map((m) => MODE_LABEL[m]).join('、')}；请调整能力并保存。`, caps: info.caps, studio }
+          return { ok: true, message: `Studio 已就绪；所选模型支持：${modelModes.map((m) => MODE_LABEL[m]).join('、') || '未列出可用模式'}。本配置启用：${info.caps.modes.map((m) => MODE_LABEL[m]).join('、') || '未启用任何模式'}；输入上限 ${info.caps.maxInputs} 张，原图和蒙版编辑仅限一张底图。`, caps: info.caps, studio }
+        } catch (error) { return { ok: false, message: error.message || '无法读取 Studio 状态' } }
+      }
       return info.ok ? { ok: true, message: `配置声明：${info.caps.modes.map((m) => MODE_LABEL[m]).join('、') || '未启用任何模式'}；最多 ${info.caps.maxInputs} 张输入图。未向服务发出请求；实际可用性请提交测试任务验证。`, caps: info.caps } : { ok: false, message: info.message }
     })
 

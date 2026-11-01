@@ -153,7 +153,7 @@ test('outputFrom：严格元数据、base64、下载上限；无法拿到结果�
 })
 
 test('index：HTTP 静态登记，capability 空模式保留，本地不接受编辑或假图', async () => {
-  assert.deepEqual(PROTOCOLS().sort(), ['comfyui', 'gemini', 'http', 'openai'])
+  assert.deepEqual(PROTOCOLS().sort(), ['comfyui', 'gemini', 'http', 'openai', 'studio'])
   assert.deepEqual(adapterFor({ protocol: 'openai', capabilities: { modes: [] } }).caps.modes, [])
   let calls = 0
   const local = createLocalImages({ call: async () => { calls++; return null } }, { toImageBuffer: async () => PNG })

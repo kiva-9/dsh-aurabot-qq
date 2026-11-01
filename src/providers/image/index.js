@@ -4,10 +4,11 @@
 import { createOpenAIImages } from './openai.js'
 import { createGeminiImages } from './gemini.js'
 import { createComfyImages } from './comfyui.js'
+import { createStudioImages } from './studio.js'
 import { createHttpImages } from './http.js'
 import { mergeCapabilities, ProviderError, imageMime, checkRequest } from './common.js'
 
-const FACTORIES = { openai: createOpenAIImages, gemini: createGeminiImages, comfyui: createComfyImages, http: createHttpImages }
+const FACTORIES = { openai: createOpenAIImages, gemini: createGeminiImages, comfyui: createComfyImages, studio: createStudioImages, http: createHttpImages }
 
 export const PROTOCOLS = () => Object.keys(FACTORIES)
 

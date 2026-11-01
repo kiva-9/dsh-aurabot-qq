@@ -60,7 +60,7 @@ export const DEFAULTS = {
   merge: { enabled: true, waitSec: 2.5, maxSec: 8, groupWaitSec: 5, groupMaxSec: 15, mentionWaitSec: 1.5, mediaExtraSec: 3 }, // 连发合并：对方停顿 waitSec 秒再一起回，最多等 maxSec 秒；群里等得久一点，把一段话攒齐；被 @ 时最多等 mentionWaitSec；图片 / 语音还没处理完最多再等 mediaExtraSec
   imageGen: {
     enabled: false,
-    // 生图服务可以配好几个，每个是一种协议：openai 兼容 / gemini 原生 / comfyui 工作流 / http 自己配的映射
+    // 生图服务可以配好几个，每个是一种协议：openai 兼容 / gemini 原生 / comfyui 工作流 / studio 本机工作台 / http 自己配的映射
     // capabilities 是主人声明的能力（模式、最多几张输入图、尺寸），和适配器自己能做的取交集
     profiles: [],
     defaultProfile: '',
@@ -391,7 +391,7 @@ export function normalize(raw) {
 }
 
 // 面板里不回传原文的字段：路径（几层都行）
-const IMAGE_PROTOCOLS = ['openai', 'gemini', 'comfyui', 'http']
+const IMAGE_PROTOCOLS = ['openai', 'gemini', 'comfyui', 'studio', 'http']
 const IMAGE_MODES = ['text', 'reference', 'edit', 'mask']
 /** 生图服务列表归一化：ID 唯一且合法，协议认识，能力字段规整。 */
 export function normalizeImageProfiles(list) {
@@ -558,6 +558,12 @@ export function mergeFromPanel(current, incoming) {
       if (!isObj(p.extra ?? {})) throw new Error(`「${p.name || p.id}」的协议配置必须是 JSON 对象`)
       for (const key of ['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers']) {
         if (p.extra?.[key] != null && !isObj(p.extra[key])) throw new Error(`「${p.name || p.id}」的 ${key} 必须是合法 JSON 对象`)
+      }
+      if (p.protocol === 'studio') {
+        for (const [key, min, max] of [['denoise', 0.05, 1], ['weight', 0, 1.5]]) {
+          const value = p.extra?.[key]
+          if (value != null && value !== '' && (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max)) throw new Error(`「${p.name || p.id}」的 ${key} 必须在 ${min}–${max} 之间`)
+        }
       }
     }
   }
