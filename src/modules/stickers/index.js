@@ -41,7 +41,7 @@ export default {
           if (!m || m.recalledAt || m.account !== String(api.config().botQQ) || m.chatId !== chatId || m.authorId !== request.actorId || o.authorId !== m.authorId || !seg) return { ok: false, message: '来源不可用' }
           return store.collect(seg, { chatId, messageId: m.id, segmentIndex: o.segIndex, selectedOccurrence: true, occurrenceId: o.id, requestId: request.id, epoch: request.epoch })
         } }),
-        defineTool({ name: 'qq_send_sticker', description: '为本轮回复登记表情建议；最终是否发送及选哪张由独立决策决定。',
+        defineTool({ name: 'qq_send_sticker', description: '仅在真实用户明确要求发表情包时调用一次，为本轮回复登记建议；是否发送及选哪张由独立决策按配置判断，登记不代表已经发送。',
           properties: { name: str('建议的名字或情绪关键词') }, required: ['name'], execute: async ({ name }, execution) => {
             return hub.suggestSticker?.(sessionId, String(name || ''), { simulated: execution?.simulated === true }) ||
               { ok: false, code: 'UNAVAILABLE', message: '当前无法登记表情建议' }
@@ -127,7 +127,7 @@ export default {
       const bytes = Buffer.from(String(b.data || '').replace(/^data:[^,]+,/, ''), 'base64')
       return store.addFromBuffer(bytes, { ...o, name: b.name || '', tags: b.tags || [], from: 'panel', toQQ: b.toQQ !== false })
     })
-    api.rule(() => '- 表情库默认同账号共用。新素材识别明确通过后自动可用；本地保存不等于审核或 QQ 收藏已成功。表情由本轮独立决策统一处理，不必在每条回复中附标签；工具只登记建议，不能声称已经发送。')
+    api.rule(() => '- 表情库默认同账号共用。新素材识别明确通过后自动可用；本地保存不等于审核或 QQ 收藏已成功。')
     store.recover()
     store.start()
     api.onDispose?.(() => store.stop())

@@ -104,7 +104,7 @@ export function createBridge({ ctx, getConfig, setConfig, hub, mods, log, versio
         modules: mods.status().map((m) => ({ id: m.id, name: m.name, running: m.running })),
       }
     },
-    /** 让她把一段话发出去（会拆条、可以带 <voice> <sticker:名字>）。target 不填 = 发给主人。 */
+    /** 让她把一段话发出去（会拆条、可以带 <voice>）；表情包由独立决策处理。target 不填 = 发给主人。 */
     send: async ({ target, text } = {}) => {
       const t = String(target || ownerTarget())
       if (stopped) return failed(t, '联动服务已停止')

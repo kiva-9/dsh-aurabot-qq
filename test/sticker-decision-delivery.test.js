@@ -61,10 +61,25 @@ test('0 and 1 probability apply to plain replies, tags, tool hints and item hook
     assert.equal(result.complete, true)
     assert.equal(f.calls.filter(x => sticker(x.message)).length, chance)
     assert.equal(f.modelCalls.length, chance)
+    if (source === 'tag') {
+      const deliveredText = f.calls.filter(x => !sticker(x.message)).flatMap(x => x.message).map(x => x.data?.text || '').join('')
+      assert.equal(deliveredText, '开心', '旧标签只作建议，不能作为正文发出去')
+    }
     const log = f.store.decisions({ admin: true, accountId: BOT, chatId }).items
     assert.equal(log.length, 1)
     assert.equal(log[0].code, chance ? 'SENT' : 'PROBABILITY')
   })
+})
+
+test('legacy tags cannot bypass the chat cooldown or leak into delivered text', async t => {
+  const f = await fixture(t)
+  f.cfg.stickers.chatCooldownMs = 60_000
+  await f.hub.deliver(chatId, '第一条<sticker:小猫>', { turnId: 'first' })
+  await f.hub.deliver(chatId, '第二条<sticker:小猫>', { turnId: 'second' })
+  assert.equal(f.calls.filter(x => sticker(x.message)).length, 1)
+  assert.equal(f.modelCalls.length, 1)
+  assert.deepEqual(f.calls.filter(x => !sticker(x.message)).map(x => x.message.map(s => s.data?.text || '').join('')), ['第一条', '第二条'])
+  assert.equal(f.store.decisions({ admin: true, accountId: BOT, chatId }).items[0].code, 'CHAT_COOLDOWN')
 })
 
 test('multiple actual tool calls only register hints; a trusted explicit request without final text still sends once', async t => {

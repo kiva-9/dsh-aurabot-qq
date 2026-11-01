@@ -124,8 +124,21 @@ const text = (t) => [{ type: 'text', data: { text: t } }]
 const sentTo = (kind, id) => mock.calls.filter((c) => c.action === `send_${kind}_msg` && String(c.params[kind === 'group' ? 'group_id' : 'user_id']) === String(id))
 
 test('人格与规则通过提示词变量注入', () => {
-  assert.match(fake.variables.get('aurabot_persona')(), /大肥鱼/)
-  assert.match(fake.variables.get('aurabot_persona')(), /鲸鱼/)
+  const persona = fake.variables.get('aurabot_persona')()
+  assert.match(persona, /大肥鱼/)
+  assert.match(persona, /鲸鱼/)
+  assert.doesNotMatch(persona, /想发表情包时在末尾加|标签和正文分开/)
+  const stickerRule = persona.split('\n').find(line => line.includes('表情包由独立决策'))
+  assert.ok(stickerRule)
+  assert.match(stickerRule, /不输出 <sticker:标签>.*不为普通回复调用 qq_send_sticker/)
+  assert.match(stickerRule, /真实用户明确要求发表情包.*调用一次登记建议/)
+  assert.match(stickerRule, /登记不代表已发送.*未确认送达前不要声称已发送/)
+  for (const kind of ['social', 'private']) {
+    const rules = fake.variables.get(`aurabot_rules_${kind}`)()
+    assert.ok(rules.split('\n').includes(stickerRule), '人格与系统提示使用同一表情规则')
+    assert.match(rules, /<face:名字>/, '保留 QQ 小黄脸')
+    assert.doesNotMatch(rules, /若写 <sticker:标签>|不必在每条回复中附标签/)
+  }
   assert.match(fake.variables.get('aurabot_rules_social')(), /没有任何电脑操作能力/)
   assert.match(fake.variables.get('aurabot_rules_private')(), /10000001/)
 })
@@ -144,6 +157,13 @@ test('主人私聊「在吗」：建会话（完整权限 preset）、按 ||| �
   // 主人私聊的会话里有完整工具
   const agent = fake.agents.get(ws.sessionIds[0])
   assert.ok(agent.tools.has('qq_group_admin'))
+  const stickerTool = agent.tools.get('qq_send_sticker')
+  assert.match(stickerTool.description, /真实用户明确要求发表情包时调用一次/)
+  assert.match(stickerTool.description, /登记不代表已经发送/)
+  const messageText = agent.tools.get('qq_send_message').parameters.properties.text.description
+  assert.match(messageText, /<voice>.*<\/voice>/)
+  assert.match(messageText, /不写表情包控制标记/)
+  assert.doesNotMatch(messageText, /<sticker:/)
 })
 
 test('#7 主人私聊：她这一轮还在跑时再发消息，直接 steer 进去，不等整轮结束', async () => {

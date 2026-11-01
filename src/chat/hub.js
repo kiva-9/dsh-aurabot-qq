@@ -2103,7 +2103,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     const e = m.chats[chatId]
     if (!e) return false
     abandonChat(chatId, e.sessionId, '重新开始')
-    Promise.resolve(reg?.archiveSession?.(e.sessionId)).catch((error) => log.debug('归档会话失败：', error.message))
+    try { Promise.resolve(reg?.archiveSession?.(e.sessionId)).catch((error) => log.debug('归档会话失败：', error.message)) }
+    catch (error) { log.debug('归档会话失败：', error.message) }
     sessionToChat.delete(sessionKey(e.sessionId))
     turnState.delete(sessionKey(e.sessionId))
     delete m.chats[chatId]
