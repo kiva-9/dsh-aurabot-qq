@@ -31,6 +31,7 @@ import { rulesText } from './persona/personas.js'
 import { createPersonaService } from './persona/service.js'
 import { compilePersona } from './persona/compiler.js'
 import { normalizeLayers } from './persona/store.js'
+import { createPersonaReferences } from './persona/references.js'
 import { rewriteReply } from './chat/replyer.js'
 import { createModules, API_VERSION } from './core/modules.js'
 import { createBridge } from './core/bridge.js'
@@ -113,6 +114,7 @@ export function apply(ctx) {
   // ---------- 人设 ----------
   // 存在主库里：草稿 / 不可变的发布版本 / 按聊天绑定。旧版 personas/*.md 第一次启动时原样导入（原文件不动）
   const personas = createPersonaService({ storage, legacyDir: dataDir('personas'), legacyCurrent: cfg.persona.current, log: logger.child('persona') })
+  const personaReferences = createPersonaReferences({ storage, store: personas.store })
   /** 某个会话这一轮用的人设：正在跑的一轮用开始时冻结的版本，否则按绑定现查。 */
   const personaSnapshot = (agent) => {
     const sid = agent?.id
@@ -336,11 +338,11 @@ export function apply(ctx) {
       res.end?.(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body))
     } catch (error) {}
   }
-  const readBody = async (req) => {
+  const readBody = async (req, maxBytes = 43 * 1024 * 1024) => {
     let s = ''; let bytes = 0
     for await (const c of req) {
       bytes += Buffer.byteLength(c)
-      if (bytes > 43 * 1024 * 1024) throw new Error('请求内容超过 43 MB')
+      if (bytes > maxBytes) throw new Error(`请求内容超过 ${Math.round(maxBytes / 1024 / 1024)} MB`)
       s += c
     }
     try { return JSON.parse(s || '{}') } catch (error) { throw new Error('请求不是合法 JSON，未保存任何改动') }
@@ -389,7 +391,7 @@ export function apply(ctx) {
     listModels,
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
-    personas: { list: () => personas.compat.list(), read: (id) => personas.compat.read(id), current: () => personas.textOf(personas.snapshotFor('private:0')), service: personas },
+    personas: { list: () => personas.compat.list(), read: (id) => personas.compat.read(id), current: () => personas.textOf(personas.snapshotFor('private:0')), service: personas, references: personaReferences },
     getConfig, setConfig,
     getJobRunner: kind => (kind === 'image' ? use('imagegen') : use(kind))?.runner,
     wakePlanner: (event,execution) => hub.acceptPlannerWake(event,execution),
@@ -657,6 +659,8 @@ export function apply(ctx) {
   })
   route('/persona/save', async (req) => {
     const b = await readBody(req)
+    const existing = personas.store.get(b.id)
+    if (existing) personaReferences.assertLayersUsable(b.id, existing.draft?.layers || existing.published?.layers)
     const p = personas.compat.save(b.id, b)
     return { ok: true, persona: p, message: `人格已保存为第 ${p.revision} 版，下一轮起生效` }
   })
@@ -678,6 +682,21 @@ export function apply(ctx) {
 
   // 人设（新接口：分层、草稿 / 发布 / 回滚、按聊天绑定）
   const ps = personas.store
+  route('/persona/references', async (req) => {
+    if (req.method !== 'GET') return { ok: false, message: '只接受 GET' }
+    return { ok: true, ...personaReferences.list(query(req).id) }
+  })
+  route('/persona/references/upload', async (req) => {
+    if (req.method !== 'POST') return { ok: false, message: '只接受 POST' }
+    const b = await readBody(req, 7 * 1024 * 1024)
+    return { ok: true, asset: personaReferences.upload(b.id, b.data) }
+  })
+  route('/persona/references/asset', async (req, res) => {
+    if (req.method !== 'GET') return { ok: false, message: '只接受 GET' }
+    const q = query(req), image = personaReferences.asset(q.id, q.assetId)
+    res.setHeader?.('X-Content-Type-Options', 'nosniff')
+    send(res, 200, image.bytes, image.info.mime)
+  })
   route('/persona/list', async () => ({ ok: true, list: ps.list().map((p) => ({ id: p.id, name: p.name, origin: p.origin, revision: p.published?.revision || 0, hasDraft: Boolean(p.draft), archived: Boolean(p.archivedAt), tags: (p.draft?.layers || p.published?.layers)?.tags || [] })), bindings: ps.bindings() }))
   route('/persona/preview', async (req) => { const b = await readBody(req); return { ok: true, text: compilePersona(normalizeLayers(b.layers || {})) } })
   route('/persona/polish', async req => {
@@ -693,11 +712,11 @@ export function apply(ctx) {
   route('/persona/full', async (req) => ({ ok: true, persona: ps.get(query(req).id), revisions: ps.revisions(query(req).id) }))
   route('/persona/revision', async (req) => ({ ok: true, revision: ps.revision(query(req).id, query(req).revision) }))
   route('/persona/create', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.create({ id: b.id, name: b.name, layers: b.layers }) } })
-  route('/persona/draft', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.saveDraft(b.id, { layers: b.layers, name: b.name }, { editRevision: b.editRevision }) } })
-  route('/persona/publish', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.publish(b.id, { editRevision: b.editRevision, note: b.note }), message: '发布了，下一轮起生效' } })
+  route('/persona/draft', async (req) => { const b = await readBody(req); return storage.db.tx(() => { personaReferences.assertSelection(b.id, b.layers); const p = ps.saveDraft(b.id, { layers: b.layers, name: b.name }, { editRevision: b.editRevision }); personaReferences.grantSelection(b.id, b.layers); return { ok: true, persona: p } }) })
+  route('/persona/publish', async (req) => { const b = await readBody(req); personaReferences.assertPublish(b.id); return { ok: true, persona: ps.publish(b.id, { editRevision: b.editRevision, note: b.note }), message: '发布了，下一轮起生效' } })
   route('/persona/discard', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.discardDraft(b.id, { editRevision: b.editRevision }) } })
-  route('/persona/rollback', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.rollback(b.id, b.revision, { editRevision: b.editRevision }) } })
-  route('/persona/duplicate', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.duplicate(b.id, b.newId, b.name) } })
+  route('/persona/rollback', async (req) => { const b = await readBody(req); const old = ps.revision(b.id, b.revision); if (old) personaReferences.assertLayersUsable(b.id, old.layers); return { ok: true, persona: ps.rollback(b.id, b.revision, { editRevision: b.editRevision }) } })
+  route('/persona/duplicate', async (req) => { const b = await readBody(req); const p = ps.duplicate(b.id, b.newId, b.name); personaReferences.copyGrants(b.id, b.newId); return { ok: true, persona: p } })
   route('/persona/archive', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.archive(b.id, { editRevision: b.editRevision }) } })
   route('/persona/unarchive', async (req) => { const b = await readBody(req); return { ok: true, persona: ps.unarchive(b.id) } })
   route('/persona/bindings', async () => ({ ok: true, bindings: ps.bindings() }))

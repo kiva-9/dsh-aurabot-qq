@@ -58,7 +58,7 @@ test('persona edits made during draft saving survive and prevent publishing stal
   const h = (type, props, ...children) => ({ type, props: props || {}, children: children.flat(Infinity).filter(Boolean) })
   const setPath = (o, path, v) => { const x = structuredClone(o), keys = path.split('.'); let cur = x; for (const key of keys.slice(0,-1)) cur = cur[key]; cur[keys.at(-1)] = v; return x }
   const ctx = { h, Card:'Card', Row:'Row', Btn:'Btn', Switch:'Switch', Seg:'Seg', Range:'Range', ListArea:'ListArea', Empty:'Empty',
-    ImportPersona:'ImportPersona', PersonaBindings:'PersonaBindings', AvatarCard:'AvatarCard', PolishLayer:'PolishLayer', PersonaRvc:'PersonaRvc', EffectivePrompt:'EffectivePrompt', PersonaPreview:'PersonaPreview', PersonaRevision:'PersonaRevision',
+    ImportPersona:'ImportPersona', PersonaBindings:'PersonaBindings', AvatarCard:'AvatarCard', PolishLayer:'PolishLayer', PersonaRvc:'PersonaRvc', PersonaReferences:'PersonaReferences', LegacyPersonaEditor:'LegacyPersonaEditor', EffectivePrompt:'EffectivePrompt', PersonaPreview:'PersonaPreview', PersonaRevision:'PersonaRevision',
     PROACTIVITY:[], ORIGIN:{}, cx:(...x)=>x.filter(Boolean).join(' '), clone:structuredClone, setPath, getPath:(o,p)=>p.split('.').reduce((v,k)=>v?.[k],o),
     useState: v => { const i=stateIndex++; if (!(i in state)) state[i]=v; return [state[i], x => { state[i] = typeof x === 'function' ? x(state[i]) : x }] },
     useRef: v => { const i=refIndex++; return refs[i] || (refs[i] = { current:v }) }, useEffect() {}, confirm:()=>true,

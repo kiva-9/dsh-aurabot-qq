@@ -16,6 +16,29 @@ export const PERSONA_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/
 const str = (v, max = 20000) => String(v ?? '').slice(0, max)
 const list = (v, max = 50) => (Array.isArray(v) ? v.map((x) => str(x, 500)).filter(Boolean).slice(0, max) : [])
 
+/** Reject overflowing or ambiguous new selections instead of truncating them. */
+export function validateAppearanceInput(raw = {}) {
+  const ap = raw?.appearance || {}
+  for (const key of ['referenceAssetIds', 'referenceVariants']) {
+    const values = ap[key]
+    if (values === undefined) continue
+    if (!Array.isArray(values) || values.length > 8) throw Object.assign(new Error('人设最多配置 8 套参考图'), { code: 'BAD_REFERENCE' })
+    const ids = values.map(v => key === 'referenceVariants' ? v?.assetId : v)
+    if (ids.some(id => typeof id !== 'string' || !id.trim() || id.length > 500) || new Set(ids).size !== ids.length) throw Object.assign(new Error('参考图 ID 无效或重复'), { code: 'BAD_REFERENCE' })
+    if (key === 'referenceVariants') for (const v of values) {
+      if (!v || typeof v !== 'object' || Array.isArray(v) || (v.name !== undefined && (typeof v.name !== 'string' || v.name.length > 80)) ||
+        (v.tags !== undefined && (!Array.isArray(v.tags) || v.tags.length > 8 || v.tags.some(t => typeof t !== 'string' || !t.trim() || t.length > 32) || new Set(v.tags).size !== v.tags.length))) {
+        throw Object.assign(new Error('参考图名称或标签格式不正确'), { code: 'BAD_REFERENCE' })
+      }
+    }
+  }
+  if (ap.defaultReferenceAssetId !== undefined && (typeof ap.defaultReferenceAssetId !== 'string' || ap.defaultReferenceAssetId.length > 500)) throw Object.assign(new Error('默认参考图 ID 无效'), { code: 'BAD_REFERENCE' })
+  if (ap.defaultReferenceAssetId) {
+    const candidates = Array.isArray(ap.referenceVariants) && ap.referenceVariants.length ? ap.referenceVariants.map(v => v.assetId) : (ap.referenceAssetIds || [])
+    if (!candidates.includes(ap.defaultReferenceAssetId)) throw Object.assign(new Error('默认款必须属于当前配置的人设参考图'), { code: 'BAD_REFERENCE' })
+  }
+}
+
 /** 分层内容归一化：缺的给默认值，多余的字段丢掉。 */
 export function normalizeLayers(raw = {}) {
   const l = raw && typeof raw === 'object' ? raw : {}
@@ -29,7 +52,9 @@ export function normalizeLayers(raw = {}) {
     identity: { name: str(id.name, 40), callOwner: str(id.callOwner, 20), core: str(id.core) },
     behavior: { text: str(be.text), proactivity: ['low', 'normal', 'high'].includes(be.proactivity) ? be.proactivity : 'normal' },
     style: { text: str(st.text), examples: list(st.examples, 20), banned: list(st.banned, 50) },
-    appearance: { text: str(ap.text, 4000), referenceAssetIds: list(ap.referenceAssetIds, 8) },
+    appearance: { text: str(ap.text, 4000), referenceAssetIds: list(ap.referenceAssetIds, 8), useDefaultReference: ap.useDefaultReference !== false,
+      referenceVariants: Array.isArray(ap.referenceVariants) ? ap.referenceVariants.slice(0, 8).map(v => ({ assetId: str(v?.assetId, 500), name: str(v?.name, 80), tags: list(v?.tags, 8).map(t => t.slice(0, 32)) })).filter(v => v.assetId) : [],
+      defaultReferenceAssetId: str(ap.defaultReferenceAssetId, 500) },
     voice: { voice: str(vo.voice, 80), speed: Number.isFinite(Number(vo.speed)) ? Math.min(2, Math.max(0.5, Number(vo.speed))) : 1 },
     policy: { mood: po.mood !== false, learnExpressions: po.learnExpressions !== false, useExpressions: po.useExpressions !== false },
     tags: list(l.tags, 12).map((t) => t.slice(0, 20)),
@@ -86,6 +111,7 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
   /** 新建一张卡（只有草稿）。publish=true 时同时发布第 1 版。 */
   function create({ id, name, layers, origin = 'user', publish = false, note = '' }) {
     checkId(id)
+    validateAppearanceInput(layers)
     return db.tx(() => {
       if (row(id)) throw fail(`已经有一张叫 ${id} 的卡了`, 'EXISTS')
       const t = now()
@@ -103,6 +129,7 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
       const r = row(id)
       guard(r, editRevision)
       if (r.archived_at) throw fail('这张卡已归档，先取消归档再改', 'ARCHIVED')
+      validateAppearanceInput(layers)
       db.run('UPDATE personas SET draft_json = ?, draft_base = COALESCE(draft_base, current_revision), name = ?, edit_revision = edit_revision + 1, updated_at = ? WHERE id = ?',
         JSON.stringify(normalizeLayers(layers)), str(name || r.name, 40), now(), id)
       return view(row(id))
@@ -184,6 +211,7 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
       if (!r.archived_at) throw fail('先归档再删除', 'NOT_ARCHIVED')
       db.run('DELETE FROM persona_revisions WHERE persona_id = ?', id)
       db.run('DELETE FROM personas WHERE id = ?', id)
+      storage.meta.set(`persona.references:${id}`, [])
       db.run('INSERT INTO persona_tombstones(id, deleted_at) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at', id, now())
       return true
     })
