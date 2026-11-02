@@ -397,6 +397,15 @@ export function explainSongError(message) {
   return m
 }
 
+/** 翻唱失败时发到聊天里的原因：匹配失败说人话，本机路径和进程输出只留给面板。 */
+export function songFailureText(message) {
+  const m = String(message || '')
+  if (/没有返回候选/.test(m)) return '曲库里没搜到这首'
+  if (/没有同时满足/.test(m)) return '曲库里没找到歌名和歌手都对得上的版本'
+  const text = explainSongError(m).replace(/^未确认请求的歌曲：/, '').replace(/；不会发送不匹配的作品.*$/, '')
+  return /[A-Za-z]:[\\/]|退出码|Traceback/.test(text) ? '制作时出错了，详情在面板「翻唱」里' : text.slice(0, 200)
+}
+
 export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResult, local, storage, hub, processSong,
   catalog = { searchSongs, songUrl, songDetail }, now = Date.now }) {
   const processing = new AsyncLocalStorage()
@@ -946,6 +955,15 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
     if (recorded?.ok === false) throw new Error(recorded.message || '翻唱经历未记入')
     updateOutput(job, { experienceRecorded: true }, execution)
   }
+  // 用户能控制歌名：去掉尖括号，免得被当成 @ 或表情标记。
+  const songLabel = (job) => String(job.output.title || job.input.track || job.input.query || '').replace(/[<>]/g, '').slice(0, 60)
+  const noteJob = (job, text) => hub?.noteToSession?.(job.chatId, text, { account: job.input.scope.account, epoch: job.epoch })
+  /** 在点歌的聊天里说一句；面板发起的任务看面板。说话失败不影响任务结果。 */
+  async function announce(job, event, text, execution) {
+    if (String(job.requestId).startsWith('panel:')) return
+    try { await hub?.sendText?.(job.chatId, text, null, { batchId: `song-notice:${job.id}:${event}`, epoch: job.epoch, requestId: job.requestId, shouldSend: execution.guard }) }
+    catch (e) { log?.warn?.('翻唱通知没发出去：', e.message) }
+  }
   const handler = {
     perChat: 1,
     prepare(job, execution) { guarded(job, execution).assertActive(); return { ready: true } },
@@ -999,6 +1017,11 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
       } catch (e) {
         if (!execution.guard()) return { delivered: false, canceled: true, batchId }
         updateOutput(job, { receipt: e.delivery || null, assetId: e.assetId || null, retryDelivery: false }, execution)
+        // 只有明确被拒才算失败；结果不确定时可能已经送达，不能这样说。
+        if (e.code === 'DELIVERY_REJECTED') {
+          await announce(job, 'rejected', `（《${songLabel(job)}》唱好了但语音没发出去，音频还在，主人可以到面板「翻唱」重发）`, execution)
+          noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》语音被网关拒绝，没发出去，已经在聊天里说明。`)
+        }
         return { delivered: false, batchId, canceled: e.code === 'DELIVERY_CANCELED', failed: e.code === 'DELIVERY_REJECTED',
           unknown: !['DELIVERY_CANCELED', 'DELIVERY_REJECTED'].includes(e.code), error: e.message }
       }
@@ -1008,11 +1031,24 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
       return { delivered, batchId, skipped: Boolean(receipt?.skipped), canceled: Boolean(receipt?.canceled),
         unknown: !delivered && !receipt?.skipped && !receipt?.canceled, error: receipt?.skipped ? '试运行/策略跳过，未实际发送' : !delivered ? '未得到真实发送回执' : undefined }
     },
-    async notify(job, event, _info, rawExecution) {
+    async notify(job, event, info, rawExecution) {
       const execution = guarded(job, rawExecution)
       execution.assertActive()
       await onResult?.({ ...resultView(job), jobId: job.id, event, chatId: job.chatId, requestId: job.requestId, epoch: job.epoch, scope: job.input.scope })
-      if (event === 'delivered') return recordExperience(job, execution)
+      if (event === 'delivered') {
+        noteJob(job, `【系统】你翻唱的《${songLabel(job)}》（任务 ${job.id}）已经发到聊天里了，也已经说过“唱好啦”，不用再说一遍。`)
+        await announce(job, 'delivered', '唱好啦', execution)
+        return recordExperience(job, execution)
+      }
+      if (event === 'failed') {
+        const reason = songFailureText(info?.message)
+        await announce(job, 'failed', `（翻唱《${songLabel(job)}》没成功：${reason}）`, execution)
+        noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》失败了：${reason}。已经在聊天里说明，不要声称还在唱。`)
+      }
+      if (event === 'unknown') {
+        await announce(job, 'unknown', `（翻唱《${songLabel(job)}》没有回应，不确定做没做好，先不重做，主人可以在面板「翻唱」里看看）`, execution)
+        noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》结果不确定，已经在聊天里说明。`)
+      }
     },
   }
   const runner = storage?.db ? createJobRunner({ storage, handlers: { song: handler }, log, concurrency: 1, now }) : null

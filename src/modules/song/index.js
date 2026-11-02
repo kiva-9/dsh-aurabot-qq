@@ -64,7 +64,7 @@ export default {
     // 面板里打开了才给她（没开就别让她答应唱歌）
     api.tool(({ chat, sessionId }) => (api.config().song.enabled && chat.kind !== 'system' ? defineTool({
       name: 'qq_song_cover',
-      description: '登记翻唱任务，匹配歌名和歌手后制作并发送。登记不代表匹配或完成；用 qq_song_status 查真实 title、match、stage、delivered，再据实描述。纠错必须传原 job_id 为 corrects_job_id，不得重复声称已唱对。',
+      description: '登记翻唱任务，匹配歌名和歌手后制作并发送。用户没说歌手时 artist 留空，不用反问，会自动唱曲库里第一个歌名对得上的版本。登记不代表匹配或完成；用 qq_song_status 查真实 title、match、stage、delivered，再据实描述。发送成功或失败都会自动在聊天里说一句。纠错必须传原 job_id 为 corrects_job_id，不得重复声称已唱对。',
       properties: { song: str('原始点歌关键词'), track: str('明确歌名，不含歌手'), artist: str('用户要求的歌手，不要猜测'),
         corrects_job_id: str('用户否定的原翻唱任务 ID；纠错时必填'), pitch: int('变调半音：原唱男声 +12，女声 0') },
       required: ['song'],

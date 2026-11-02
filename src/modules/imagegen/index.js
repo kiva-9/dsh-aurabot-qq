@@ -74,7 +74,7 @@ export default {
     api.tool(({ chat, sessionId }) => (enabled() && chat.kind !== 'system' ? [
       defineTool({
         name: 'qq_draw_image',
-        description: '画图并发到当前 QQ 聊天里（后台画，画好自动发出来，这一轮回一句「在画了」就行）。' +
+        description: '画图并发到当前 QQ 聊天里（后台画，画好自动发出来，之后你会看到成品再开口，这一轮回一句「在画了」就行）。' +
           '要照着这段里的图画或改图时，用 images 按「【这段里的图】」里的编号引用，并说明每张当什么用：base 底图（在它上面改）、identity 人物长相参考、style 风格参考、composition 构图参考。' +
           '要在你刚才给这个人画的那张上接着改，用 continue_last。不要拿别人发的图给另一个人当参考。' +
           '有人说「用我头像的形象画」时设 use_avatar:true；主人指定本群某人时用 avatar.qq。',

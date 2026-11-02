@@ -22,7 +22,7 @@ after(() => {
 })
 const chat = { kind: 'group', groupId: '62001', chatId: 'group:62001' }
 const receipt = '图已经发到聊天里了。'
-function fixture(t, brain = () => '普通回答') {
+function fixture(t, brain = () => '普通回答', extra = {}) {
   const dir = mkdtempSync(join(root, 'case-'))
   process.env.AURABOT_DATA_DIR = dir
   const storage = createStorage({ file: ':memory:', filesDir: join(dir, 'assets') })
@@ -31,7 +31,7 @@ function fixture(t, brain = () => '普通回答') {
   const fake = createFakeDsh({ brain })
   const hub = createHub({ dsh: fake.ctx, storage, getConfig: () => cfg,
     onebot: { call: () => assert.fail('No gateway calls allowed') },
-    log: { info() {}, warn() {}, error() {}, debug() {} } })
+    log: { info() {}, warn() {}, error() {}, debug() {} }, ...extra })
   fake.ctx.on('session/event', hub.onSessionEvent)
   t.after(async () => { await hub.dispose(); await fake.dispose(); storage.close() })
   const push = (text, opts = {}, target = chat) => hub.pushToSession(target, [{ type: 'text', text }], '30000003', opts)
@@ -74,6 +74,56 @@ test('completion receipts wait across steers and other chats for a fresh turn in
   assert.doesNotMatch(f.fake.turns.at(-1).userText, /图已经发到聊天里了/)
   await f.push('新问题')
   assert.match(f.fake.turns.at(-1).userText, /图已经发到聊天里了/)
+})
+
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64')
+function artwork(f) {
+  f.cfg.imageGen.observeGenerated = true
+  const assetId = f.storage.assets.put(png, { mime: 'image/png', sourceKind: 'generated' }).id
+  const review = (over = {}) => { f.cfg.dryRun = false; return f.hub.reviewArtwork(chat.chatId, { jobId: 'job-1', account: f.cfg.botQQ, personaId: 'fish', epoch: f.storage.epochs.current(chat.chatId),
+    assetIds: [assetId], prompt: '一只鲸鱼', note: receipt, ...over }) }
+  return { assetId, review }
+}
+const waitFor = async predicate => { const end = Date.now() + 5000; while (!predicate()) { if (Date.now() > end) throw Error('timeout'); await new Promise(r => setTimeout(r, 10)) } }
+
+test('画图回看：她带着成品起一轮并开口，回合没有请求身份，回执不再出现', async t => {
+  let actor
+  const f = fixture(t, ({ text, agent }) => { if (/画图结果/.test(text)) actor = f.hub.turnActor(agent.session); return /画图结果/.test(text) ? '画好啦，这鲸鱼尾巴有点短' : '普通回答' }, { personaOf: () => ({ personaId: 'fish', revision: 1 }) })
+  const { review } = artwork(f)
+  const sent = await f.hub.capture(async () => {
+    await f.push('开始', { persona: { personaId: 'fish', revision: 1 } })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    f.hub.noteToSession(chat.chatId, receipt)
+    assert.equal(review(), true)
+    await waitFor(() => f.fake.turns.length === 2)
+    await new Promise(resolve => setTimeout(resolve, 50))
+  })
+  const turn = f.fake.turns[1]
+  assert.equal(turn.images, 1)
+  assert.match(turn.userText, /一只鲸鱼/)
+  assert.doesNotMatch(turn.userText, /已处理任务的回执/)
+  assert.ok(actor?.error, '群里的回看回合不能以任何人的身份调用工具')
+  assert.ok(sent.sent.some(x => x.message.some(s => s.data?.text?.includes('尾巴有点短'))))
+})
+
+for (const change of ['observe-off', 'epoch', 'persona', 'expired']) test(`画图回看不登记：${change}`, async t => {
+  let personaId = 'fish'
+  const f = fixture(t, undefined, { personaOf: () => ({ personaId, revision: 1 }) })
+  const { assetId, review } = artwork(f)
+  await f.push('开始', { persona: { personaId: 'fish', revision: 1 } })
+  if (change === 'observe-off') f.cfg.imageGen.observeGenerated = false
+  if (change === 'epoch') { const epoch = f.storage.epochs.current(chat.chatId); f.storage.epochs.bump(chat.chatId, 'test'); assert.equal(review({ epoch }), false); return }
+  if (change === 'persona') personaId = 'other'
+  if (change === 'expired') {
+    f.cfg.dryRun = false
+    const context = { account: f.cfg.botQQ, chatId: chat.chatId, personaId: 'fish', epoch: f.storage.epochs.current(chat.chatId), policyRevision: 0, deadline: Date.now() - 1 }
+    f.storage.meta.set('artwork:inbox:old', { event: { id: 'old', context, assetIds: [assetId], prompt: '旧图', note: '' }, state: 'queued' })
+    f.hub.recoverPlannerWakes()
+    assert.equal(f.storage.meta.get('artwork:inbox:old').state, 'canceled')
+    assert.equal(f.fake.turns.length, 1)
+    return
+  }
+  assert.equal(review(), false)
 })
 
 for (const change of ['reset', 'account', 'epoch', 'history-boundary']) test(`stale completion receipt cannot survive ${change}`, async t => {

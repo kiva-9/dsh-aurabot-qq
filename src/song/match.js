@@ -22,13 +22,14 @@ export function matchTrack(candidate, intent = {}) {
   if (requested.songId && actual.id !== requested.songId) return result('mismatch', '歌曲 ID 不一致')
   const titles = [actual.name, ...(actual.aliases || [])].map(key), artists = artistKeys(actual.artists)
   if (intent.artist && !artistKeys(intent.artist).every(a => artists.includes(a))) return result('mismatch', '歌手不一致')
+  // A catalog alias may be a version label: "司凤版雨爱" is alias + title.
+  const accepted = [...titles, ...titles.slice(1).flatMap(alias => [alias + titles[0], titles[0] + alias])]
   // Only whole title + whole artist combinations are accepted. Extra words are
   // constraints, not noise: "Wanted Dead or Alive 2Pac" cannot match Bon Jovi.
-  const matches = text => { const q = key(text); return titles.some(title => q === title || artists.some(a => [title + a, a + title, a + '的' + title, title + 'by' + a].includes(q))) }
+  const matches = text => { const q = key(text); return accepted.some(title => q === title || artists.some(a => [title + a, a + title, a + '的' + title, title + 'by' + a].includes(q))) }
   if ((query && !matches(query)) || (intent.query && !matches(intent.query))) return result('mismatch', '歌名或请求中的歌手不一致')
   if (!query && !requested.songId) return result('unverified', '缺少可核验的歌名或歌曲 ID')
-  return { ...result('matched', '已核对曲库歌名和歌手；未试听音频'), artistSpecified: Boolean(intent.artist) ||
-    Boolean(intent.query && !titles.includes(key(intent.query))) }
+  return result('matched', '已核对曲库歌名和歌手；未试听音频')
 }
 
 export function songMatchError(match, candidates = []) {

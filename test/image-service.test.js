@@ -43,6 +43,49 @@ test('queued gallery reuse refuses removed source or changed persona before anot
   })
 })
 
+test('开启看图时送达后交给她自己开口，不发固定文案；登记失败才回落', async t => {
+  const s = setup(t), texts = [], reviews = [], notes = []
+  s.cfg.imageGen.observeGenerated = true
+  s.hub.personaFor = () => ({ personaId: 'fish', revision: 1, bindingRevision: 1, layers: {} })
+  s.hub.sendText = async (_chat, text) => { texts.push(text) }
+  s.hub.noteImageToSession = () => true
+  s.hub.noteToSession = (_chat, text) => { notes.push(text) }
+  s.storage.requests.get = id => id === 'request-fixture' ? { policyRevision: 0 } : null
+  const chatJob = () => { const job = s.enqueue(); s.storage.db.run("UPDATE jobs SET request_id='request-fixture' WHERE id=?", job.id); return job }
+  s.hub.reviewArtwork = (chatId, args) => { reviews.push({ chatId, ...args }); return true }
+  const job = chatJob()
+  await s.runner.drain()
+  assert.equal(texts.length, 0)
+  assert.equal(reviews.length, 1)
+  assert.deepEqual(reviews[0].assetIds, s.runner.get(job.id).output.assetIds)
+  assert.equal(reviews[0].note, notes[0], '回执文本一致，开口时才能把它去掉')
+  s.hub.reviewArtwork = () => false
+  chatJob()
+  await s.runner.drain()
+  assert.deepEqual(texts, ['画好啦'])
+  assert.match(notes.at(-1), /也已经说过/)
+})
+
+test('聊天发起的图送达后跟一句画好啦；面板任务和试运行不说', async t => {
+  const s = setup(t), texts = []
+  s.hub.sendText = async (chatId, text, _replyId, options) => { texts.push({ chatId, text, options }) }
+  const panel = s.enqueue()
+  await s.runner.drain()
+  assert.equal(s.runner.get(panel.id).state, 'delivered'); assert.equal(texts.length, 0)
+  const chat = s.enqueue()
+  s.storage.db.run("UPDATE jobs SET request_id='request-fixture' WHERE id=?", chat.id)
+  s.storage.requests.get = id => id === 'request-fixture' ? { policyRevision: 0 } : null
+  await s.runner.drain()
+  assert.equal(s.runner.get(chat.id).state, 'delivered')
+  assert.deepEqual(texts.map(x => x.text), ['画好啦'])
+  assert.equal(texts[0].options.batchId, `image-notice:${chat.id}:delivered`)
+  s.cfg.dryRun = true
+  const dry = s.enqueue()
+  s.storage.db.run("UPDATE jobs SET request_id='request-fixture' WHERE id=?", dry.id)
+  await s.runner.drain()
+  assert.equal(texts.length, 1)
+})
+
 test('default named canvas shape selects one provider-compatible size and explicit size wins', t => {
   const s = setup(t)
   s.cfg.imageGen.shape = 'portrait'

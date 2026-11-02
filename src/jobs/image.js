@@ -304,14 +304,17 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         const personaId = job.input.persona?.personaId
         const currentPersona = hub.personaFor?.(job.chatId)
         const recorded = lineage(job.id)?.outputs || []
+        const observed = (job.output?.assetIds || []).filter(assetId => recorded.includes(assetId) && storage.assets.get(assetId))
+        const scope = { account: job.input.accountId, epoch: job.epoch }
+        const receipt = `【系统】你刚才画的图（任务 ${job.id}）已经发到聊天里了。`
+        let reviewing = false
         if (getConfig().imageGen.observeGenerated === true && personaId && currentPersona?.personaId === personaId && !currentPersona.error) {
-          for (const assetId of job.output?.assetIds || []) {
-            if (recorded.includes(assetId) && storage.assets.get(assetId)) hub.noteImageToSession?.(job.chatId, {
-              account: job.input.accountId, personaId, epoch: job.epoch, assetId,
-            })
-          }
+          for (const assetId of observed) hub.noteImageToSession?.(job.chatId, { ...scope, personaId, assetId })
+          // 面板发起的任务没有聊天请求，不在聊天里开口；图留到下一轮给她看。
+          if (job.requestId && observed.length) reviewing = hub.reviewArtwork?.(job.chatId, { ...scope, jobId: job.id, personaId, assetIds: observed, prompt: job.input.prompt, note: receipt }) === true
         }
-        hub.noteToSession?.(job.chatId, `【系统】你刚才画的图（任务 ${job.id}）已经发到聊天里了。`, { account: job.input.accountId, epoch: job.epoch })
+        hub.noteToSession?.(job.chatId, receipt + (job.requestId && !reviewing ? '也已经说过“画好啦”，不用再说一遍。' : ''), scope)
+        if (job.requestId && !reviewing) await hub.sendText(job.chatId, '画好啦', null, { batchId: `image-notice:${job.id}:delivered`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
         onDelivered?.(job)
         return
       }

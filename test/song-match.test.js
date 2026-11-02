@@ -27,12 +27,26 @@ test('同名不同歌手拒绝；旧关键词、前后歌手、显式字段与�
   assert.deepEqual(trackInfo({ title: 'Wanted Dead or Alive - Bon Jovi' }), { ...wrong, id: null, title: 'Wanted Dead or Alive - Bon Jovi' })
 })
 
-test('曲库明确提供的译名可匹配，实际标题仍保留原名；无歌手的同名歧义不擅自选', async () => {
+test('曲库明确提供的译名可匹配，实际标题仍保留原名；无歌手时唱第一个歌名匹配的版本', async () => {
   const song = { id: 3, name: '初音ミクの消失', artists: '初音ミク / cosMo@暴走P', aliases: ['初音未来的消失'] }
   const result = await selectSong({ query: '初音未来的消失' }, { catalog: catalog([song]) })
   assert.equal(result.track.title, '初音ミクの消失 - 初音ミク / cosMo@暴走P')
   assert.equal(matchTrack({ ...song, aliases: [] }, { query: '初音未来的消失' }).status, 'mismatch')
-  await assert.rejects(selectSong({ query: 'Wanted Dead or Alive' }, { catalog: catalog([wrong, right], () => assert.fail('歧义不能下载')) }), /同名歌曲有多位歌手/)
+  const first = await selectSong({ query: 'Wanted Dead or Alive' }, { catalog: catalog([wrong, right]) })
+  assert.equal(first.track.id, '1')
+  assert.equal(assertSongResult({ track: first.track }, { query: 'Wanted Dead or Alive' }).status, 'matched')
+  const unavailable = await selectSong({ query: 'Wanted Dead or Alive' }, { catalog: catalog([wrong, right], id => id === 1 ? { url: 'fixture://trial', trial: true } : { url: 'fixture://audio' }) })
+  assert.equal(unavailable.track.id, '2', '第一个没有完整音频时往后选')
+  assert.equal(matchTrack({ ...wrong, name: 'Other' }, { query: 'Wanted Dead or Alive' }).status, 'mismatch', '歌名对不上仍然拒绝')
+})
+
+test('曲库版本别名可以和歌名连写；不在别名里的版本词仍是约束', async () => {
+  const plain = { id: 1, name: '雨爱', artists: '杨丞琳', aliases: ['电视剧《海派甜心》片尾曲'] }
+  const version = { id: 2, name: '雨爱', artists: 'DJ冷冰冰', aliases: ['司凤版'] }
+  const intent = { query: '司凤版雨爱', track: '雨爱' }
+  assert.equal(matchTrack(plain, intent).status, 'mismatch')
+  assert.equal((await selectSong(intent, { catalog: catalog([plain, version]) })).track.id, '2')
+  assert.equal(matchTrack(version, { query: '鬼畜版雨爱', track: '雨爱' }).status, 'mismatch')
 })
 
 test('旧换声脚本路径、file/output对象和仅写输出的返回值仍兼容；声明换曲的脚本拒绝', () => {

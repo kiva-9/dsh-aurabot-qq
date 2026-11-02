@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { createStorage } from '../src/storage/index.js'
 import { createOutbox } from '../src/delivery/outbox.js'
-import { createSongStudio } from '../src/song/studio.js'
+import { createSongStudio, songFailureText } from '../src/song/studio.js'
 import { normalize } from '../src/core/config.js'
 
 const gate = () => { let resolve; const promise = new Promise((r) => { resolve = r }); return { promise, resolve } }
@@ -21,12 +21,14 @@ function fixture(t, extra = {}) {
   const connections = [storage]
   const open = () => { const db = createStorage({ file: join(dir, 'test.sqlite'), filesDir: join(dir, 'assets') }); connections.push(db); return db }
   let personaId = 'fish', generated = 0
-  const hub = { personaFor: () => ({ personaId, revision: 1, layers: { identity: { name: '鱼' } } }) }
+  const texts = [], notes = []
+  const hub = { personaFor: () => ({ personaId, revision: 1, layers: { identity: { name: '鱼' } } }),
+    sendText: async (chatId, text, _replyId, options) => { texts.push({ chatId, text, options }); return { delivered: 1 } },
+    noteToSession: (chatId, text, options) => { notes.push({ chatId, text, options }); return true } }
   const sent = [], sung = [], services = [], warnings = []
   const deps = { getConfig: () => cfg, storage, hub, log: { info() {}, debug() {}, warn: (...x) => warnings.push(x) },
     processSong: async (task) => { generated++; return { file: audio, track: { id: 'fixture-song', name: task.query, artists: '测试歌手' }, voice: 'fish' } },
     sendVoiceFile: async (...args) => { sent.push(args); return { ...receipt } },
-    sendText: () => assert.fail('unknown 禁止回落文字或宣称发送失败'),
     onSung: async (...args) => { sung.push(args); return { ok: true } }, ...extra }
   const create = (over = {}) => { const s = createSongStudio({ ...deps, ...over }); services.push(s); return s }
   const s = create()
@@ -36,8 +38,55 @@ function fixture(t, extra = {}) {
     return { account: cfg.botQQ, chatId, actorId, requestId: r.id, epoch: r.epoch, persona: personaId, personaSnapshot: hub.personaFor() }
   }
   t.after(() => { services.forEach((x) => x.stop()); connections.reverse().forEach((x) => x.close()); rmSync(dir, { recursive: true, force: true }) })
-  return { s, create, open, context, cfg, storage, hub, sent, sung, audio, dir, warnings, generated: () => generated, persona: (p) => { personaId = p } }
+  return { s, create, open, context, cfg, storage, hub, sent, sung, texts, notes, audio, dir, warnings, generated: () => generated, persona: (p) => { personaId = p } }
 }
+
+test('送达后跟一句唱好啦并留回执给会话；同任务只说一次', async (t) => {
+  const f = fixture(t), ctx = f.context(), r = f.s.request({ song: '测试', ...ctx })
+  await f.s.tick(); await f.s.tick()
+  assert.deepEqual(f.texts.map(x => x.text), ['唱好啦'])
+  assert.equal(f.texts[0].chatId, ctx.chatId)
+  assert.equal(f.texts[0].options.batchId, `song-notice:${r.job_id}:delivered`)
+  assert.equal(f.texts[0].options.requestId, ctx.requestId); assert.equal(f.texts[0].options.epoch, ctx.epoch)
+  assert.match(f.notes[0].text, /已经发到聊天里了/)
+})
+
+test('跟句发送失败不影响翻唱经历入账', async (t) => {
+  const f = fixture(t)
+  f.hub.sendText = () => { throw new Error('网关挂了') }
+  const r = f.s.request({ song: '测试', ...f.context() })
+  await f.s.tick()
+  assert.equal(f.s.runner.get(r.job_id).state, 'delivered'); assert.equal(f.sung.length, 1)
+})
+
+test('翻唱失败在点歌的聊天里说明原因，并告诉会话不要再说还在唱', async (t) => {
+  const f = fixture(t, { processSong: async () => { throw Object.assign(new Error('未确认请求的歌曲：当前候选没有同时满足歌名、歌手和歌曲 ID 的结果；不会发送不匹配的作品'), { kind: 'invalid', billing: 'none' }) } })
+  const ctx = f.context(), r = f.s.request({ song: '皇后<at:1>大道东', ...ctx })
+  await f.s.tick()
+  assert.equal(f.s.runner.get(r.job_id).state, 'failed')
+  assert.equal(f.texts.length, 1)
+  assert.equal(f.texts[0].chatId, ctx.chatId)
+  assert.equal(f.texts[0].text, '（翻唱《皇后at:1大道东》没成功：曲库里没找到歌名和歌手都对得上的版本）')
+  assert.match(f.notes[0].text, /失败了.*不要声称还在唱/)
+})
+
+test('失败原因不把本机路径和进程输出发到聊天里', () => {
+  assert.equal(songFailureText('python.exe 退出码 1：C:\\Users\\me\\rvc failed'), '制作时出错了，详情在面板「翻唱」里')
+  assert.equal(songFailureText("[Errno 13] Permission denied: 'E:\\\\rvc\\\\m.ckpt'"), '制作时出错了，详情在面板「翻唱」里')
+  assert.equal(songFailureText('未确认请求的歌曲：当前查询没有返回候选，不能确认是否收录；不会发送不匹配的作品'), '曲库里没搜到这首')
+  assert.equal(songFailureText('这首没有人声（像是纯音乐或伴奏版），换一首吧'), '这首没有人声（像是纯音乐或伴奏版），换一首吧')
+})
+
+test('取消的任务和面板发起的任务不在聊天里说话', async (t) => {
+  const f = fixture(t), ctx = f.context(), r = f.s.request({ song: '测试', ...ctx })
+  f.s.cancel(r.job_id, ctx)
+  await f.s.tick()
+  assert.equal(f.texts.length, 0)
+  const panel = { ...f.context(), requestId: 'panel:fixture' }
+  f.s.request({ song: '面板试唱', ...panel })
+  await f.s.tick()
+  assert.equal(f.sent.length, 1); assert.equal(f.texts.length, 0)
+})
 
 test('持久翻唱按当前 actor 授权，冻结 scope/人格/设置，回执数量为1才 onSung；同 request 不重复', async (t) => {
   const f = fixture(t), ctx = f.context()
@@ -94,6 +143,7 @@ test('unknown/pending 不反复发送、不 fallback；skipped 和无 message_id
       const ctx = f.context(), r = f.s.request({ song: '测试', ...ctx })
       await f.s.tick(); await f.s.tick(); f.s.recover(); await f.s.tick()
       assert.equal(sends, 1); assert.equal(f.sung.length, 0)
+      assert.equal(f.texts.length, 0, '结果不确定或未送达时不能说唱好了或发送失败')
       assert.equal(f.s.resend(r.job_id, ctx).ok, false)
       const j = f.s.runner.get(r.job_id)
       assert.ok(j.output.file); assert.notEqual(j.state, 'delivered')
@@ -116,6 +166,7 @@ test('明确拒绝才可人工补发同一音频和 batch，不重新推理；�
   const ctx = f.context(), r = f.s.request({ song: '测试', ...ctx })
   await f.s.tick()
   assert.equal(f.s.runner.get(r.job_id).output.delivery.failed, true)
+  assert.match(f.texts[0].text, /语音没发出去/); assert.equal(f.texts.length, 1)
   assert.equal(f.s.resend(r.job_id, { ...ctx, chatId: 'group:other' }).ok, false)
   assert.equal(f.s.resend(r.job_id, ctx).ok, true)
   await f.s.tick()
