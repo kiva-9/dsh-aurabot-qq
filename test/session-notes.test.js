@@ -103,7 +103,30 @@ test('画图回看：她带着成品起一轮并开口，回合没有请求身�
   assert.match(turn.userText, /一只鲸鱼/)
   assert.doesNotMatch(turn.userText, /已处理任务的回执/)
   assert.ok(actor?.error, '群里的回看回合不能以任何人的身份调用工具')
-  assert.ok(sent.sent.some(x => x.message.some(s => s.data?.text?.includes('尾巴有点短'))))
+  const texts = sent.sent.flatMap(x => x.message).map(s => s.data?.text).filter(Boolean)
+  assert.ok(texts.some(text => text.includes('尾巴有点短')))
+  assert.equal(texts.includes('画好啦'), false, '她开口了就不再补固定的话')
+})
+
+for (const [name, reply] of [['空正文', ''], ['沉默', '[沉默]'], ['回合异常结束', null]]) test(`画图回看没有可发的正文时补固定的话：${name}`, async t => {
+  let f
+  f = fixture(t, ({ text, agent }) => {
+    if (!/画图结果/.test(text)) return '普通回答'
+    if (reply === null) agent.cancel({ kind: 'error' })
+    return reply || ''
+  }, { personaOf: () => ({ personaId: 'fish', revision: 1 }) })
+  const { review } = artwork(f)
+  const result = await f.hub.capture(async () => {
+    await f.push('开始', { persona: { personaId: 'fish', revision: 1 } })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    assert.equal(review(), true)
+    await waitFor(() => f.storage.meta.get('artwork:inbox:job-1')?.state === 'done')
+    await new Promise(resolve => setTimeout(resolve, 80))
+  })
+  const texts = result.sent.flatMap(x => x.message).map(s => s.data?.text).filter(Boolean)
+  assert.deepEqual(texts, ['普通回答', '画好啦'])
+  await f.hub.capture(async () => { await f.push('下一句', { persona: { personaId: 'fish', revision: 1 } }); await new Promise(resolve => setTimeout(resolve, 30)) })
+  assert.match(f.fake.turns.at(-1).userText, /下一句/, '补完话后聊天没有卡住')
 })
 
 for (const change of ['observe-off', 'epoch', 'persona', 'expired']) test(`画图回看不登记：${change}`, async t => {
