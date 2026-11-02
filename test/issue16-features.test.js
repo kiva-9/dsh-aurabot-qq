@@ -37,6 +37,13 @@ test('high-resolution compact image is locally resized within the output bound',
   assert.ok(result.height <= 2048 && result.bytes.length <= 4 * 1024 * 1024)
 })
 
+test('oversized animation reaches the model as its first frame', async t => {
+  if (spawnSync('ffmpeg', ['-version'], { windowsHide: true }).error) return t.skip('ffmpeg unavailable')
+  const gif = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=2200x1000:rate=2:duration=1', '-f', 'gif', 'pipe:1'], { windowsHide: true, maxBuffer: 64 * 1024 * 1024 }).stdout
+  const result = await createImagePreparer()({ bytes: gif })
+  assert.equal(result.derived, true); assert.equal(result.firstFrame, true); assert.equal(result.width, 2048)
+})
+
 test('gallery excludes other accounts, chats, actors, personas and undelivered jobs', async () => {
   const { canUseArtwork, artworkList, resolveArtwork } = await import('../src/image/gallery.js')
   const scope = { account: '20', chatId: 'group:1', actorId: '10', personaId: 'fish' }

@@ -66,7 +66,8 @@ test('翻唱失败在点歌的聊天里说明原因，并告诉会话不要再�
   assert.equal(f.s.runner.get(r.job_id).state, 'failed')
   assert.equal(f.texts.length, 1)
   assert.equal(f.texts[0].chatId, ctx.chatId)
-  assert.equal(f.texts[0].text, '（翻唱《皇后at:1大道东》没成功：曲库里没找到歌名和歌手都对得上的版本）')
+  assert.equal(f.texts[0].text, '（翻唱《皇后at:1大道东》没成功：曲库里没找到这个歌名）')
+  assert.equal(songFailureText('当前候选没有同时满足歌名、歌手', { artist: '罗大佑' }), '曲库里没找到歌名和歌手都对得上的版本')
   assert.match(f.notes[0].text, /失败了.*不要声称还在唱/)
 })
 

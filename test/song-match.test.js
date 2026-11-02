@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { matchTrack, trackInfo, assertSongResult, convertedFile } from '../src/song/match.js'
 import { selectSong } from '../src/song/selection.js'
+import { searchSongs } from '../src/song/netease.js'
 import { songCacheKey, readSongCache, writeSongCache, audioHash } from '../src/song/cache.js'
 
 const wanted = { query: 'Wanted Dead or Alive 2Pac' }
@@ -66,6 +67,17 @@ test('先校验身份再取音频；错误候选不能因为排名第一或可�
   await assert.rejects(selectSong({ ...wanted, songId: 1 }, { catalog: catalog([wrong, right], () => assert.fail('ID 也必须校验歌手')) }), /未确认请求/)
   const selected = await selectSong({ songId: 2 }, { catalog: catalog([right]) })
   assert.equal(selected.track.title, 'Wanted Dead or Alive - 2Pac / Snoop Dogg')
+})
+
+test('中文译名能匹配日文曲名，一条里的多个译名分开算', async t => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({ code: 200, result: { songs: [
+    { id: 7, name: 'ノンブレス・オブリージュ', alia: ['Non-breath oblige'], tns: ['无呼吸义务/Non-breath oblige'], ar: [{ name: 'ピノキオピー' }] },
+    { id: 8, name: '別の歌', tns: ['别的歌'], ar: [{ name: '誰か' }] },
+  ] } })))
+  const [song, other] = await searchSongs('无呼吸义务')
+  assert.deepEqual(song.aliases, ['Non-breath oblige', '无呼吸义务'])
+  assert.equal(matchTrack(song, { query: '无呼吸义务' }).status, 'matched')
+  assert.equal(matchTrack(other, { query: '无呼吸义务' }).status, 'mismatch')
 })
 
 test('已知无人声/用户否定的版本跳过，只在同一歌名与歌手内寻找可用版本', async () => {

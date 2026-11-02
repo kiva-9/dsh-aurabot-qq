@@ -398,10 +398,10 @@ export function explainSongError(message) {
 }
 
 /** 翻唱失败时发到聊天里的原因：匹配失败说人话，本机路径和进程输出只留给面板。 */
-export function songFailureText(message) {
+export function songFailureText(message, { artist } = {}) {
   const m = String(message || '')
   if (/没有返回候选/.test(m)) return '曲库里没搜到这首'
-  if (/没有同时满足/.test(m)) return '曲库里没找到歌名和歌手都对得上的版本'
+  if (/没有同时满足/.test(m)) return artist ? '曲库里没找到歌名和歌手都对得上的版本' : '曲库里没找到这个歌名'
   const text = explainSongError(m).replace(/^未确认请求的歌曲：/, '').replace(/；不会发送不匹配的作品.*$/, '')
   return /[A-Za-z]:[\\/]|退出码|Traceback/.test(text) ? '制作时出错了，详情在面板「翻唱」里' : text.slice(0, 200)
 }
@@ -1041,7 +1041,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
         return recordExperience(job, execution)
       }
       if (event === 'failed') {
-        const reason = songFailureText(info?.message)
+        const reason = songFailureText(info?.message, { artist: job.input.artist })
         await announce(job, 'failed', `（翻唱《${songLabel(job)}》没成功：${reason}）`, execution)
         noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》失败了：${reason}。已经在聊天里说明，不要声称还在唱。`)
       }

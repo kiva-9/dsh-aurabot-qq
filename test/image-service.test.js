@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createStorage } from '../src/storage/index.js'
-import { createImageService } from '../src/jobs/image.js'
+import { createImageService, imageFailureText } from '../src/jobs/image.js'
 import { createJobRunner } from '../src/jobs/runner.js'
 import { normalize, mergeFromPanel } from '../src/core/config.js'
 
@@ -178,6 +178,13 @@ test('图片显式共享可用，撤回或撤销共享在提交前阻止收费',
   assert.equal(s.runner.get(third.id).state,'failed');assert.equal(s.calls.length,1)
 })
 
+
+test('画图失败的提示不把服务商状态码发到聊天里', () => {
+  assert.equal(imageFailureText('生图失败：output_moderation'), '这张被服务的内容审核拦下了')
+  assert.equal(imageFailureText('生图服务不接受这个请求（400）：chatgpt.com: 400 Bad Request: Your request was rejected by the safety system.'), '这张被服务的内容审核拦下了')
+  assert.equal(imageFailureText('生图失败：error'), '生图服务这次没画出来')
+  assert.equal(imageFailureText('今天该请求者的生图额度已用完'), '今天该请求者的生图额度已用完')
+})
 
 test('delivered artwork is queued for the same persona only', async t => {
   const s = setup(t), notes = []

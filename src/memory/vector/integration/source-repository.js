@@ -46,7 +46,10 @@ export function createMemorySourceRepository({ memory, storage, getPolicy = () =
       const viewer = scopeOf(scope), n = cap(limit)
       const where = owned ? { sql: 'account=? AND chat=? AND persona=?', params: [viewer.account, viewer.chat, viewer.persona] } : predicate(viewer, getPolicy(), { account: 'account', chat: 'chat', persona: 'persona', category: 'category' })
       const rows = storage.db.all(`SELECT id FROM memory_facts WHERE ${where.sql} AND id > ? ORDER BY id LIMIT ?`, ...where.params, cursor, n)
-      const items = typeof memory.getFactsByIds === 'function' ? memory.getFactsByIds(rows.map(row => row.id), { scope: viewer }) : rows.map(row => repo.get(row.id, viewer)).filter(Boolean)
+      // Pages reach 500 rows; getFactsByIds accepts at most 200 IDs per call.
+      const items = []
+      if (typeof memory.getFactsByIds === 'function') for (let i = 0; i < rows.length; i += 200) items.push(...memory.getFactsByIds(rows.slice(i, i + 200).map(row => row.id), { scope: viewer }))
+      else items.push(...rows.map(row => repo.get(row.id, viewer)).filter(Boolean))
       return { items, sourceIds: rows.map(row => row.id),
         nextCursor: rows.at(-1)?.id ?? cursor, done: rows.length < n, scanned: rows.length }
     },

@@ -132,7 +132,7 @@ export function createMediaResolver({ storage, fetchBytes, mimeOf, transcribe, o
       VALUES (?, ?, ?, ?, ?, 'model-thumbnail', 'transient', ?)
       ON CONFLICT(source_asset_id) DO UPDATE SET derivative_sha256=excluded.derivative_sha256, mime=excluded.mime,
         width=excluded.width, height=excluded.height, updated_at=excluded.updated_at`, source.id, digest, result.mime, result.width, result.height, Date.now())
-    return { ...image, originalAssetId: source.id, mediaType: result.mime, data: result.bytes.toString('base64') }
+    return { ...image, originalAssetId: source.id, mediaType: result.mime, data: result.bytes.toString('base64'), ...(result.firstFrame ? { firstFrame: true } : {}) }
   }
   return { register, isReady, resultsOf, prepareForModel, dispose: () => { disposed = true; pending.clear() } }
 }

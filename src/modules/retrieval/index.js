@@ -182,16 +182,20 @@ export default {
       try {
         if (!active || !config().enabled || chat?.kind === 'system') return ''
         activeStill(active)
-        const scope = hostScope({ chat, sessionId }), epoch = storage.epochs.current(scope.chat)
-        return active.service.contextFor(chat, sessionId, { scope, epoch, ...(options.query !== undefined ? { query: options.query } : {}) })
+        const scope = hostScope({ chat, sessionId, personaId: options.personaId }), epoch = storage.epochs.current(scope.chat)
+        return active.service.contextFor(chat, sessionId, { scope, epoch, shown: options.shown, ...(options.query !== undefined ? { query: options.query } : {}) })
       } catch { return '' }
     }
     api.prepareContext?.(input => track(prepareContext(input)), { timeoutMs: 2500 })
     // Prepare uses this turn's query and must complete before this filter; do
     // not put changing search results into the retained system context.
-    api.on('prompt/prepared', (content, { chat, sessionId, text }) => {
+    // This runs before the chat counts as running, so turnPersona() is still
+    // empty here: take the frozen persona from the event. Facts the memory
+    // module already put in this prompt are not repeated.
+    api.on('prompt/prepared', (content, { chat, sessionId, text, persona }) => {
       if (typeof text !== 'string') return content
-      const hint = contextFor(chat, sessionId, { query: text })
+      const shown = content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+      const hint = contextFor(chat, sessionId, { query: text, personaId: persona?.personaId, shown })
       return hint ? [{ type: 'text', text: hint }, ...content] : content
     })
     api.tool(({ chat, sessionId }) => {

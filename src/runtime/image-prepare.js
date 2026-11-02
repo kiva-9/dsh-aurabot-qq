@@ -14,7 +14,8 @@ export function createImagePreparer({ spawnProcess = spawn, executable = 'ffmpeg
     const info = imageInfo(bytes)
     if (!info.width || !info.height || info.width * info.height > LIMIT.pixels) throw fail('图片超过解码像素限制')
     if (bytes.length <= LIMIT.output && Math.max(info.width, info.height) <= LIMIT.side) return { bytes, ...info, derived: false }
-    if (animated(bytes, info.mime)) throw fail('动画需要保留多帧，不能自动缩成单帧')
+    // Oversized animations go to the model as their first frame; the caller says so.
+    const firstFrame = animated(bytes, info.mime)
     if (active >= LIMIT.concurrency) throw fail('图片预处理繁忙')
     active++
     try {
@@ -46,7 +47,7 @@ export function createImagePreparer({ spawnProcess = spawn, executable = 'ffmpeg
       signal?.throwIfAborted()
       const out = imageInfo(output)
       if (out.width !== width || out.height !== height || output.length > LIMIT.output) throw fail('缩图尺寸或大小无效')
-      return { bytes: output, ...out, derived: true }
+      return { bytes: output, ...out, derived: true, firstFrame }
     } finally { active-- }
   }
 }

@@ -145,6 +145,26 @@ test('slow foreground embedding yields lexical evidence within budget and record
   } finally { release.resolve(); f.state.hold = null }
 })
 
+test('prepared hook uses the event persona before the chat counts as running and skips facts already shown', async t => {
+  const f = await fixture(t)
+  const scope = { ...S, persona: 'fish' }, chat = { chatId: S.chat, kind: 'group' }, persona = { personaId: 'fish' }
+  f.fact('小明喜欢咖啡', scope)
+  f.hubState.persona = undefined // hub.turnPersona() stays empty until the turn is admitted.
+  await f.modules.prepareContext({ chat, chatId: S.chat, sessionId: 'p', text: '咖啡', account: 'bot', persona: 'fish' })
+  const out = await f.modules.filter('prompt/prepared', [{ type: 'text', text: '原文' }], { chat, sessionId: 'p', text: '咖啡', persona })
+  assert.match(out[0].text, /可见记忆/); assert.match(out[0].text, /小明喜欢咖啡/)
+  const shown = [{ type: 'text', text: '【相关记忆】\n小明喜欢咖啡' }]
+  assert.deepEqual(await f.modules.filter('prompt/prepared', shown, { chat, sessionId: 'p', text: '咖啡', persona }), shown)
+})
+
+test('a scope past the 200-ID read limit still recalls and scans', async t => {
+  const f = await fixture(t), chat = { chatId: S.chat, kind: 'group' }
+  for (let i = 0; i < 205; i++) f.fact(`第 ${i} 条咖啡记录`)
+  assert.equal((await f.api.prepareContext({ chat, chatId: S.chat, sessionId: 'large', text: '咖啡', account: 'bot', persona: '' })).ready, true)
+  const page = createMemorySourceRepository({ memory: f.memory, storage: f.storage }).page(S, { limit: 256, owned: true })
+  assert.equal(page.items.length, 205); assert.equal(page.done, true)
+})
+
 test('twenty prepared retrieval turns contain only current-query evidence and no system snapshots', async t => {
   const f = await fixture(t)
   f.fact('小明喜欢咖啡'); f.fact('小明喜欢登山')

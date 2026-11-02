@@ -11,6 +11,14 @@ import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
 import { ensureDefaultReference, imageReferenceBytes } from '../persona/references.js'
 
+/** 画图失败时发到聊天里的原因：服务商的状态码说人话，原文留在任务记录里给面板看。 */
+export function imageFailureText(message) {
+  const m = String(message || '')
+  if (/moderation|safety system/i.test(m)) return '这张被服务的内容审核拦下了'
+  if (/^生图失败：(error|failed)?$/i.test(m)) return '生图服务这次没画出来'
+  return m
+}
+
 /**
  * @param {object} o
  * @param {object} o.storage
@@ -319,8 +327,9 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         return
       }
       if (event === 'failed') {
-        await hub.sendText(job.chatId, `（画图没成功：${info.message}）`, null, { batchId: `image-notice:${job.id}:failed`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
-        hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 失败了：${info.message}`, { account: job.input.accountId, epoch: job.epoch })
+        const reason = imageFailureText(info.message)
+        await hub.sendText(job.chatId, `（画图没成功：${reason}）`, null, { batchId: `image-notice:${job.id}:failed`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
+        hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 失败了：${reason}`, { account: job.input.accountId, epoch: job.epoch })
       }
       if (event === 'unknown') {
         await hub.sendText(job.chatId, '（画图服务没回应，不确定画没画好。为了不重复扣费先不重画，主人可以在面板「生图」里看看）', null, { batchId: `image-notice:${job.id}:unknown`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})

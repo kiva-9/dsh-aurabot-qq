@@ -1904,8 +1904,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       if (block.type !== 'image' || !block.assetId) { preparedContent.push(block); continue }
       try {
         const prepared = await media.prepareForModel(block, { signal: turnController?.signal, account, chatId: chat.chatId })
-        const { assetId, occurrenceId, originalAssetId, derivativeAssetId, ...attachment } = prepared
+        const { assetId, occurrenceId, originalAssetId, derivativeAssetId, firstFrame, ...attachment } = prepared
         preparedContent.push(attachment)
+        if (firstFrame) preparedContent.push({type:'text',text:'【动图】这张动图太大，你只看到了第一帧，不能描述后面的动作。'})
       } catch (error) {
         preparedContent.push({type:'text',text:'【图片不可用】图片预处理失败，不能声称看见此图。'})
         log.warn('图片预处理失败：', error.message)

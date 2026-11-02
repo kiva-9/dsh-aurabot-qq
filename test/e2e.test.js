@@ -53,6 +53,11 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('慢慢想') && !text.includes('补充')) { await sleep(2500); return '想好了' }
   if (text.includes('引用测试') && text.startsWith('【群聊')) { const n = (text.match(/\[(\d+)\][^\n]*引用测试/) || [])[1]; return n ? `<reply:${n}>收到这条啦\n别的我就不挨个回了` : '没看到编号' }
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
+  if (text.includes('两个人一起')) {
+    const ref = Number((text.match(/\[(\d+)\] [^\n]*画我的/) || [])[1])
+    const r = await callTool('qq_draw_image', { for_message: ref, prompt: '一只蓝色小鲸鱼' })
+    return r && r.ok ? '在画了' : r.message
+  }
   if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '在画了' : '画不了' }
   if (text.includes('照着这张')) { const r = await callTool('qq_draw_image', { prompt: '改成雨天', images: [{ n: 1, role: 'base' }] }); return r && r.ok ? '在改了' : r.message }
   if (text.includes('用别人的图画')) {
@@ -680,7 +685,19 @@ test('混合生图请求：群友 A 不能借群友 B 刚发的图发起付费�
   const r = fake.turns.at(-1).toolCalls[0].result
   await fake.call('/save', { imageGen: { ownerOnly: true } })
   assert.equal(r.ok, false)
-  assert.match(r.message, /这一轮含其他人的请求/)
+  assert.match(r.message, /不能拿来给别人画/)
+})
+
+test('混合生图请求：两个人同一轮时，for_message 写明是谁就能画', async () => {
+  await settle()
+  await fake.call('/save', { imageGen: { ownerOnly: false } })
+  const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
+  mock.push(grp('555', '777', at('两个人一起 画我的')))
+  mock.push(grp('555', '778', at('两个人一起 我也说一句'), '路人乙'))
+  await until(() => fake.turns.at(-1)?.userText.includes('我也说一句') && fake.turns.at(-1).toolCalls.length)
+  const r = fake.turns.at(-1).toolCalls[0].result
+  await fake.call('/save', { imageGen: { ownerOnly: true } })
+  assert.equal(r.ok, true, r.message)
 })
 
 test('增量记忆：必须指定范围，原始旧聊天保留供审计', async () => {

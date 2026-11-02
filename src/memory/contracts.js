@@ -19,7 +19,7 @@ export function enumValue(v, values, label) {
   return v
 }
 export function ids(v, label, allowEmpty = false) {
-  if (!Array.isArray(v) || (!v.length && !allowEmpty) || v.length > 200 || new Set(v).size !== v.length) fail('INVALID_STRUCTURE', `${label} 必须为无重复 ID 数组`)
+  if (!Array.isArray(v) || (!v.length && !allowEmpty) || v.length > 200 || new Set(v).size !== v.length) fail('INVALID_STRUCTURE', `${label} 必须为最多 200 个的无重复 ID 数组`)
   return v.map(x => string(x, label, 200))
 }
 function time(v, label) {

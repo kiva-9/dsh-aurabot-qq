@@ -63,6 +63,9 @@ async function post(path, data, cookie) {
   return j
 }
 
+/** 曲库别名加译名：日文歌的中文名在 tns 里（「威風堂々」→「威风堂堂」），一条里可能用 / 分隔多个。 */
+const aliasesOf = (s) => [...new Set([...(s.alia || []), ...(s.tns || []).flatMap((t) => String(t).split('/')).map((t) => t.trim())].filter(Boolean))]
+
 /** 搜歌：[{id, name, artists, durationSec, vip}] */
 export async function searchSongs(keyword, { cookie, limit = 5 } = {}) {
   const j = await post('/cloudsearch/pc', { s: String(keyword), type: 1, limit, offset: 0 }, cookie)
@@ -70,7 +73,7 @@ export async function searchSongs(keyword, { cookie, limit = 5 } = {}) {
     id: s.id,
     name: s.name,
     alias: (s.alia || []).join(" "),
-    aliases: s.alia || [],
+    aliases: aliasesOf(s),
     artists: (s.ar || []).map((a) => a.name).join(' / '),
     durationSec: Math.round((s.dt || 0) / 1000),
     vip: s.fee === 1 || s.fee === 4,
@@ -90,7 +93,7 @@ export async function songDetail(id, { cookie } = {}) {
   const j = await post('/v3/song/detail', { c: JSON.stringify([{ id: Number(id) }]), ids: `[${id}]` }, cookie)
   const s = (j.songs || []).find(s => String(s.id) === String(id))
   if (!s) throw new Error('没有查到该歌曲 ID 的实际信息')
-  return { id: s.id, name: s.name, artists: (s.ar || s.artists || []).map(a => a.name).join(' / '), aliases: s.alia || [] }
+  return { id: s.id, name: s.name, artists: (s.ar || s.artists || []).map(a => a.name).join(' / '), aliases: aliasesOf(s) }
 }
 
 /** 查登录状态：Cookie 有没有用。 */
