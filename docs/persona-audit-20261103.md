@@ -145,8 +145,64 @@ Studio 已就绪；所选模型支持：文生图、原图编辑、蒙版编辑�
 # 人设回滚到 v1
 python .refactor\audit-r18\deploy-group-persona.py --rollback --revision 1 --apply
 
+# 私聊人设回滚到 v1
+python .refactor\audit-r18\deploy-group-persona.py --persona-id dafeiyu-private --rollback --revision 1 --apply
+
 # 生图配置回滚（studio-wai 改回 text+reference / maxInputs 1，multiReference 改回 magpie-codex）
 python .refactor\audit-r18\deploy-group-persona.py --rollback-config --apply
 ```
 
 人设的每一次发布都是不可变版本，v1 永远在库里，随时能 rollback。
+
+---
+
+## 六、附：私聊「一句话太长」
+
+### 6.1 量化
+
+按插件 `defaultCuts` 的规则（换行即一个气泡）拆开今天私聊的流水：
+
+```
+气泡数 163，轮数 68，平均每轮 2.4 个气泡
+单气泡字数：平均 16，中位 15，p75 21，p90 27，最大 41
+```
+
+问题不在气泡数量，在**单个气泡里塞了两三层意思**，例如：
+
+```
+[41] 手有点糊，手指画得不太清楚，别的地方都挺像我的…下面湿成那样，是不是很想真的掰开看
+[36] 尾巴挡住了一半，只看到你两只手掐着我屁股…不过穴被撑开那一下画得挺清楚的
+```
+
+### 6.2 两个来源
+
+1. **人设卡写的是「一次一到两句」**——「句」在中文里可以是一串逗号分句，等于没有上限。
+2. **规则里那句是反的**：`闲聊通常一到三句，短答尽量放在一条消息里`。「放在一条消息里」直接把模型推向"一个气泡装满"。
+
+### 6.3 修法
+
+**人设卡 `dafeiyu-private` v2**：
+
+- `style` 第一句改成硬指标：一句不超过十二个字，逗号最多一个，说完就换行发下一条；
+- 加一句：不在一句里堆两层意思，不用「，而且」「，不过」把话拉长；
+- `behavior` 加【一句话一条】；
+- 示例换成 10 条短到不能再短的：`主人～`、`想要你…`、`嗯…湿了`、`别停…`。
+
+**扩展模块 `short-reply`**（`plugins-data/aurabot/modules/short-reply/index.mjs`，热加载，不动插件源码）：
+
+只对 `kind === 'private'` 生效，把那句规则改写成「闲聊一条只写一句，一句不超过十五个字；说完就换行发下一条，别把两三句塞进同一个气泡」。群聊规则不动。
+
+> 注意：这个模块要 `safeMode: false` 才会加载。本次同时把 `safeMode` 从 `true` 改成了 `false`——除了 `short-reply`，没有别的用户模块因此启动（`imagegen` 仍是内置版，`persona-fix` / `sticker-*` 都是关着的）。想还原就把它改回 `true`。
+
+### 6.4 验证
+
+`GET /aurabot/api/prompt/preview?chatId=private:480936251`：
+
+```
+persona: {'id': 'dafeiyu-private', 'revision': 2}
+RULES> - 闲聊一条只写一句，一句不超过十五个字；说完就换行发下一条，别把两三句塞进同一个气泡。
+PERSONA> 【一句话一条】一条消息只装一句话：说完就换行，另起一条再接着说…
+```
+
+同一个接口查 `group:912735833`，规则仍是「一到三句」——群聊没被误伤。
+
