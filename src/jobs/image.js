@@ -9,7 +9,7 @@ import { canSee } from '../domain/scope.js'
 import { resolveShape } from '../image/shapes.js'
 import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
-import { ensureDefaultReference, imageReferenceBytes } from '../persona/references.js'
+import { ensureDefaultReference, imageReferenceBytes, isDafeiyuPersona } from '../persona/references.js'
 
 /** 画图失败时发到聊天里的原因：服务商的状态码说人话，原文留在任务记录里给面板看。 */
 export function imageFailureText(message) {
@@ -99,7 +99,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       const legacy = input.appearance.referenceAssetIds || []
       const candidates = variants.length ? variants : legacy.map(assetId => ({ assetId, name: '', tags: [] }))
       let selected = requested && candidates.find(v => v.assetId === requested)
-      if (requested && !selected && persona.personaId === 'dafeiyu') {
+      if (requested && !selected && isDafeiyuPersona(persona.personaId)) {
         try { const builtin = defaultReference(); if (builtin.id === requested) selected = { assetId: builtin.id, name: '内置大肥鱼形象', tags: [], builtin: true } } catch {}
       }
       if (requested && !selected) throw new ProviderError('invalid', '指定的人设外观款式不属于当前角色或当前版本，请重新选择', { maybeCharged: false })
@@ -132,7 +132,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
             if (!personaReferences) throw new Error('人设参考图库不可用')
             personaReferences.asset(persona.personaId, assetId)
           } catch { throw new ProviderError('invalid', '所选人设外观参考图缺失、损坏或未授权，请到人格面板重新选择', { maybeCharged: false }) }
-        } else if (persona.personaId === 'dafeiyu' && input.appearance.useDefaultReference !== false) {
+        } else if (isDafeiyuPersona(persona.personaId) && input.appearance.useDefaultReference !== false) {
           try { assetId = defaultReference().id; builtin = true }
           catch { throw new ProviderError('invalid', '大肥鱼默认外观参考图缺失或损坏，请到人格面板上传图片', { maybeCharged: false }) }
         } else throw new ProviderError('invalid', '当前人设没有可用的默认外观参考图，请到人格面板选择一套或明确提供人物长相参考图', { maybeCharged: false })

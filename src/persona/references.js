@@ -10,6 +10,8 @@ const DEFAULT_IMAGE = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 
 const MAX_UPLOAD = 5 * 1024 * 1024
 const MAX_PIXELS = 50_000_000
 const fail = (message, code = 'INVALID_REFERENCE') => Object.assign(new Error(message), { code })
+/** 大肥鱼系列（内置卡和私聊/群聊变体）共用同一张内置外观参考图。 */
+export const isDafeiyuPersona = (id) => /^dafeiyu(?:$|-)/.test(String(id || ''))
 const idsOf = layers => [
   ...(Array.isArray(layers?.appearance?.referenceAssetIds) ? layers.appearance.referenceAssetIds : []),
   ...(Array.isArray(layers?.appearance?.referenceVariants) ? layers.appearance.referenceVariants.map(v => v?.assetId).filter(Boolean) : []),
@@ -117,7 +119,7 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
       storage.meta.set('persona.referenceRegistryVersion', 1)
     })
   }
-  const defaultFor = id => id === 'dafeiyu' ? ensureDefaultReference(storage, { file: defaultFile }) : null
+  const defaultFor = id => isDafeiyuPersona(id) ? ensureDefaultReference(storage, { file: defaultFile }) : null
   const view = (id, authorized = true) => {
     if (!authorized) return { id, available: false, mime: null, sourceKind: null, createdAt: null, reason: '请重新上传以授权当前人设使用' }
     try {
@@ -132,7 +134,7 @@ export function createPersonaReferences({ storage, store, defaultFile = DEFAULT_
     const grants = registered(id), hidden = new Set(removed(id))
     const ids = [...new Set([...grants.filter(assetId => !hidden.has(assetId)), ...idsOf(persona.draft?.layers), ...idsOf(persona.published?.layers)])]
     if (defaultAssetId && !ids.includes(defaultAssetId)) ids.unshift(defaultAssetId)
-    return { items: ids.map(assetId => ({ ...view(assetId, grants.includes(assetId) || assetId === defaultAssetId), inLibrary: grants.includes(assetId) && !hidden.has(assetId) })), defaultAssetId, useDefaultReferenceAvailable: id === 'dafeiyu' }
+    return { items: ids.map(assetId => ({ ...view(assetId, grants.includes(assetId) || assetId === defaultAssetId), inLibrary: grants.includes(assetId) && !hidden.has(assetId) })), defaultAssetId, useDefaultReferenceAvailable: isDafeiyuPersona(id) }
   }
   function upload(id, data) {
     const instance = storage.db.tx(() => { requirePersona(id, { editable: true }); return store.instanceVersion(id) })

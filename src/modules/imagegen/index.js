@@ -48,16 +48,14 @@ export default {
       const appearance = persona.layers?.appearance || {}
       const variants = Array.isArray(appearance.referenceVariants) ? appearance.referenceVariants : []
       const candidates = variants.length ? [...variants] : (appearance.referenceAssetIds || []).map(assetId => ({ assetId, name: '', tags: [] }))
-      if (persona.personaId === 'dafeiyu') {
-        try {
-          const builtin = api.core.personas?.references?.defaultFor(persona.personaId)
-          if (builtin) {
-            const index = candidates.findIndex(v => v.assetId === builtin.id)
-            if (index < 0) candidates.unshift({ assetId: builtin.id, name: '内置大肥鱼形象', tags: [], builtin: true })
-            else candidates[index] = { ...candidates[index], builtin: true }
-          }
-        } catch {}
-      }
+      try {
+        const builtin = api.core.personas?.references?.defaultFor?.(persona.personaId)
+        if (builtin) {
+          const index = candidates.findIndex(v => v.assetId === builtin.id)
+          if (index < 0) candidates.unshift({ assetId: builtin.id, name: '内置大肥鱼形象', tags: [], builtin: true })
+          else candidates[index] = { ...candidates[index], builtin: true }
+        }
+      } catch {}
       if (!candidates.length) return ''
       const safe = candidates.slice(0, 9).map(v => ({ id: String(v.assetId || '').slice(0, 500), name: String(v.name || '').slice(0, 80), tags: (Array.isArray(v.tags) ? v.tags : []).slice(0, 8).map(t => String(t).slice(0, 32)), default: appearance.defaultReferenceAssetId === v.assetId || (!appearance.defaultReferenceAssetId && v.builtin === true && appearance.useDefaultReference !== false && (variants.length > 0 || !(appearance.referenceAssetIds || []).length)) || (!appearance.defaultReferenceAssetId && !variants.length && (appearance.referenceAssetIds || []).length === 1 && appearance.referenceAssetIds[0] === v.assetId) }))
       const data = JSON.stringify(safe).replace(/[<>&\u2028\u2029]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)

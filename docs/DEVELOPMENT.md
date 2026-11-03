@@ -109,7 +109,7 @@ npm test
 | 消息处理、权限、群聊策略 | `src/chat/` |
 | 内置功能模块 | `src/modules/` |
 | 扩展模块接口 | `src/modules/API.md` |
-| 默认人格 | `personas/dafeiyu.md` |
+| 默认人格 | `personas/dafeiyu.persona.json`（及 `dafeiyu-private` / `dafeiyu-group` 变体） |
 | 插件与会话预设注册 | `cordis.patch.yml` |
 | 更新检测 | `src/core/update.js` |
 

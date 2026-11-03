@@ -153,3 +153,50 @@ test('内置 JSON 卡保留分层与导出格式，优先于同名内置 Markdow
   const migrated = createPersonaService({ storage: storage(), legacyDir: legacy, bundledDir: bundled })
   assert.equal(migrated.store.get('dafeiyu').published.layers.legacy.body, '用户自己的设定')
 })
+
+test('默认按聊天类型分卡：私聊绑私房版、群聊绑群骚版，已有绑定和自定义全局不被覆盖', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aurabot-scope-defaults-'))
+  const bundled = join(dir, 'bundled'), legacy = join(dir, 'legacy')
+  mkdirSync(bundled); mkdirSync(legacy)
+  for (const id of ['dafeiyu', 'dafeiyu-private', 'dafeiyu-group']) {
+    writeFileSync(join(bundled, `${id}.persona.json`), JSON.stringify({ format: 'aurabot-persona', version: 1, id, name: id, layers: L(id) }))
+  }
+  const svc = createPersonaService({ storage: storage(), legacyDir: legacy, bundledDir: bundled })
+  const bindings = Object.fromEntries(svc.store.bindings().map((b) => [b.scope, b.personaId]))
+  assert.equal(bindings.global, 'dafeiyu', '全局保留基础大肥鱼作兜底')
+  assert.equal(bindings['kind:private'], 'dafeiyu-private')
+  assert.equal(bindings['kind:group'], 'dafeiyu-group')
+  assert.equal(svc.store.resolve('private:1').personaId, 'dafeiyu-private')
+  assert.equal(svc.store.resolve('group:1').personaId, 'dafeiyu-group')
+
+  // 用户已经手动绑过群聊默认：升级不能覆盖。
+  const s2 = storage(), seed = createPersonaStore({ storage: s2 })
+  seed.create({ id: 'custom', name: '自定义', layers: L('自定义'), publish: true })
+  seed.bind('kind:group', 'custom')
+  const svc2 = createPersonaService({ storage: s2, legacyDir: legacy, bundledDir: bundled })
+  const after = Object.fromEntries(svc2.store.bindings().map((b) => [b.scope, b.personaId]))
+  assert.equal(after['kind:group'], 'custom')
+  assert.equal(after['kind:private'], 'dafeiyu-private')
+
+  // 用户自己换过全局默认（例如旧人格）：整套分卡默认都不落，尊重原设置。
+  const s3 = storage(), seed3 = createPersonaStore({ storage: s3 })
+  seed3.create({ id: 'old', name: '旧人格', layers: L('旧人格'), publish: true })
+  seed3.bind('global', 'old')
+  const svc3 = createPersonaService({ storage: s3, legacyDir: legacy, bundledDir: bundled })
+  const kept = Object.fromEntries(svc3.store.bindings().map((b) => [b.scope, b.personaId]))
+  assert.equal(kept.global, 'old')
+  assert.equal(kept['kind:private'], undefined)
+  assert.equal(kept['kind:group'], undefined)
+
+  // 用户改过内置大肥鱼（发布了新版本）：也不拿变体顶掉他的版本。
+  const s4 = storage(), seed4 = createPersonaStore({ storage: s4 })
+  seed4.create({ id: 'dafeiyu', name: '大肥鱼', layers: L('原版'), origin: 'builtin', publish: true })
+  let p4 = seed4.get('dafeiyu')
+  p4 = seed4.saveDraft('dafeiyu', { layers: L('我改过的') }, { editRevision: p4.editRevision })
+  seed4.publish('dafeiyu', { editRevision: p4.editRevision })
+  seed4.bind('global', 'dafeiyu')
+  const svc4 = createPersonaService({ storage: s4, legacyDir: legacy, bundledDir: bundled })
+  const edited = Object.fromEntries(svc4.store.bindings().map((b) => [b.scope, b.personaId]))
+  assert.equal(edited['kind:private'], undefined)
+  assert.equal(edited['kind:group'], undefined)
+})

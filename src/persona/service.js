@@ -9,6 +9,10 @@ import { parsePersona } from './personas.js'
 
 const BUNDLED = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'personas')
 const DEFAULT_ID = 'dafeiyu'
+// 默认按聊天类型分卡：主人私聊用私房版，群聊用群骚版。全局仍保留基础大肥鱼作兜底。
+const DEFAULT_PRIVATE_ID = 'dafeiyu-private'
+const DEFAULT_GROUP_ID = 'dafeiyu-group'
+const SCOPE_DEFAULTS_KEY = 'personas.scopeDefaults'
 
 function readMarkdownDir(dir) {
   const out = []
@@ -77,6 +81,26 @@ export function createPersonaService({ storage, legacyDir, legacyCurrent, log, b
     }
   }
 
+  /**
+   * 第一次启用「按聊天类型分卡」：私聊默认和群聊默认各绑一张内置卡。
+   * 只动还没被用户设置过的范围；用户自己换过全局默认（例如导入了旧人格）或改过内置卡就整体跳过。
+   */
+  function applyScopeDefaults() {
+    if (storage.meta.get(SCOPE_DEFAULTS_KEY)) return
+    const global = store.bindings().find((b) => b.scope === 'global')?.personaId || ''
+    const base = store.get(DEFAULT_ID)
+    const pristineBuiltin = base && base.origin === 'builtin' && base.published?.revision === 1 && !base.draft
+    if (global !== DEFAULT_ID || !pristineBuiltin) {
+      storage.meta.set(SCOPE_DEFAULTS_KEY, { state: 'skipped', reason: `global=${global || '(none)'}` })
+      return
+    }
+    for (const [scope, id] of [['kind:private', DEFAULT_PRIVATE_ID], ['kind:group', DEFAULT_GROUP_ID]]) {
+      if (store.bindings().some((b) => b.scope === scope)) continue
+      if (store.get(id)?.published) store.bind(scope, id)
+    }
+    storage.meta.set(SCOPE_DEFAULTS_KEY, { state: 'done' })
+  }
+
   function init() {
     importLegacy()
     store.seed(readBundledDir(bundledDir, log))
@@ -84,6 +108,7 @@ export function createPersonaService({ storage, legacyDir, legacyCurrent, log, b
       const first = store.get(DEFAULT_ID)?.published ? DEFAULT_ID : store.list({ includeArchived: false }).find((p) => p.published)?.id
       if (first) store.bind('global', first)
     }
+    applyScopeDefaults()
   }
   init()
 
@@ -121,7 +146,14 @@ export function createPersonaService({ storage, legacyDir, legacyCurrent, log, b
       store.remove(id)
       return true
     },
-    use: (id) => store.bind('global', id),
+    /** 旧面板的「设为当前」= 换全局默认；自动分卡产生的私聊/群默认要让位，否则用户看不出切换。 */
+    use: (id) => {
+      for (const scope of ['kind:private', 'kind:group']) {
+        const b = store.bindings().find((x) => x.scope === scope)
+        if (b && (b.personaId === DEFAULT_PRIVATE_ID || b.personaId === DEFAULT_GROUP_ID)) store.bind(scope, null)
+      }
+      return store.bind('global', id)
+    },
   }
 
   return { store, snapshotFor, textOf, globalId, compat, init }
