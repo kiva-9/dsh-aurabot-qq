@@ -11,8 +11,6 @@ import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
 import { ensureDefaultReference, imageReferenceBytes } from '../persona/references.js'
 
-export const SELF_NEGATIVE = 'nsfw, nude, nipples, explicit, sexual'
-
 /** 画图失败时发到聊天里的原因：服务商的状态码说人话，原文留在任务记录里给面板看。 */
 export function imageFailureText(message) {
   const m = String(message || '')
@@ -114,8 +112,6 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         input.mode = 'text'
         input.selfTrigger = lora.selfTrigger
         input.profileId = lora.id
-        // 本地模型没有内容审核：画她自己时固定挡掉裸露和色情（OpenAI 协议不收反向词，服务端自己审核）。
-        if (lora.protocol !== 'openai') input.negativePrompt = [SELF_NEGATIVE, input.negativePrompt].filter(Boolean).join(', ')
       } else if (explicitIdentity) {
         // 继续编辑时继承的旧人设参考不能覆盖用户明确指定的身份或底图。
         input.refs = input.refs.filter(r => !r.personaReference)

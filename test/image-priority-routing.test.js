@@ -94,7 +94,7 @@ test('text service with a character trigger draws the persona from text, without
   s.cfg.imageGen.profiles.push({ ...profile('wai', ['text'], 0), protocol: 'studio', baseUrl: 'http://127.0.0.1:7860', selfTrigger: 'deepseek_whale_girl' })
   s.cfg.imageGen.routing.text = 'wai'
   const local = s.enqueue({ drawSelf: true, prompt: '1girl' })
-  assert.equal(local.profileId, 'wai'); assert.match(local.input.negativePrompt, /nsfw, nude/)
+  assert.equal(local.profileId, 'wai')
   s.cfg.imageGen.routing.text = 'fallback'
   // 带了别的图（比如风格图）仍走原来的人设参考图路线
   const styled = s.enqueue({ drawSelf: true, mode: 'reference', refs: [s.ref('style')] })
