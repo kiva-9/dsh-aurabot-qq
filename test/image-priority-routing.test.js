@@ -78,6 +78,30 @@ test('selfie routing counts the persona reference after insertion', t => {
   assert.equal(multi.profileId, 'magpie')
 })
 
+test('text service with a character trigger draws the persona from text, without reference or appearance text', async t => {
+  const s = setup(t, { localActive: false })
+  s.hub.personaFor = () => ({ personaId: 'dafeiyu', revision: 1, bindingRevision: 1, layers: { appearance: { text: '蓝色长卷发' } } })
+  s.cfg.imageGen.routing.text = 'fallback'
+  s.cfg.imageGen.profiles.find(p => p.id === 'fallback').selfTrigger = 'deepseek_whale_girl'
+  const self = s.enqueue({ drawSelf: true, prompt: '1girl, smile, seaside' })
+  assert.equal(self.input.mode, 'text'); assert.equal(self.profileId, 'fallback')
+  assert.deepEqual(self.input.refs, []); assert.equal(self.input.selfReference, undefined)
+  await s.runner.drain()
+  assert.equal(s.runner.get(self.id).state, 'delivered', s.runner.get(self.id).error)
+  const body = JSON.parse(s.calls.at(-1).options.body)
+  assert.equal(body.prompt, 'deepseek_whale_girl, original style, 1girl, smile, seaside')
+  assert.equal(self.input.negativePrompt, undefined, 'OpenAI 协议不收反向词')
+  s.cfg.imageGen.profiles.push({ ...profile('wai', ['text'], 0), protocol: 'studio', baseUrl: 'http://127.0.0.1:7860', selfTrigger: 'deepseek_whale_girl' })
+  s.cfg.imageGen.routing.text = 'wai'
+  const local = s.enqueue({ drawSelf: true, prompt: '1girl' })
+  assert.equal(local.profileId, 'wai'); assert.match(local.input.negativePrompt, /nsfw, nude/)
+  s.cfg.imageGen.routing.text = 'fallback'
+  // 带了别的图（比如风格图）仍走原来的人设参考图路线
+  const styled = s.enqueue({ drawSelf: true, mode: 'reference', refs: [s.ref('style')] })
+  assert.equal(styled.input.refs.length, 2); assert.equal(styled.profileId, 'magpie')
+  assert.equal(s.enqueue({ prompt: 'cat' }).input.selfTrigger, undefined, '不画自己时不加触发词')
+})
+
 test('explicit service overrides routing and unsupported explicit choices fail', t => {
   const s = setup(t)
   assert.equal(s.enqueue({ mode: 'reference', refs: [s.ref()], profileId: 'magpie' }).profileId, 'magpie')

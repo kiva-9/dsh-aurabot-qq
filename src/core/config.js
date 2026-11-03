@@ -425,6 +425,10 @@ export function normalizeImageProfiles(list) {
         sizes: (Array.isArray(caps.sizes) ? caps.sizes : []).map(String).filter((s) => /^\d{3,4}x\d{3,4}$/.test(s)).slice(0, 12),
       },
       extra: isObj(p.extra) ? p.extra : {},
+      // 画她自己时加进提示词的 LoRA 触发词；填了就不再带人设参考图，直接文生图
+      selfTrigger: String(p.selfTrigger || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 100),
+      // 告诉她用这个服务时提示词怎么写（比如英文标签）
+      promptHint: String(p.promptHint || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 300),
     })
   }
   return out

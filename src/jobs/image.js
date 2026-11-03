@@ -11,6 +11,8 @@ import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
 import { ensureDefaultReference, imageReferenceBytes } from '../persona/references.js'
 
+export const SELF_NEGATIVE = 'nsfw, nude, nipples, explicit, sexual'
+
 /** 画图失败时发到聊天里的原因：服务商的状态码说人话，原文留在任务记录里给面板看。 */
 export function imageFailureText(message) {
   const m = String(message || '')
@@ -105,7 +107,16 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       if (requested && !selected) throw new ProviderError('invalid', '指定的人设外观款式不属于当前角色或当前版本，请重新选择', { maybeCharged: false })
       const explicitIdentity = input.refs.some(r => ['base', 'identity'].includes(r.role) && !r.personaReference)
       if (requested && explicitIdentity) throw new ProviderError('invalid', '不能同时指定人设外观款式和其他人物长相参考或底图，请选择一种', { maybeCharged: false })
-      if (explicitIdentity) {
+      // 文生图服务加载了角色 LoRA：没有别的输入图时直接用触发词文生图，不带人设参考图。
+      const lora = !input.refs.some(r => !r.personaReference) && pickProfile({ mode: 'text', inputs: [], size: input.size, shape: input.shape }, input.profileId).profile
+      if (lora?.selfTrigger) {
+        input.refs = []
+        input.mode = 'text'
+        input.selfTrigger = lora.selfTrigger
+        input.profileId = lora.id
+        // 本地模型没有内容审核：画她自己时固定挡掉裸露和色情（OpenAI 协议不收反向词，服务端自己审核）。
+        if (lora.protocol !== 'openai') input.negativePrompt = [SELF_NEGATIVE, input.negativePrompt].filter(Boolean).join(', ')
+      } else if (explicitIdentity) {
         // 继续编辑时继承的旧人设参考不能覆盖用户明确指定的身份或底图。
         input.refs = input.refs.filter(r => !r.personaReference)
         input.explicitSelfIdentity = true
@@ -373,7 +384,9 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     }
     const selfIndex = (job.input.refs || []).findIndex(r => r.personaReference)
     const identityHint = selfIndex >= 0 ? `保留第 ${selfIndex + 1} 张参考图中的人物身份、面部特征和衣装；动作和场景按本次要求，若本次明确要求换装则以本次要求为准，其他参考图仅用于其指定用途` : ''
-    const prompt = [job.input.explicitSelfIdentity ? '' : job.input.appearance?.text, identityHint, job.input.stylePrompt ?? c.stylePrompt, job.input.prompt].filter(Boolean).join('，')
+    const prompt = job.input.selfTrigger
+      ? [job.input.selfTrigger, job.input.stylePrompt ?? c.stylePrompt, job.input.prompt].filter(Boolean).join(', ')
+      : [job.input.explicitSelfIdentity ? '' : job.input.appearance?.text, identityHint, job.input.stylePrompt ?? c.stylePrompt, job.input.prompt].filter(Boolean).join('，')
     return { mode: job.input.mode, prompt, negativePrompt: job.input.negativePrompt || '', size: job.input.size || c.size, n: 1, inputs, mask, idempotencyKey: `${job.id}:${attempt.n}` }
   }
 
