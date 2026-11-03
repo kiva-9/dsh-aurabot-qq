@@ -33,7 +33,7 @@ const abortError = (message) => Object.assign(new Error(message), { name: 'Abort
  * concurrency 限制同库的活跃租约数（各 worker 也受本地上限约束）；perChat 限制
  * 同一聊天的新生成任务。轮询中的任务占聊天名额，暂停的发送失败不阻塞后续生成。
  */
-export function createJobRunner({ storage, handlers, log, now = () => Date.now(), owner = 'host', leaseMs = 120_000, concurrency = 2, retryBaseMs = 5000, pollMs = 3000 }) {
+export function createJobRunner({ storage, handlers, log, now = () => Date.now(), owner = 'host', leaseMs = 120_000, concurrency = 2, retryBaseMs = 5000, pollMs = 3000, notifyReady = () => true, recoveredNoticeMs = 6 * 3600_000 }) {
   if (!Number.isFinite(leaseMs) || leaseMs < 1) throw new RangeError('leaseMs 必须大于 0')
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new RangeError('concurrency 必须是正整数')
   const db = storage.db
@@ -42,6 +42,8 @@ export function createJobRunner({ storage, handlers, log, now = () => Date.now()
   let timer = null
   let immediate = null
   let stopped = false
+  // 重启恢复时才确定为「结果不确定」的任务：等网关能发了，在聊天里交代一声。
+  const recoveredUnknown = []
 
   const row = (id) => db.get('SELECT * FROM jobs WHERE id = ?', id)
   const job = (id) => view(row(id))
@@ -215,9 +217,36 @@ export function createJobRunner({ storage, handlers, log, now = () => Date.now()
         if (!handlers[r.kind]) continue
         const key = recoverRow(r)
         if (key) out[key]++
+        if (key === 'unknown' && now() - Number(r.created_at) <= recoveredNoticeMs) recoveredUnknown.push(r.id)
       }
     })
     return out
+  }
+
+  // 结果已经定了，不再有租约：只核对状态没变、代次还是当前的。
+  function settledContext(id, state) {
+    const controller = new AbortController()
+    const guard = () => {
+      if (stopped) return false
+      const r = row(id)
+      return Boolean(r && r.state === state && Number(r.epoch) === storage.epochs.current(r.chat_id))
+    }
+    return Object.freeze({
+      signal: controller.signal, workerToken, leaseToken: null, guard, shouldContinue: guard,
+      assertActive: () => { if (!guard()) throw abortError('任务状态或会话已经改变') },
+      commit: () => { throw abortError('任务结果已经确定，不能再修改') },
+    })
+  }
+
+  async function announceRecovered() {
+    for (const id of recoveredUnknown.splice(0)) {
+      const r = row(id), h = r && handlers[r.kind]
+      if (!h?.notify || r.state !== 'unknown') continue
+      const execution = settledContext(id, 'unknown')
+      if (!execution.guard()) continue
+      try { await h.notify(job(id), 'unknown', { kind: 'unknown', message: r.error, recovered: true }, execution) }
+      catch (error) { warn('任务 ' + id + ' 通知失败：', error?.message || error) }
+    }
   }
 
   // 聊天的服务顺序存在已有 sequences 表，跨 worker 共享；没有前 50 行饥饿窗口。
@@ -485,6 +514,11 @@ export function createJobRunner({ storage, handlers, log, now = () => Date.now()
   async function tick() {
     if (stopped) return 0
     const started = []
+    if (recoveredUnknown.length) {
+      let ready = false
+      try { ready = notifyReady() } catch {}
+      if (ready) await announceRecovered()
+    }
     while (!stopped && running.size < concurrency) {
       const x = claim()
       if (!x) break

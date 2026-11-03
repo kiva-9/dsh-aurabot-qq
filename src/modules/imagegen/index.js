@@ -33,7 +33,7 @@ export default {
         scope: { account: job.input.accountId, chat: job.chatId, persona: job.input.persona.personaId }, confirmed: true, sourceId: `image:${job.id}`,
         about: job.chatId.startsWith('private:') ? job.chatId.slice(8) : job.input.persona.personaId, tags: ['画画'], importance: 0.4 }),
     })
-    const runner = createJobRunner({ storage, handlers: { image: svc.handler }, log: api.log })
+    const runner = createJobRunner({ storage, handlers: { image: svc.handler }, log: api.log, notifyReady: () => hub.canSend?.() !== false })
     const rec = runner.recover()
     if (rec.unknown || rec.polling || rec.delivering) api.log.info(`生图任务恢复：接着查 ${rec.polling} 个，接着发 ${rec.delivering} 个，${rec.unknown} 个不确定结果`)
     api.every(1500, () => runner.tick(), '生图任务')

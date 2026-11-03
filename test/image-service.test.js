@@ -66,6 +66,44 @@ test('开启看图时送达后交给她自己开口，不发固定文案；登�
   assert.match(notes.at(-1), /也已经说过/)
 })
 
+test('同一请求连画几张：失败等最后一张有结果后合并说一次；单张照旧', async t => {
+  const s = setup(t), texts = [], batches = new Set()
+  s.hub.sendText = async (_chatId, text, _replyId, options) => {
+    if (batches.has(options.batchId)) throw new Error('重复批次')
+    batches.add(options.batchId); texts.push(text)
+  }
+  s.storage.requests.get = id => ['req-many', 'req-mixed', 'req-one'].includes(id) ? { policyRevision: 0 } : null
+  const failing = new Set()
+  s.service.handler.submit = async job => { if (failing.has(job.id)) throw Object.assign(new Error('生图失败：output_moderation'), { kind: 'invalid', billing: 'none' }); return { status: 'done', billing: 'charged', outputs: [{ buf: image, mime: 'image/jpeg' }] } }
+  const batch = (req, n, bad) => {
+    const jobs = Array.from({ length: n }, () => s.enqueue())
+    for (const [i, j] of jobs.entries()) { s.storage.db.run('UPDATE jobs SET request_id=? WHERE id=?', req, j.id); if (bad(i)) failing.add(j.id) }
+  }
+  batch('req-many', 3, () => true); await s.runner.drain()
+  batch('req-mixed', 3, i => i > 0); await s.runner.drain()
+  batch('req-one', 1, () => true); await s.runner.drain()
+  assert.deepEqual(texts.filter(x => x !== '画好啦'), [
+    '（3 张都没画成：被服务的内容审核拦下了）',
+    '（3 张里有 2 张没画成：被服务的内容审核拦下了）',
+    '（画图没成功：这张被服务的内容审核拦下了）',
+  ])
+})
+
+test('重启后结果不确定：说明是重启造成的，并告诉她别说还在画', async t => {
+  const s = setup(t), texts = [], notes = []
+  s.hub.sendText = async (_chatId, text) => { texts.push(text) }
+  s.hub.noteToSession = (_chatId, text) => { notes.push(text) }
+  const job = s.enqueue()
+  s.storage.db.run("UPDATE jobs SET request_id='req-x', state='submitting', lease_owner='old', lease_until=1 WHERE id=?", job.id)
+  s.storage.requests.get = id => id === 'req-x' ? { policyRevision: 0 } : null
+  const next = createJobRunner({ storage: s.storage, handlers: { image: s.service.handler }, owner: 'new', notifyReady: () => true })
+  t.after(() => next.stop())
+  assert.equal(next.recover().unknown, 1)
+  await next.tick()
+  assert.equal(texts.length, 1); assert.match(texts[0], /重启/)
+  assert.match(notes.at(-1), /不要说还在画/)
+})
+
 test('聊天发起的图送达后跟一句画好啦；面板任务和试运行不说', async t => {
   const s = setup(t), texts = []
   s.hub.sendText = async (chatId, text, _replyId, options) => { texts.push({ chatId, text, options }) }

@@ -88,6 +88,7 @@ for (const kind of ['image', 'song', 'bili']) {
     const queried = await f.call('qq_tasks', { kind })
     assert.deepEqual(queried.tasks.map((x) => x.id), [own.id])
     assert.ok(!JSON.stringify(queried).includes('must-not-leak'))
+    assert.equal(queried.tasks[0].summary, kind === 'image' ? 'fixture' : '', '画了/唱了什么随任务带回，会话轮换后也能接着改')
     assert.equal((await f.call('qq_tasks', { task_id: other.id })).code, 'NOT_FOUND')
     assert.equal((await f.call('qq_cancel_task', { task_id: other.id })).code, 'NOT_FOUND')
     assert.equal((await f.call('qq_cancel_task', { task_id: own.id })).ok, true)

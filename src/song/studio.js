@@ -1046,12 +1046,14 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
         noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》失败了：${reason}。已经在聊天里说明，不要声称还在唱。`)
       }
       if (event === 'unknown') {
-        await announce(job, 'unknown', `（翻唱《${songLabel(job)}》没有回应，不确定做没做好，先不重做，主人可以在面板「翻唱」里看看）`, execution)
-        noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》结果不确定，已经在聊天里说明。`)
+        await announce(job, 'unknown', info?.recovered
+          ? `（刚才重启了一下，《${songLabel(job)}》不确定做没做好，先不重做，想听的话再点一次）`
+          : `（翻唱《${songLabel(job)}》没有回应，不确定做没做好，先不重做，主人可以在面板「翻唱」里看看）`, execution)
+        noteJob(job, `【系统】翻唱任务 ${job.id}《${songLabel(job)}》结果不确定，已经在聊天里说明，不要说还在唱。`)
       }
     },
   }
-  const runner = storage?.db ? createJobRunner({ storage, handlers: { song: handler }, log, concurrency: 1, now }) : null
+  const runner = storage?.db ? createJobRunner({ storage, handlers: { song: handler }, log, concurrency: 1, now, notifyReady: () => hub?.canSend?.() !== false }) : null
   function songJobs({ states, limit = 1000 } = {}) {
     if (!runner) return []
     const where = states?.length ? ' AND state IN (' + states.map(() => '?').join(',') + ')' : ''

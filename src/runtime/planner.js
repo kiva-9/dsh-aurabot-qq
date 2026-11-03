@@ -201,7 +201,14 @@ export function createPlanner({
       const { r } = turn(ctx)
       if (r.pendingDecision) return { ok: false, code: 'DECISION_IN_FLIGHT', message: '当前唤醒已有模型决策在进行' }
       const result = admit(ctx, { action: 'decision' })
-      if (!result.ok) return result
+      if (!result.ok) {
+        // 预算用完后再给一步只能说话的机会：工具都会被拒，但不能把人晾着、一声不吭就结束。
+        const current = turn(ctx)
+        if (result.code !== 'BUDGET_EXHAUSTED' || current.r.finalReply) return result
+        const decisionId = newId('dec')
+        put(current.key, { ...current.r, pendingDecision: decisionId, finalReply: decisionId, updatedAt: now() })
+        return { ok: true, wakeId: current.r.id, decisionId, final: true }
+      }
       const current = turn(ctx)
       const decisionId = newId('dec')
       put(current.key, { ...current.r, pendingDecision: decisionId })
@@ -213,7 +220,8 @@ export function createPlanner({
     return db.tx(() => {
       const ctx = authorize(raw)
       const { key, r } = turn(ctx)
-      if (r.state !== 'active' || r.pendingDecision !== decisionId) return { ok: false, code: 'STALE_DECISION', message: '这轮决策已经结束或被控制工具接管' }
+      const final = r.state === 'exhausted' && r.finalReply === decisionId
+      if ((r.state !== 'active' && !final) || r.pendingDecision !== decisionId) return { ok: false, code: 'STALE_DECISION', message: '这轮决策已经结束或被控制工具接管' }
       r.actions.push({ action, requestId: ctx.requestId, decisionId, at: now() })
       put(key, { ...r, pendingDecision: null, updatedAt: now() })
       return { ok: true, wakeId: r.id }
@@ -304,8 +312,15 @@ export function createPlanner({
     })
   }
 
+  // 带上画了什么/唱了什么：会话轮换后，模型靠这个接着重画、重唱，不用再问一遍。
+  const jobSummary = (r) => {
+    let input = {}
+    try { input = JSON.parse(r.input_json || '{}') || {} } catch {}
+    const text = r.kind === 'song' ? [input.track || input.query, input.artist].filter(Boolean).join(' / ') : r.kind === 'image' ? input.prompt : ''
+    return bounded(String(text || ''), 160)
+  }
   const jobView = (r) => ({
-    id: r.id, type: 'job', kind: r.kind, requestId: r.request_id, actorId: r.actor_id,
+    id: r.id, type: 'job', kind: r.kind, summary: jobSummary(r), requestId: r.request_id, actorId: r.actor_id,
     state: r.state, stateLabel: STATE_LABEL[r.state] || r.state, attempts: Number(r.attempts),
     error: bounded(r.error), createdAt: r.created_at, updatedAt: r.updated_at, finishedAt: r.finished_at,
   })
@@ -352,7 +367,8 @@ export function createPlanner({
     panelCancel: ({ chatId, id }) => db.tx(() => cancelWithContext(panelContext(chatId), id)),
     state: (raw) => db.tx(() => { const ctx = authorize(raw); return get(turnKey(ctx)) }),
     getWait: (raw, id) => { const ctx = authorize(raw); const r = queue.get(id); if (!waitVisible(ctx, r)) fail('NOT_FOUND', '没有可查看的等待'); return r },
-    shouldContinue: (raw) => { try { return get(turnKey(authorize(raw)))?.state === 'active' } catch { return false } },
+    // 预算用完只是不能再调工具，已经写好的回复照常发；主动停止或转入等待才不发。
+    shouldContinue: (raw) => { try { return ['active', 'exhausted'].includes(get(turnKey(authorize(raw)))?.state) } catch { return false } },
     tick: queue.tick, recover: queue.recover, signal, setOnWake: queue.setOnWake,
     dispose: () => { queue.dispose(); disposed = true },
   }

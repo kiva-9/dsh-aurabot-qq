@@ -384,7 +384,7 @@ test('一次 tick 有总量及每聊天上限，等待积压不会瞬间刷模�
   assert.equal(await f.p.tick(), 0)
 })
 
-test('模型请求前预留 4 轮，拒绝并发和第 5 次调用；wait 工具不双扣同一轮', async (t) => {
+test('模型请求前预留 4 轮，拒绝并发；用完后只多给一步说话，第 6 次拒绝；wait 工具不双扣同一轮', async (t) => {
   const f = setup(t)
   for (let i = 0; i < 4; i++) {
     const started = f.p.beginDecision(f.ctx)
@@ -393,7 +393,13 @@ test('模型请求前预留 4 轮，拒绝并发和第 5 次调用；wait 工具
     assert.equal(f.p.finishDecision(f.ctx, 'forged', 'reply').code, 'STALE_DECISION')
     assert.equal(f.p.finishDecision(f.ctx, started.decisionId, 'recall').ok, true)
   }
+  const last = f.p.beginDecision(f.ctx)
+  assert.equal(last.ok, true); assert.equal(last.final, true)
+  assert.equal(f.p.useTool(f.ctx, { name: 'recall' }).code, 'BUDGET_EXHAUSTED', '最后一步不能再调工具')
+  assert.equal(f.p.shouldContinue(f.ctx), true, '预算用完，写好的回复照常发')
+  assert.equal(f.p.finishDecision(f.ctx, last.decisionId, 'reply').ok, true)
   assert.equal(f.p.beginDecision(f.ctx).code, 'BUDGET_EXHAUSTED')
+  assert.equal(f.p.state(f.ctx).rounds, 4)
   const ctx = f.request()
   const reserved = f.p.beginDecision(ctx)
   const wait = f.p.wait(ctx, { condition: 'time', timeoutMs: 10 })

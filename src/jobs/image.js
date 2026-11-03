@@ -324,17 +324,39 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
         hub.noteToSession?.(job.chatId, receipt + (job.requestId && !reviewing ? '也已经说过“画好啦”，不用再说一遍。' : ''), scope)
         if (job.requestId && !reviewing) await hub.sendText(job.chatId, '画好啦', null, { batchId: `image-notice:${job.id}:delivered`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
         onDelivered?.(job)
+        await announceFailures(job, execution)
         return
       }
       if (event === 'failed') {
         const reason = imageFailureText(info.message)
-        await hub.sendText(job.chatId, `（画图没成功：${reason}）`, null, { batchId: `image-notice:${job.id}:failed`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
         hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 失败了：${reason}`, { account: job.input.accountId, epoch: job.epoch })
+        await announceFailures(job, execution)
       }
       if (event === 'unknown') {
-        await hub.sendText(job.chatId, '（画图服务没回应，不确定画没画好。为了不重复扣费先不重画，主人可以在面板「生图」里看看）', null, { batchId: `image-notice:${job.id}:unknown`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
+        const text = info?.recovered
+          ? '（刚才重启了一下，正在画的那张不确定画没画好。为了不重复扣费先不重画，想要的话再说一声）'
+          : '（画图服务没回应，不确定画没画好。为了不重复扣费先不重画，主人可以在面板「生图」里看看）'
+        await hub.sendText(job.chatId, text, null, { batchId: `image-notice:${job.id}:unknown`, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
+        hub.noteToSession?.(job.chatId, `【系统】画图任务 ${job.id} 结果不确定，不会再发出来，已经在聊天里说明。不要说还在画；对方要的话重新画。`, { account: job.input.accountId, epoch: job.epoch })
       }
     },
+  }
+
+  // 同一个请求连画几张时，失败只在最后一张有结果后说一次，不连刷几条一样的提示。
+  const STILL_WORKING = ['queued', 'preparing', 'waiting_input', 'submitting', 'running', 'retry_wait', 'generated']
+  async function announceFailures(job, execution) {
+    const siblings = job.requestId
+      ? storage.db.all("SELECT id, state, error FROM jobs WHERE kind = 'image' AND chat_id = ? AND request_id = ? AND epoch = ?", job.chatId, job.requestId, job.epoch)
+      : [{ id: job.id, state: storage.db.get('SELECT state FROM jobs WHERE id = ?', job.id)?.state, error: job.error }]
+    if (siblings.some(s => STILL_WORKING.includes(s.state))) return
+    const failed = siblings.filter(s => s.state === 'failed')
+    if (!failed.length) return
+    const batchId = job.requestId ? `image-notice:${job.requestId}:failed` : `image-notice:${job.id}:failed`
+    if (storage.db.get('SELECT 1 FROM outbox WHERE batch_id = ? LIMIT 1', batchId)) return
+    const reasons = [...new Set(failed.map(s => imageFailureText(s.error)))]
+    const text = siblings.length === 1 ? `（画图没成功：${reasons[0]}）`
+      : `（${failed.length === siblings.length ? `${failed.length} 张都没画成` : `${siblings.length} 张里有 ${failed.length} 张没画成`}：${reasons.map(r => r.replace(/^这张/, '')).join('；')}）`
+    await hub.sendText(job.chatId, text, null, { batchId, epoch: job.epoch, requestId: job.requestId, shouldSend: () => guard(job, execution) }).catch(() => {})
   }
 
   function buildRequest(job, attempt) {

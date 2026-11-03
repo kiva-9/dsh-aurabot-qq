@@ -193,6 +193,24 @@ test('重启恢复：提交到一半、没有服务任务 ID 的标成不确定�
   assert.equal(calls.submit, 0, '恢复时没有重新提交')
 })
 
+test('重启恢复成「不确定」的任务：网关能发了才在聊天里说一次；太旧或换了代次的不说', async () => {
+  const s = storage()
+  const { h, calls } = handler()
+  const r = mk(s, h)
+  const fresh1 = enq(r), stale = enq(r, { chatId: 'group:2' }), moved = enq(r, { chatId: 'group:3' })
+  for (const j of [fresh1, stale, moved]) s.db.run("UPDATE jobs SET state = 'submitting', lease_owner = 'old', lease_until = 1 WHERE id = ?", j.id)
+  s.db.run('UPDATE jobs SET created_at = ? WHERE id = ?', Date.now() - 7 * 3600_000, stale.id)
+  let ready = false
+  const next = mk(s, h, { owner: 'new', notifyReady: () => ready })
+  assert.equal(next.recover().unknown, 3)
+  s.epochs.bump('group:3', '重新开始')
+  await next.tick()
+  assert.equal(calls.notify.length, 0, '网关没连上先不发')
+  ready = true
+  await next.tick(); await next.tick()
+  assert.deepEqual(calls.notify, [['unknown', { kind: 'unknown', message: next.get(fresh1.id).error, recovered: true }]])
+})
+
 test('公平：同一个聊天同时只跑一个，别的聊天不用等', async () => {
   const s = storage()
   const { h } = handler({ submits: [{ status: 'running', providerTaskId: 'a' }, { status: 'running', providerTaskId: 'b' }], polls: [{ status: 'running' }, { status: 'running' }, { status: 'running' }] })

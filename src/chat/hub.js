@@ -2284,6 +2284,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     sessions: () => map().chats,
     groupName,
     stats: () => ({ ...stats }),
+    /** 网关连上且机器人号已核对：后台任务的补发通知等这个再发。 */
+    canSend: () => !disposed && canSend(),
     get lastChatAt() { return lastChatAt },
     get lastOwnerChatAt() { return lastOwnerChatAt },
     get lastBotToOwner() { return lastBotToOwner },
