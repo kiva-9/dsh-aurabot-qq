@@ -531,7 +531,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { id: 'diagnostics', label: '诊断' },
       { id: 'logs', label: '日志' },
     ]
-    // 内置标签页属于哪个模块：模块都没在跑就不显示这一页
+    // 内置标签页属于哪个模块：模块没在跑时保留入口，页面显示 ModOff
     const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], search: ['search'], speakup: ['speakup'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['media-memory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], 'token-meter': ['token-meter'] }
     function ModOff({ name, go }) {
       return h(Card, { title: name }, h('div', { className: 'ab-muted ab-small', style: { marginBottom: 10 } }, '「' + name + '」模块关着，这部分用不了。要用的话去「扩展」页把它打开。'), go ? h(Btn, { small: true, kind: 'primary', onClick: () => go('modules') }, '去扩展打开') : null)
