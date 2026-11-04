@@ -30,6 +30,19 @@ window.__ModuleLoader__.load({
       return next
     }
     const getPath = (obj, path) => path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
+    // 三方合并：把 base→mine 之间改过的字段写到 latest 上（对象逐键递归，数组 / 标量整体替换）。
+    const isPlain = (v) => v !== null && typeof v === 'object' && !Array.isArray(v)
+    const applyConfigChanges = (latest, base, mine) => {
+      if (!isPlain(latest) || !isPlain(mine)) return clone(mine)
+      const b = isPlain(base) ? base : {}
+      for (const k of new Set([...Object.keys(b), ...Object.keys(mine)])) {
+        if (k === 'configRevision') continue
+        if (!(k in mine)) { if (k in b) delete latest[k]; continue }
+        if (JSON.stringify(mine[k]) === JSON.stringify(b[k])) continue
+        latest[k] = isPlain(mine[k]) && isPlain(latest[k]) ? applyConfigChanges(latest[k], b[k], mine[k]) : clone(mine[k])
+      }
+      return latest
+    }
     const pct = (v) => Math.round((Number(v) || 0) * 100)
     const cx = (...a) => a.filter(Boolean).join(' ')
     const timeAgo = (t) => {
@@ -3873,6 +3886,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const saveRef = useRef(null)
       const stateSeqRef = useRef(0)
       const savingRef = useRef(false)
+      // 乐观锁的基准：当前草稿是从哪个 configRevision 的配置复制出来的。
+      // 轮询会把 st 刷到最新，但草稿有未保存改动时基准不能跟着刷，否则别处的改动会被静默覆盖。
+      const baseRef = useRef({ revision: undefined, config: null })
+      const rebase = (config, revision) => { baseRef.current = { revision, config: clone(config) } }
       // kind：ok / err / 不填 = 普通
       const toast = (m, kind) => {
         const text = String(m || '')
@@ -3890,7 +3907,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (!r || r.ok === false) { setErr(r && r.message ? r.message : '读不到插件状态'); return }
         setErr('')
         setSt(r)
-        if (!dirtyRef.current) setDraft(clone(r.config))
+        if (!dirtyRef.current) { setDraft(clone(r.config)); rebase(r.config, r.configRevision ?? r.config?.configRevision) }
       }, [])
       useEffect(() => { reload(); const t = setInterval(reload, 5000); return () => clearInterval(t) }, [reload])
       // localStorage 里的 tab 可能是旧版本/已删除的用户模块页面：回退到概览。
@@ -3923,7 +3940,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           if (['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers'].includes(key) && value != null && (typeof value !== 'object' || Array.isArray(value))) { toast(`「${p.name}」的 ${key} 不是合法 JSON 对象，请修正后再保存`, 'err'); return { ok: false } }
         }
         const bodyJson = JSON.stringify(body)
-        const expectedRevision = st?.configRevision ?? st?.config?.configRevision
+        const expectedRevision = baseRef.current.revision ?? st?.configRevision ?? st?.config?.configRevision
         savingRef.current = true
         stateSeqRef.current++
         let r
@@ -3934,12 +3951,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         }
         if (r?.ok === false) {
           if (r.code === 'CONFIG_CONFLICT') {
-            toast('配置已在别处修改，正在刷新最新设置', 'err')
-            reload()
+            // 别处（另一个面板 / 模块）也改了设置：把自己这次的改动叠到最新配置上，交给用户检查后再存，
+            // 两边的改动都不丢；同一个字段两边都改了时以自己的为准。
+            const latest = await get('/state')
+            if (latest && latest.ok !== false && latest.config) {
+              const base = baseRef.current.config || st?.config || {}
+              const merged = applyConfigChanges(clone(latest.config), base, body)
+              setSt(latest)
+              rebase(latest.config, latest.configRevision ?? latest.config?.configRevision)
+              setDraft(merged)
+              toast('别处也改了设置：已把你的改动合并到最新配置，请检查后再点一次保存', 'err')
+            } else toast('配置已在别处修改，刷新失败，请重新打开面板', 'err')
           } else toast(r.message || '保存失败', 'err')
           return r
         }
         dirtyRef.current = false
+        rebase(r.config, r.configRevision ?? r.config?.configRevision)
         setSt(r)
         // 保存请求进行期间用户继续输入的内容不能被旧响应覆盖。
         setDraft(current => JSON.stringify(current) === bodyJson ? clone(r.config) : current)

@@ -250,15 +250,25 @@ test('P1 onMessage 入库后 media.register 异常写入站死信，不会只被
 
 // ---------- P1 groupInterjects / cancelPending ----------
 
-test('P1 确认发出的群消息写入 groupInterjects；换人设时清理', async (t) => {
-  const f = await hubFixture(t, { config: { merge: { enabled: false } } })
-  await f.hub.onMessage({
+test('P1 只有确认送达的「插一句」才写入 groupInterjects；被 @ 的必回不占插话额度；重开时清理', async (t) => {
+  let forceInterject = false
+  const f = await hubFixture(t, { config: { merge: { enabled: false }, participation: { enabled: false } }, hooks: {
+    groupDecide: async () => (forceInterject ? { reply: true, mode: 'interject', reason: '测试：插一句' } : null),
+  } })
+  const groupSends = () => f.calls.filter((c) => c.action === 'send_group_msg').length
+  const groupMsg = (id, message) => f.hub.onMessage({
     post_type: 'message', message_type: 'group', sub_type: 'normal', self_id: Number(BOT), group_id: Number(GROUP), user_id: 30000003,
-    message_id: 99003, time: Math.floor(Date.now() / 1000), sender: { nickname: '群友' },
-    message: [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: '在吗' } }],
+    message_id: id, time: Math.floor(Date.now() / 1000), sender: { nickname: '群友' }, message,
   })
-  await until(() => f.calls.some((c) => c.action === 'send_group_msg'))
-  assert.equal(f.hub.groupInterjectTimes(GROUP).length, 1)
+  await groupMsg(99003, [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: '在吗' } }])
+  await until(() => groupSends() >= 1)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(f.hub.groupInterjectTimes(GROUP).length, 0, '被 @ 的必回不算插话')
+
+  forceInterject = true
+  await groupMsg(99004, [{ type: 'text', data: { text: '今天吃什么好呢' } }])
+  await until(() => groupSends() >= 2)
+  await until(() => f.hub.groupInterjectTimes(GROUP).length === 1)
   assert.ok(f.hub.resetChat(`group:${GROUP}`))
   assert.equal(f.hub.groupInterjectTimes(GROUP).length, 0, '重开会话清掉旧群插话记录')
 })
@@ -353,4 +363,87 @@ test('调度器 busyChats 报告忙了多久，令牌不对不能放开', () => 
   sch.turnEnded(pm.chatId, token)
   assert.equal(sch.isBusy(pm.chatId), false)
   sch.dispose()
+})
+
+// ---------- 会话轮换 / 换身份与本轮请求的代次 ----------
+
+let rotateMid = 91000
+const privateEvent = (userId, text) => ({
+  post_type: 'message', message_type: 'private', sub_type: 'friend', self_id: Number(BOT), user_id: Number(userId),
+  message_id: ++rotateMid, time: Math.floor(Date.now() / 1000), sender: { nickname: 'n' }, message: [{ type: 'text', data: { text } }],
+})
+const latestRequest = (f, chatId) => f.storage.db.get('SELECT id, epoch FROM requests WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', chatId)
+async function settle() { for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 10)) }
+
+test('历史预算轮换只换会话：代次不变，本轮请求、在跑的生图任务都不作废', async (t) => {
+  const { readFileSync, writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const other = '30000003'
+  const f = await hubFixture(t, { config: { merge: { enabled: false } } })
+  const chatId = `private:${other}`
+  const sends = () => f.calls.filter((c) => c.action === 'send_private_msg')
+  await f.hub.onMessage(privateEvent(other, '第一句'))
+  await until(() => sends().length >= 1)
+  await settle()
+  const sid1 = f.hub.sessions()[chatId].sessionId
+  const epoch1 = f.storage.epochs.current(chatId)
+  const pendingJob = f.hub.outbox.enqueue({ batchId: 'image:job-in-flight', chatId, epoch: epoch1, requiresGuard: true, account: BOT, items: [textItem('画好的图')] })
+
+  const file = join(process.env.AURABOT_DATA_DIR, 'sessions.json')
+  const m = JSON.parse(readFileSync(file, 'utf8')); m.chats[chatId].turns = 999; writeFileSync(file, JSON.stringify(m))
+  await f.hub.onMessage(privateEvent(other, '第二句'))
+  await until(() => sends().length >= 2)
+
+  assert.notEqual(f.hub.sessions()[chatId].sessionId, sid1, '确实轮换了会话')
+  assert.equal(f.storage.epochs.current(chatId), epoch1, '轮换不是换身份，代次不变')
+  assert.equal(Number(latestRequest(f, chatId).epoch), epoch1, '本轮请求属于当前代次')
+  assert.equal(f.hub.outbox.summary(pendingJob).pending, 1, '在跑任务的待发结果不被轮换取消')
+})
+
+test('换档位：代次在本轮请求落库之前 +1，请求属于新代次', async (t) => {
+  const f = await hubFixture(t, { config: { ownerLevel: 'full', merge: { enabled: false } } })
+  const chatId = `private:${OWNER}`
+  const sends = () => f.calls.filter((c) => c.action === 'send_private_msg')
+  await f.hub.onMessage(privateEvent(OWNER, '第一句'))
+  await until(() => sends().length >= 1)
+  await settle()
+  const epoch1 = f.storage.epochs.current(chatId)
+
+  f.cfg.ownerLevel = 'social'
+  await f.hub.onMessage(privateEvent(OWNER, '第二句'))
+  await until(() => sends().length >= 2)
+  const epoch2 = f.storage.epochs.current(chatId)
+  assert.equal(epoch2, epoch1 + 1, '换档位是换身份，代次 +1')
+  assert.equal(Number(latestRequest(f, chatId).epoch), epoch2, '本轮请求带新代次，工具不会判过期')
+})
+
+// ---------- 画图回合只发一条 ----------
+
+test('这一轮登记了画图且会回看：短正文不发，留给看图那一轮；任务已失败或正文很长时照常发', async (t) => {
+  let jobState = 'queued', reply = '在画了 等一下嘛'
+  let f
+  const brain = () => {
+    const chatId = `private:${OWNER}`
+    const req = f.storage.db.get('SELECT id, epoch FROM requests WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1', chatId)
+    const now = Date.now()
+    f.storage.db.run(`INSERT INTO jobs(id, kind, chat_id, request_id, actor_id, epoch, state, input_json, trace_id, created_at, updated_at)
+      VALUES (?, 'image', ?, ?, ?, ?, ?, '{}', 'trace', ?, ?)`, 'job-' + now + Math.random(), chatId, req.id, OWNER, req.epoch, jobState, now, now)
+    return reply
+  }
+  f = await hubFixture(t, { brain, config: { merge: { enabled: false }, imageGen: { observeGenerated: true } }, personaOf: () => ({ personaId: 'p1' }) })
+  const sends = () => f.calls.filter((c) => c.action === 'send_private_msg')
+  const latestState = () => f.storage.db.get('SELECT state FROM requests ORDER BY created_at DESC, rowid DESC LIMIT 1')?.state
+
+  await f.hub.onMessage(privateEvent(OWNER, '画一张'))
+  await until(() => latestState() === 'answered')
+  await settle()
+  assert.equal(sends().length, 0, '登记了画图：本轮短正文不发，等看图那一轮')
+
+  jobState = 'failed'
+  await f.hub.onMessage(privateEvent(OWNER, '再画一张'))
+  await until(() => sends().length === 1)
+
+  jobState = 'queued'; reply = '画之前先回答你：' + '这个问题的答案很长'.repeat(15)
+  await f.hub.onMessage(privateEvent(OWNER, '画一张，顺便回答个问题'))
+  await until(() => sends().length === 2)
 })

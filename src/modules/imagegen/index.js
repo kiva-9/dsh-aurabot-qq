@@ -255,7 +255,7 @@ export default {
       const cfg = api.config(), owner = String(cfg.ownerQQ || '')
       const allowed = checkAllowed(cfg, m[1] === 'private' ? { kind: 'private', userId: m[2] } : { kind: 'group', groupId: m[2], userId: owner })
       if (!allowed.allowed) return null
-      if (cfg.imageGen?.ownerOnly && !isOwner(cfg, owner)) return null
+      // 面板身份固定是主人，imageGen.ownerOnly 对面板总是放行，不再单独判断。
       return { chat, kind: m[1], id: m[2], account: String(cfg.botQQ), actorId: owner }
     }
     const panelJobReadable = (job) => Boolean(job && job.kind === 'image' && panelChat(job.chatId) && String(job.input?.accountId || '') === String(api.config().botQQ))
