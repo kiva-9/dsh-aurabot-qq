@@ -52,7 +52,8 @@ export default {
     // Failure policy of the prompt hook is abort: a recall problem must not drop the user's message.
     api.on?.('prompt',(content,info) => {
       try {
-        if (!info?.queryText || info.chat?.kind === 'system') return content
+        // 画完图回看的那一轮：查询词是生图提示词，召回的只会是「画了一张图：…」这类记录，带进去只会干扰她说话
+        if (!info?.queryText || info.chat?.kind === 'system' || info.artwork) return content
         const scope = resolveScope({chat:info.chat,sessionId:info.sessionId,persona:info.persona,account:getAccount()})
         if (!memory.canProcess(scope)) return content
         const hint = memory.recallHint({...info.chat,scope},info.queryText,info.prevText,{scope,about:info.speakers?.length ? info.speakers : info.chat.userId || info.senderId})

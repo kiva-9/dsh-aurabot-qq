@@ -169,6 +169,7 @@ export default {
     }
     async function prepareContext(input) {
       if (!config().enabled || input.chat?.kind === 'system') return { ready: false, disabled: true }
+      if (input.artwork) return { ready: false, skipped: 'artwork' }
       if (!active) return { ready: false, initializing: true }
       const scope = hostScope(input), state = await required(), epoch = input.epoch ?? storage.epochs.current(scope.chat)
       state.outbox.registerScope(scope)
@@ -192,8 +193,9 @@ export default {
     // This runs before the chat counts as running, so turnPersona() is still
     // empty here: take the frozen persona from the event. Facts the memory
     // module already put in this prompt are not repeated.
-    api.on('prompt/prepared', (content, { chat, sessionId, text, persona }) => {
-      if (typeof text !== 'string') return content
+    api.on('prompt/prepared', (content, { chat, sessionId, text, persona, artwork }) => {
+      // 画完图回看的那一轮不带记忆（查询词是生图提示词，检索出来的都是无关的画图记录）
+      if (typeof text !== 'string' || artwork) return content
       const shown = content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       const hint = contextFor(chat, sessionId, { query: text, personaId: persona?.personaId, shown })
       return hint ? [{ type: 'text', text: hint }, ...content] : content

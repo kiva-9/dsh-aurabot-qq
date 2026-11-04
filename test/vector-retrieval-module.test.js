@@ -696,3 +696,14 @@ test('usage records real probe/encode HTTP attempts with isolated scope/request 
   assert.equal(new Set(f.usage.map(entry => entry.id)).size, f.usage.length)
   assert.ok(!/SECRET-|private-test-key|127\.0\.0\.1|data:image/.test(JSON.stringify(f.usage)))
 })
+
+test('画完图回看的那一轮不检索、不注入可见记忆', async t => {
+  const f = await fixture(t)
+  f.fact('小明喜欢咖啡')
+  const chat = { chatId: S.chat, kind: 'group' }, content = [{ type: 'text', text: '原文' }]
+  const prepared = await f.api.prepareContext({ chat, chatId: S.chat, sessionId: 'art', text: '咖啡', account: 'bot', persona: '', artwork: true })
+  assert.equal(prepared.skipped, 'artwork')
+  await f.modules.prepareContext({ chat, chatId: S.chat, sessionId: 'art', text: '咖啡', account: 'bot', persona: '' })
+  assert.deepEqual(await f.modules.filter('prompt/prepared', content, { chat, sessionId: 'art', text: '咖啡', artwork: true }), content)
+  assert.match((await f.modules.filter('prompt/prepared', content, { chat, sessionId: 'art', text: '咖啡' }))[0].text, /小明喜欢咖啡/, '普通回合照常注入（对照）')
+})
