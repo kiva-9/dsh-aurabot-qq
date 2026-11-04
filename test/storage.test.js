@@ -136,6 +136,11 @@ test('可见范围：默认按聊天隔离；共享组按类别放开；派生�
   assert.equal(canSee(g1fact, v2, policy), true, '共享组里共享事实')
   assert.equal(canSee(g1img, v2, policy), false, '图片没共享')
   assert.equal(canSee(g1fact, { ...v1, account: '8' }, policy), false, '别的机器人号看不到')
+  const accountOnly = { shareGroups: normalizeShareGroups([{ id: 'for8', account: '8', chats: ['group:1', 'group:2'], categories: ['fact'] }]) }
+  assert.equal(accountOnly.shareGroups[0].account, '8', 'account restriction survives normalization')
+  assert.equal(canSee(g1fact, v2, accountOnly), false, 'a group restricted to another bot account never applies')
+  const ownAccount = { shareGroups: normalizeShareGroups([{ id: 'for9', account: '9', chats: ['group:1', 'group:2'], categories: ['fact'] }]) }
+  assert.equal(canSee(g1fact, v2, ownAccount), true)
   assert.equal(canSeeAll([g1fact, pm], v1, policy), false, '群公开证据 + 私聊证据的摘要不能在群里看')
   assert.equal(canSeeAll([], v1, policy), false)
   const moodA = makeScope({ account: '9', chat: 'group:1', category: 'mood', persona: 'a' })

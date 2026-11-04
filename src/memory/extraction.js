@@ -214,13 +214,16 @@ export function createExtractor(repo, { extract, deduplicate, config = () => ({}
   function episodes(scopeInput) {
     const scope = scopeOf(scopeInput)
     // Summaries stay local even if the separate fact sharing policy changes.
-    return db.all('SELECT * FROM memory_episodes WHERE scope_key=? ORDER BY to_seq DESC LIMIT 100',scopeKey(scope)).map(r => ({row:r,body:JSON.parse(r.body)}))
-      .filter(({body}) => body.scopeRevision <= repo.revision(scope) && body.snapshots.every(m => {
-        const current = storage.messages.get(m.id)
-        return current && !current.recalledAt && !repo.tombstone('message',m.id,scope) && hash(repo.messageSnapshot(current)) === hash(m)
-      })).map(({row:r,body}) => receipt({id:r.id,text:body.text,evidenceMessageIds:body.evidenceMessageIds,fromSeq:r.from_seq,toSeq:r.to_seq,createdAt:r.created_at},scope))
+    return db.all('SELECT * FROM memory_episodes WHERE scope_key=? ORDER BY to_seq DESC LIMIT 100',scopeKey(scope))
+      .map(r => { try { return {row:r,body:JSON.parse(r.body)} } catch { return null } }).filter(Boolean)
+      .filter(({body}) => body && typeof body === 'object' && Number.isSafeInteger(body.scopeRevision) && Array.isArray(body.snapshots) &&
+        body.scopeRevision <= repo.revision(scope) && body.snapshots.every(m => {
+          const current = storage.messages.get(m.id)
+          return current && !current.recalledAt && !repo.tombstone('message',m.id,scope) && hash(repo.messageSnapshot(current)) === hash(m)
+        })).map(({row:r,body}) => receipt({id:r.id,text:body.text,evidenceMessageIds:body.evidenceMessageIds,fromSeq:r.from_seq,toSeq:r.to_seq,createdAt:r.created_at},scope))
   }
-  const registeredScopes = () => db.all('SELECT scope FROM memory_checkpoints ORDER BY scope_key').map(r => scopeOf(JSON.parse(r.scope)))
+  const registeredScopes = () => db.all('SELECT scope FROM memory_checkpoints ORDER BY scope_key')
+    .map(r => { try { return scopeOf(JSON.parse(r.scope)) } catch { return null } }).filter(Boolean)
   const settle = () => Promise.allSettled([...inFlight.values()])
   return { enqueue, status, due, consolidate, tick, recentPending, episodes, registeredScopes, resumeExtraction, settle }
 }

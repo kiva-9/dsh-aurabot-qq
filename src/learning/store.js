@@ -14,9 +14,16 @@ export function createLearningStore({ storage, getConfig = () => ({}), now = Dat
     if (!r) fail('NOT_FOUND', '当前范围内没有这个学习条目')
     return r
   }
+  function dataOf(r) {
+    try { const value = JSON.parse(r.data_json); return value && typeof value === 'object' && !Array.isArray(value) ? value : null } catch { return null }
+  }
   function view(r) {
+    const data = dataOf(r)
+    // A single corrupt payload must not break list/panel endpoints. It is
+    // surfaced as a typed error to direct reads and skipped by list callers.
+    if (!data) fail('DATA_CORRUPTED', '学习条目的数据已损坏，已从自动注入中隔离')
     const evidence = evidenceRows(r.id)
-    return { id: r.id, scope: { account: r.account_id, chat: r.chat_id, persona: r.persona_id }, kind: r.kind, ...JSON.parse(r.data_json),
+    return { id: r.id, scope: { account: r.account_id, chat: r.chat_id, persona: r.persona_id }, kind: r.kind, ...data,
       status: r.status, manual: Boolean(r.manual_lock), revision: r.revision, createdAt: r.created_at, updatedAt: r.updated_at,
       expiresAt: r.expires_at, lastUsedAt: r.last_used_at, uses: r.uses, invalidReason: r.invalid_reason,
       evidenceMessageIds: evidence.map((e) => e.message_id), evidenceCount: evidence.length, authorCount: new Set(evidence.map((e) => e.author_id)).size }
@@ -25,7 +32,7 @@ export function createLearningStore({ storage, getConfig = () => ({}), now = Dat
     db.run('INSERT INTO wp6_learning_audit(record_id,scope_key,action,actor_id,revision,at,note) VALUES (?,?,?,?,?,?,?)', r.id, r.scope_key, action, String(actor), r.revision, now(), String(note).slice(0, 200))
     db.run('DELETE FROM wp6_learning_audit WHERE record_id=? AND id NOT IN (SELECT id FROM wp6_learning_audit WHERE record_id=? ORDER BY id DESC LIMIT 50)', r.id, r.id)
     db.run('INSERT OR REPLACE INTO wp6_learning_versions(record_id,revision,snapshot_json) VALUES (?,?,?)', r.id, r.revision,
-      JSON.stringify({ data: JSON.parse(r.data_json), status: r.status, evidence: evidenceRows(r.id).map((e) => ({ id: e.message_id, fingerprint: e.fingerprint })) }))
+      JSON.stringify({ data: dataOf(r) || {}, status: r.status, evidence: evidenceRows(r.id).map((e) => ({ id: e.message_id, fingerprint: e.fingerprint })) }))
     db.run('DELETE FROM wp6_learning_versions WHERE record_id=? AND revision NOT IN (SELECT revision FROM wp6_learning_audit WHERE record_id=?)', r.id, r.id)
   }
   function validate(kind, value, evidence) {
@@ -89,7 +96,10 @@ export function createLearningStore({ storage, getConfig = () => ({}), now = Dat
         }
         return view(row(r.id, scope))
       }
-      if (Number(db.get('SELECT COUNT(*) AS n FROM wp6_learning_records WHERE scope_key=? AND kind=?', scopeKey(scope), kind).n) >= c.maxItemsPerScope) fail('CAPACITY', '当前范围条目（含删除墓碑）达到数量上限，请调整数量上限')
+      // Deleted items keep their row as a tombstone, but a tombstone must not
+      // consume live capacity: otherwise deleting never frees a slot and the
+      // scope silently stops learning after maxItemsPerScope deletions.
+      if (Number(db.get("SELECT COUNT(*) AS n FROM wp6_learning_records WHERE scope_key=? AND kind=? AND status!='deleted'", scopeKey(scope), kind).n) >= c.maxItemsPerScope) fail('CAPACITY', '当前范围有效条目达到数量上限，请调整数量上限')
       const id = randomUUID()
       db.run(`INSERT INTO wp6_learning_records(id,scope_key,account_id,chat_id,persona_id,kind,item_key,data_json,status,manual_lock,created_at,updated_at,expires_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, scopeKey(scope), scope.account, scope.chat, scope.persona, kind, key, JSON.stringify(automatic ? calibrate(kind, data, evidence) : data), 'pending', automatic ? 0 : 1, now(), now(), now() + c.maxAgeDays * 86400000)
@@ -125,7 +135,8 @@ export function createLearningStore({ storage, getConfig = () => ({}), now = Dat
     if (status !== undefined && !STATUSES.includes(status)) fail('INVALID_STATUS', '学习状态不合法')
     const count = Math.max(1, Math.min(1000, Math.floor(Number(limit) || 100)))
     const own = db.all('SELECT * FROM wp6_learning_records WHERE scope_key=? ORDER BY updated_at DESC,id', scopeKey(scope))
-      .filter((r) => (!kind || r.kind === kind) && (!status || r.status === status) && (includeDeleted || status === 'deleted' || r.status !== 'deleted')).slice(0, count).map(view)
+      .filter((r) => (!kind || r.kind === kind) && (!status || r.status === status) && (includeDeleted || status === 'deleted' || r.status !== 'deleted')).slice(0, count)
+      .map((r) => { try { return view(r) } catch (error) { if (error.code === 'DATA_CORRUPTED') return null; throw error } }).filter(Boolean)
     if (!includeShared || (status && status !== 'approved') || own.length >= count) return own
     return [...own, ...readable(scope, { kind, limit: 1000 }).filter((r) => r.readOnly)].slice(0, count)
   }
@@ -150,7 +161,9 @@ export function createLearningStore({ storage, getConfig = () => ({}), now = Dat
         const current = readEvidence(storage, origin, e.message_id, deps)
         return !current || current.fingerprint !== e.fingerprint || !visible(origin, viewer, r.kind, cfg)
       })) continue
-      const item = view(r), readOnly = scopeKey(origin) !== scopeKey(viewer)
+      let item
+      try { item = view(r) } catch (error) { if (error.code === 'DATA_CORRUPTED') continue; throw error }
+      const readOnly = scopeKey(origin) !== scopeKey(viewer)
       if (readOnly) {
         const usage = db.get('SELECT last_used_at,uses FROM wp6_learning_shared_usage WHERE record_id=? AND viewer_scope=?', r.id, scopeKey(viewer))
         // 共享派生结果不附带私聊原文、作者或消息 ID；来源面板与修改仍要求拥有原 scope。

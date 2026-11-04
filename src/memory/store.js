@@ -5,7 +5,11 @@ import { normalizeFact, factFingerprint, reusable, validateDecisions, ids, strin
 import { similarity } from './lexical.js'
 import {createFactQueries,readContext,deletionKey} from './query.js'
 
-const decode = row => row ? JSON.parse(row.body) : null
+const decode = row => {
+  if (!row) return null
+  try { const value = JSON.parse(row.body); return value && typeof value === 'object' && !Array.isArray(value) ? value : null } catch { return null }
+}
+const tombstoneBody = row => row ? (decode(row) || { kind: row.kind, key: row.key, deletedAt: row.deleted_at, token: 'corrupt_tombstone_fail_closed' }) : null
 const clone = value => JSON.parse(JSON.stringify(value))
 const id = prefix => `${prefix}_${randomUUID()}`
 export function createFactRepository({ storage, getPolicy = () => ({}), now = Date.now }) {
@@ -17,8 +21,8 @@ export function createFactRepository({ storage, getPolicy = () => ({}), now = Da
   const evidenceRaw = (evidenceId,read) => read ? read.evidence.get(evidenceId) || null : decode(db.get('SELECT body FROM memory_evidence WHERE id=?', evidenceId))
   const sourceIds = (factId,read) => read ? read.sources.get(factId) || [] : db.all('SELECT evidence_id FROM memory_fact_evidence WHERE fact_id=? ORDER BY evidence_id', factId).map(r => r.evidence_id)
   const tombstone = (kind, key, scope,read) => read ? read.tombstones.get(deletionKey(kind,key,scope)) || null : ['message','fingerprint'].includes(kind)
-    ? decode(db.get('SELECT body FROM memory_tombstones WHERE kind=? AND key=? AND account=? AND chat=? ORDER BY deleted_at DESC,rowid DESC LIMIT 1',kind,key,scope.account,scope.chat))
-    : decode(db.get('SELECT body FROM memory_tombstones WHERE kind=? AND key=? AND account=? AND chat=? AND persona=?', kind, key, scope.account, scope.chat, scope.persona))
+    ? tombstoneBody(db.get('SELECT * FROM memory_tombstones WHERE kind=? AND key=? AND account=? AND chat=? ORDER BY deleted_at DESC,rowid DESC LIMIT 1',kind,key,scope.account,scope.chat))
+    : tombstoneBody(db.get('SELECT * FROM memory_tombstones WHERE kind=? AND key=? AND account=? AND chat=? AND persona=?', kind, key, scope.account, scope.chat, scope.persona))
   const revision = s => Number(db.get('SELECT revision FROM memory_scope_revisions WHERE scope_key=?', scopeKey(s))?.revision || 0)
   function touch(s, changed = {}) {
     db.run('INSERT INTO memory_scope_revisions(scope_key,revision) VALUES (?,1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1', scopeKey(s))
@@ -27,8 +31,11 @@ export function createFactRepository({ storage, getPolicy = () => ({}), now = Da
     const rows = changed.subject ? db.all('SELECT * FROM memory_profiles WHERE subject=?',changed.subject) : db.all('SELECT * FROM memory_profiles')
     const affected = changed.evidenceId ? new Set(db.all('SELECT fact_id FROM memory_fact_evidence WHERE evidence_id=?',changed.evidenceId).map(r=>r.fact_id)) : null
     for (const row of rows) {
-      const viewer=JSON.parse(row.scope_key), profile=JSON.parse(row.body)
-      const refs=Object.values(profile.sections).flat().flatMap(e=>e.factIds)
+      let viewer, profile
+      try { viewer=JSON.parse(row.scope_key); profile=JSON.parse(row.body) } catch { db.run('DELETE FROM memory_profiles WHERE scope_key=? AND subject=?',row.scope_key,row.subject); continue }
+      const sections=profile?.sections
+      if (!viewer || !sections || typeof sections!=='object') { db.run('DELETE FROM memory_profiles WHERE scope_key=? AND subject=?',row.scope_key,row.subject); continue }
+      const refs=Object.values(sections).flat().flatMap(e=>Array.isArray(e?.factIds)?e.factIds:[])
       const depends=changed.factId ? refs.includes(changed.factId) : affected ? refs.some(id=>affected.has(id)) : false
       const audience=visible(s,viewer,policy(),'profile') && visible(s,viewer,policy(),'fact')
       if (depends || (!affected && audience && (!changed.onlyOwn || sameScope(s,viewer)))) db.run('DELETE FROM memory_profiles WHERE scope_key=? AND subject=?',row.scope_key,row.subject)
@@ -150,7 +157,7 @@ export function createFactRepository({ storage, getPolicy = () => ({}), now = Da
   function getMany(factIds,scopeInput,options={}) {
     const scope=scopeOf(scopeInput),checked=ids(factIds,'factIds',true)
     if(!checked.length) return []
-    const facts=db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${checked.map(()=>'?').join(',')})`,scope.account,...checked).map(decode)
+    const facts=db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${checked.map(()=>'?').join(',')})`,scope.account,...checked).map(decode).filter(Boolean)
     const read=readContext(db,facts,scope),p=policy()
     return checked.map(id=>read.facts.get(id)).filter(f=>canRead(f,scope,{...options,policy:p,read})).map(f=>materialize(f,scope,p,read))
   }
@@ -182,7 +189,7 @@ export function createFactRepository({ storage, getPolicy = () => ({}), now = Da
     if (f.slot !== 'single' || f.status !== 'active') return
     for (const r of db.all('SELECT body FROM memory_facts WHERE account=? AND chat=? AND persona=? AND status IN (\'active\',\'conflicted\')', f.scope.account, f.scope.chat, f.scope.persona)) {
       const other = decode(r)
-      if (!canRead(other,f.scope,{includeInactive:true})) continue
+      if (!other || !canRead(other,f.scope,{includeInactive:true})) continue
       if (other.id === f.id || other.slot !== 'single' || other.subject !== f.subject || other.predicate !== f.predicate || other.modality !== f.modality || other.stability !== f.stability) continue
       if (other.conditions === null || f.conditions === null || canonical(other.conditions) !== canonical(f.conditions) || other.eventTime !== f.eventTime) continue
       if ((other.validTo ?? Infinity) <= (f.validFrom ?? -Infinity) || (f.validTo ?? Infinity) <= (other.validFrom ?? -Infinity)) continue
@@ -444,12 +451,13 @@ export function createFactRepository({ storage, getPolicy = () => ({}), now = Da
   }
   function auditOf(factId, scopeInput) {
     const f = ownedFact(factId, scopeInput)
-    return db.all('SELECT seq,body FROM memory_audit WHERE fact_id=? ORDER BY seq',f.id).map(r => receipt({seq:r.seq,...decode(r)},f.scope))
+    return db.all('SELECT seq,body FROM memory_audit WHERE fact_id=? ORDER BY seq',f.id)
+      .map(r => { const body=decode(r); return body ? receipt({seq:r.seq,...body},f.scope) : null }).filter(Boolean)
   }
   function reviewList(scopeInput) {
     const scope = scopeOf(scopeInput)
     return db.all("SELECT body FROM memory_facts WHERE account=? AND chat=? AND persona=? AND status IN ('deleted','quarantined') ORDER BY updated_at DESC",scope.account,scope.chat,scope.persona)
-      .map(decode).map(f => receipt({id:f.id,status:f.status,revision:f.revision,updatedAt:f.updatedAt, ...(f.status === 'quarantined' ? {text:f.text} : {})},scope))
+      .map(decode).filter(Boolean).map(f => receipt({id:f.id,status:f.status,revision:f.revision,updatedAt:f.updatedAt, ...(f.status === 'quarantined' ? {text:f.text} : {})},scope))
   }
   function visibilityStamp(scopeInput) {
     const scope=scopeOf(scopeInput), p=policy()

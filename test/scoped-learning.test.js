@@ -277,7 +277,7 @@ test('SQLite locks and budgets cover concurrent instances, scopes and separate l
   f.advance(86400000)
   assert.equal((await l2.learn(s2, 'jargon')).code, 'NO_INFO')
 })
-test('record, evidence and audit caps include deletion tombstones without resurrecting them', t => {
+test('record, evidence and audit caps keep deleted tombstones out of live capacity', t => {
   const f = fixture(t); Object.assign(f.cfg.learning, { maxItemsPerScope: 1, maxEvidencePerItem: 2 })
   const l = f.learning(), ids = sources(f)
   let item = l.upsert(S, 'jargon', candidate(ids.slice(0, 2)))
@@ -287,7 +287,10 @@ test('record, evidence and audit caps include deletion tombstones without resurr
   assert.equal(l.history(S, item.id).length, 50)
   assert.equal(f.storage.db.get('SELECT COUNT(*) AS n FROM wp6_learning_versions').n, 50)
   item = l.transition(S, item.id, 'deleted', { expectedRevision: item.revision })
-  assert.throws(() => l.upsert(S, 'jargon', candidate([ids[0]], { term: '暂时放松' })), { code: 'CAPACITY' })
+  // A deletion tombstone no longer consumes capacity, so a genuinely new term
+  // can be learned; the old key still resurrects as deleted, never active.
+  assert.equal(l.upsert(S, 'jargon', candidate([ids[0]], { term: '暂时放松' })).status, 'pending')
+  assert.throws(() => l.upsert(S, 'jargon', candidate([ids[1]], { term: '歇会儿', meaning: '先休息' })), { code: 'CAPACITY' })
   assert.equal(l.upsert(S, 'jargon', candidate([ids[0]]), { automatic: true }).status, 'deleted')
 })
 test('queues, tombstones and independent checkpoints survive a real SQLite close/reopen', async () => {

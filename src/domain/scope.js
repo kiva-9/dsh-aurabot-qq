@@ -19,17 +19,19 @@ export function makeScope({ account, chat, category, persona = null }) {
   return { account: String(account), chat: String(chat), category, ...(PERSONA_SCOPED.has(category) ? { persona: String(persona) } : {}) }
 }
 
-/** 共享组配置归一化：[{ id, chats: [...], categories: [...] }]，坏条目丢掉。 */
+/** 共享组配置归一化：[{ id, account?, chats: [...], categories: [...] }]，坏条目丢掉。 */
 export function normalizeShareGroups(list) {
   if (!Array.isArray(list)) return []
   const out = []
   for (const g of list) {
     if (!g || typeof g !== 'object') continue
     const id = String(g.id || '').trim()
+    const account = g.account === undefined || g.account === null || g.account === '' ? '' : String(g.account).trim()
+    if (account && (account.length > 160 || /[\x00-\x1f]/.test(account))) continue
     const chats = [...new Set((Array.isArray(g.chats) ? g.chats : []).map(String).filter((c) => /^(private|group):\d+$/.test(c)))]
     const categories = [...new Set((Array.isArray(g.categories) ? g.categories : []).map(String).filter((c) => CATEGORIES.includes(c) && c !== 'message'))]
     if (!id || chats.length < 2 || !categories.length) continue
-    out.push({ id, chats, categories })
+    out.push({ id, ...(account ? { account } : {}), chats, categories })
   }
   return out
 }
@@ -47,6 +49,9 @@ export function canSee(scope, viewer, policy = {}) {
   }
   if (scope.chat === viewer.chat) return true
   for (const g of policy.shareGroups || []) {
+    // A group restricted to one bot account must never leak into another
+    // account that happens to use the same chat id.
+    if (g.account && String(g.account) !== String(viewer.account)) continue
     if (g.categories.includes(scope.category) && g.chats.includes(scope.chat) && g.chats.includes(viewer.chat)) return true
   }
   return false

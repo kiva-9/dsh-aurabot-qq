@@ -7,7 +7,17 @@ export function createProfiles(repo, { generate, config = () => ({}), lifecycle 
   function inputs(subject, scopeInput) {
     const scope = scopeOf(scopeInput), person = string(subject,'subject',200), p = repo.policy()
     const overrideRow = db.get('SELECT body,revision FROM memory_overrides WHERE scope_key=? AND subject=?',scopeKey(scope),person)
-    const override = overrideRow ? JSON.parse(overrideRow.body) : { aliases:[],entries:[] }
+    let override = { aliases:[],entries:[] }
+    if (overrideRow) {
+      try {
+        const parsed = JSON.parse(overrideRow.body)
+        if (parsed && typeof parsed === 'object') override = {
+          ...parsed,
+          aliases: Array.isArray(parsed.aliases) ? parsed.aliases : [],
+          entries: Array.isArray(parsed.entries) ? parsed.entries : [],
+        }
+      } catch { /* Corrupt manual override is quarantined by the panel; automatic profile stays deterministic. */ }
+    }
     const manualIds=new Set((override.entries || []).flatMap(e=>e.factIds))
     let facts = repo.list(scope,{subject:person,includeInactive:true,statuses:['active','conflicted'],currentOnly:true,order:'updated',limit:200})
     const older=[...manualIds].filter(id=>!facts.some(f=>f.id===id))
@@ -66,24 +76,35 @@ export function createProfiles(repo, { generate, config = () => ({}), lifecycle 
       if (row) db.run('DELETE FROM memory_profiles WHERE scope_key=? AND subject=?',scopeKey(input.scope),input.subject)
       return null
     }
-    const cached = JSON.parse(row.body)
+    let cached
+    try { cached = JSON.parse(row.body) } catch { cached = null }
+    if (!cached || typeof cached !== 'object' || !cached.sections || typeof cached.sections !== 'object') {
+      // A corrupt cache row is derived state: drop it so the next build can
+      // regenerate, instead of breaking the whole profile/panel listing.
+      db.run('DELETE FROM memory_profiles WHERE scope_key=? AND subject=?',scopeKey(input.scope),input.subject)
+      return null
+    }
+    for (const key of PROFILE_SECTIONS) if (!Array.isArray(cached.sections[key])) cached.sections[key] = []
     cached.override = visibleOverride(input)
     if (!options.includeUncertain) cached.sections.uncertain = []
-    cached.text = PROFILE_SECTIONS.flatMap(key => cached.sections[key]).map(e => e.text).join('；')
+    cached.text = PROFILE_SECTIONS.flatMap(key => cached.sections[key]).filter(e=>e && typeof e.text === 'string').map(e => e.text).join('；')
     return cached
   }
   function visibleOverride(input) {
     const entries=[]
-    for(const entry of input.override.entries || []) {
+    const source=input.override || {}
+    for(const entry of Array.isArray(source.entries) ? source.entries : []) {
+      if(!entry || !Array.isArray(entry.factIds)) continue
       if(entry.factIds.some(id=>!input.facts.some(f=>f.id===id))) continue
-      if(!entry.sourceSignatures || entry.sourceSignatures.some(source=>{
+      if(!Array.isArray(entry.sourceSignatures) || entry.sourceSignatures.some(source=>{
+        if (!source || !Array.isArray(source.evidence)) return true
         const current=input.facts.find(f=>f.id===source.id)
         return !current || source.basis !== factBasis(current) || source.evidence.some(e=>!current.evidence.some(now=>now.id===e.id && now.revision===e.revision && now.contentHash===e.contentHash))
       })) continue
       try { validateSections({[entry.section]:[{text:entry.text,factIds:entry.factIds}]},input) } catch { continue }
       entries.push({section:entry.section,text:entry.text,factIds:[...entry.factIds]})
     }
-    return {aliases:input.facts.length ? [...input.override.aliases || []] : [],entries,revision:input.overrideRevision}
+    return {aliases:input.facts.length ? [...(Array.isArray(source.aliases) ? source.aliases : [])] : [],entries,revision:input.overrideRevision}
   }
   function factBasis(f) {
     return hash(Object.fromEntries(['text','subject','predicate','value','speakerId','polarity','modality','conditions','eventTime','validFrom','validTo','status','stability','scope'].map(k=>[k,f[k]])))
@@ -142,7 +163,9 @@ export function createProfiles(repo, { generate, config = () => ({}), lifecycle 
       const previous = db.get('SELECT body,revision FROM memory_overrides WHERE scope_key=? AND subject=?',scopeKey(scope),input.subject)
       const revision = Number(previous?.revision || 0)
       if (options.expectedRevision !== revision) fail('REVISION_CONFLICT','人工画像版本已过期')
-      const body = {aliases,entries,actorId,reason,history:[...(previous ? JSON.parse(previous.body).history || [] : []),{at:now(),actorId,reason,before:previous ? JSON.parse(previous.body).entries : []}],revision:revision + 1}
+      let previousBody = null
+      if (previous) { try { previousBody = JSON.parse(previous.body) } catch { previousBody = null } }
+      const body = {aliases,entries,actorId,reason,history:[...(Array.isArray(previousBody?.history) ? previousBody.history : []),{at:now(),actorId,reason,before:Array.isArray(previousBody?.entries) ? previousBody.entries : []}],revision:revision + 1}
       db.run('INSERT INTO memory_overrides(scope_key,subject,body,revision) VALUES (?,?,?,?) ON CONFLICT(scope_key,subject) DO UPDATE SET body=excluded.body,revision=excluded.revision',scopeKey(scope),input.subject,JSON.stringify(body),revision+1)
       repo.touch(scope,{subject:input.subject,onlyOwn:true})
       return receipt({ok:true,subject:input.subject,revision:revision+1},scope)

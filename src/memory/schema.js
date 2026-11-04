@@ -30,6 +30,7 @@ export function ensureSchema(storage) {
       seq INTEGER PRIMARY KEY AUTOINCREMENT, fact_id TEXT NOT NULL, account TEXT NOT NULL,
       chat TEXT NOT NULL, persona TEXT NOT NULL, at INTEGER NOT NULL, body TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS memory_audit_fact ON memory_audit(fact_id, seq);
     CREATE TABLE IF NOT EXISTS memory_tombstones (
       kind TEXT NOT NULL, key TEXT NOT NULL, account TEXT NOT NULL, chat TEXT NOT NULL,
       persona TEXT NOT NULL, deleted_at INTEGER NOT NULL, body TEXT NOT NULL,
@@ -58,14 +59,17 @@ export function ensureSchema(storage) {
       id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, scope TEXT NOT NULL,
       from_seq INTEGER NOT NULL, to_seq INTEGER NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS memory_episodes_scope ON memory_episodes(scope_key, to_seq DESC);
     CREATE TABLE IF NOT EXISTS memory_profiles (
       scope_key TEXT NOT NULL, subject TEXT NOT NULL, fingerprint TEXT NOT NULL,
       body TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(scope_key,subject)
     );
+    CREATE INDEX IF NOT EXISTS memory_profiles_subject ON memory_profiles(subject);
     CREATE TABLE IF NOT EXISTS memory_overrides (
       scope_key TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
       revision INTEGER NOT NULL, PRIMARY KEY(scope_key,subject)
     );
+    CREATE INDEX IF NOT EXISTS memory_overrides_subject ON memory_overrides(subject);
     CREATE TABLE IF NOT EXISTS memory_quarantine (
       id TEXT PRIMARY KEY, account TEXT NOT NULL, chat TEXT NOT NULL, persona TEXT NOT NULL,
       source_key TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL,
