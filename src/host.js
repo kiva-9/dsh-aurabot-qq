@@ -13,7 +13,7 @@ import { readFileSync, existsSync, writeFileSync, unlinkSync, statSync, mkdirSyn
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { loadConfig, saveConfig, publicConfig, mergeFromPanel } from './core/config.js'
+import { loadConfig, saveConfig, publicConfig, mergeFromPanel, normalize } from './core/config.js'
 import { createLogger } from './core/logger.js'
 import { registerSecret, redact } from './core/redact.js'
 import { createOneBotClient } from './onebot/client.js'
@@ -60,7 +60,17 @@ const PREFIX = '/aurabot/api'
 export function apply(ctx) {
   const logger = createLogger({ dsh: ctx })
   const log = logger.child('core')
-  let cfg = loadConfig()
+  // 配置坏文件/版本过高时仍然启动到只读诊断面板，而不是让整个插件消失。
+  // 此时禁止保存覆盖原文件，保留错误给面板和日志。
+  let configError = ''
+  let cfg
+  try {
+    cfg = loadConfig()
+  } catch (error) {
+    configError = String(error?.message || error)
+    cfg = normalize({})
+    log.error('配置无法加载，进入只读：', configError)
+  }
   let mods = null
   let bridge = null
   let hub = null
@@ -72,10 +82,12 @@ export function apply(ctx) {
     visit(cfg)
   }
   const setConfig = (next) => {
+    if (configError) throw Object.assign(new Error('配置加载失败，当前为只读模式：' + configError), { code: 'CONFIG_READ_ONLY' })
     const before = cfg
     if (before.botQQ !== next.botQQ || before.ownerQQ !== next.ownerQQ) personaRequestContextVersion++
     const policyKeys=['ownerQQ','ownerLevel','allow','profilePerms']
-    next={...next,policyRevision:policyKeys.some(k=>JSON.stringify(before[k])!==JSON.stringify(next[k]))?(before.policyRevision||0)+1:before.policyRevision||0}
+    const configRevision = Math.max(0, Math.floor(Number(before.configRevision) || 0)) + 1
+    next={...next,configRevision,policyRevision:policyKeys.some(k=>JSON.stringify(before[k])!==JSON.stringify(next[k]))?(before.policyRevision||0)+1:before.policyRevision||0}
     cfg = saveConfig(next)
     if (before.ownerQQ !== cfg.ownerQQ || before.botQQ !== cfg.botQQ || before.security?.dangerConfirm !== cfg.security?.dangerConfirm || before.enabled !== cfg.enabled) dangerGuard?.invalidate?.()
     if(hub&&before.botQQ!==cfg.botQQ)hub.accountChanged()
@@ -347,13 +359,15 @@ export function apply(ctx) {
     } catch (error) {}
   }
   const readBody = async (req, maxBytes = 43 * 1024 * 1024) => {
-    let s = ''; let bytes = 0
+    const chunks = []; let bytes = 0
     for await (const c of req) {
-      bytes += Buffer.byteLength(c)
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(c)
+      bytes += buf.length
       if (bytes > maxBytes) throw new Error(`请求内容超过 ${Math.round(maxBytes / 1024 / 1024)} MB`)
-      s += c
+      chunks.push(buf)
     }
-    try { return JSON.parse(s || '{}') } catch (error) { throw new Error('请求不是合法 JSON，未保存任何改动') }
+    // 必须按 Buffer 合并后一次性 UTF-8 解码：逐 chunk 拼字符串会在多字节字符边界产生 U+FFFD。
+    try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch (error) { throw new Error('请求不是合法 JSON，未保存任何改动') }
   }
   /** 原样读请求体（上传大文件用），超过 max 字节就报错。 */
   const readRaw = async (req, max) => {
@@ -370,6 +384,22 @@ export function apply(ctx) {
   const query = (req) => {
     try { return Object.fromEntries(new URL(req.url, 'http://x').searchParams) } catch (error) { return {} }
   }
+  /**
+   * 面板 API 的 CSRF 边界：DSH Web UI 与插件同源；跨站网页/iframe 不应能改配置或触发副作用。
+   * 允许无这些头的本机/服务端调用（CLI、测试、DSH 内部），但浏览器跨站请求会被 Sec-Fetch-Site/Origin 拦住。
+   */
+  const panelRequestAllowed = (req) => {
+    const headers = req?.headers || {}
+    const site = String(headers['sec-fetch-site'] || '').toLowerCase()
+    if (site && !['same-origin', 'none'].includes(site)) return false
+    const origin = String(headers.origin || '')
+    if (origin) {
+      if (origin === 'null') return false
+      try { if (new URL(origin).host !== String(headers.host || '')) return false } catch { return false }
+    }
+    return true
+  }
+  const rejectPanelRequest = (res) => send(res, 403, { ok: false, code: 'FORBIDDEN_ORIGIN', message: '只允许 DSH 面板同源请求' })
   // 核心自己的接口登记成精确路径；模块的接口都走一个前缀路由，请求进来再查表
   // （模块随时开关、重新加载；关着的模块的接口回「模块没开」，面板不会白屏）
   const answer = async (res, fn) => {
@@ -380,15 +410,21 @@ export function apply(ctx) {
       send(res, 200, { ok: false, message: redact(String(error && error.message ? error.message : error)), ...(error?.code ? { code: error.code } : {}), ...(error?.scopes ? { scopes: error.scopes } : {}) })
     }
   }
-  const route = (path, handler) => ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PREFIX + path, handler: (req, res) => answer(res, () => handler(req, res)) }), `aurabot: 路由 ${path}`)
+  const route = (path, handler) => ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: PREFIX + path, handler: (req, res) => {
+    if (!panelRequestAllowed(req)) return rejectPanelRequest(res)
+    return answer(res, () => handler(req, res))
+  } }), `aurabot: 路由 ${path}`)
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: PREFIX, // DSH 按「路径 = 前缀 或 以 前缀/ 开头」匹配，前缀本身不带结尾的 /
-    handler: (req, res) => answer(res, () => {
-      let path = ''
-      try { path = new URL(req.url, 'http://x').pathname } catch (error) {}
-      return mods.handle(path, req, res)
-    }),
+    handler: (req, res) => {
+      if (!panelRequestAllowed(req)) return rejectPanelRequest(res)
+      return answer(res, () => {
+        let path = ''
+        try { path = new URL(req.url, 'http://x').pathname } catch (error) {}
+        return mods.handle(path, req, res)
+      })
+    },
   }), 'aurabot: 模块接口')
 
   // ---------- 模块 ----------
@@ -515,6 +551,8 @@ export function apply(ctx) {
       ok: true,
       version: VERSION,
       apiVersion: API_VERSION,
+      configRevision: cfg.configRevision || 0,
+      configError,
       config: publicConfig(cfg),
       onebot: { state: onebotState, login, endpoint: { httpUrl: endpoint().httpUrl, wsUrl: endpoint().wsUrl }, problem: onebotState === 'connected' && loginOk ? '' : await connectionProblem() },
       snowluma: { ...inst, running, consented: await consented(running), owns: snowluma.ownsProcess, lastAttach: snowluma.lastAttach, downloadPage: DOWNLOAD_PAGE, webui: snowluma.webuiUrl() },
@@ -542,6 +580,14 @@ export function apply(ctx) {
 
   route('/save', async (req) => {
     const body = await readBody(req)
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, code: 'INVALID_BODY', message: '保存内容必须是 JSON 对象' }
+    if (configError) return { ok: false, code: 'CONFIG_READ_ONLY', message: '配置加载失败，当前为只读模式：' + configError }
+    // 乐观锁：面板带上打开时的 configRevision；服务端已被另一个面板/模块改过时拒绝覆盖。
+    const expectedRevision = body.configRevision
+    delete body.configRevision
+    if (expectedRevision !== undefined && Number(expectedRevision) !== Number(cfg.configRevision || 0)) {
+      return { ok: false, code: 'CONFIG_CONFLICT', configRevision: cfg.configRevision || 0, message: '配置已在别处修改，请刷新面板后重试（未保存本次改动）' }
+    }
     const before = cfg
     // 控制台密码不能只改配置（SnowLuma 那边还是旧的）：拿出来单独去 SnowLuma 改
     const newPw = typeof body?.snowluma?.webuiPassword === 'string' ? body.snowluma.webuiPassword : ''
@@ -840,7 +886,8 @@ export function apply(ctx) {
   // 模拟测试：不用上 QQ 就能试模块。发出去的消息只截下来给面板看，不真发
   // （模块直接调 api.onebot(...) 的操作不在此列，是真的会执行的）
   const simChat = (b) => {
-    const owner = b.as !== 'other'
+    // 默认按“别人”模拟；只有显式 as:'owner' 才使用主人/full，避免无鉴权 API 默认提权。
+    const owner = b.as === 'owner' || b.as === true
     const userId = owner ? cfg.ownerQQ : '10001'
     const group = b.kind === 'group'
     const groupId = String(b.groupId || cfg.allow.groups[0] || '10002')

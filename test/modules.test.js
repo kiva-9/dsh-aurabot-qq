@@ -417,3 +417,16 @@ test('#1 重新连接：等结果再回话，连上了就说连上了', async ()
   assert.equal(r.message, '连上了')
   assert.equal((await fake.call('/state')).json().onebot.problem, '')
 })
+
+test('面板 API 拒绝跨站 CSRF 请求', async () => {
+  const blocked = await fake.call('/save', { enabled: false }, {
+    origin: 'https://evil.example', host: '127.0.0.1:1234', 'sec-fetch-site': 'cross-site',
+  })
+  assert.equal(blocked.status, 403)
+  assert.equal(blocked.json().code, 'FORBIDDEN_ORIGIN')
+  const allowed = await fake.call('/state', undefined, {
+    origin: 'http://127.0.0.1:1234', host: '127.0.0.1:1234', 'sec-fetch-site': 'same-origin',
+  })
+  assert.equal(allowed.status, 200)
+  assert.equal(allowed.json().ok, true)
+})

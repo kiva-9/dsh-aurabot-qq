@@ -356,7 +356,7 @@ test('空数据、没有返回用量以及请求错误均有明确状态', async
 })
 
 test('管理分组导航在模块运行时打开 Token 统计页面', () => {
-  const tabsCode = source.slice(source.indexOf('    const TABS = ['), source.indexOf('    const modOn ='))
+  const tabsCode = source.slice(source.indexOf('    const TABS = ['), source.indexOf('    function ModOff('))
   const pageCode = source.slice(source.indexOf('    const PANEL_GROUPS ='), source.indexOf('    function apply(ctx)'))
   const tokenPage = function TokenDashboard() {}
   const st = {
@@ -366,7 +366,7 @@ test('管理分组导航在模块运行时打开 Token 统计页面', () => {
   }
   const state = [], refs = [], calls = []
   let cursor = 0, refCursor = 0, draftWrites = 0
-  const names = ['Overview', 'NewFeatures', 'Connect', 'Persona', 'Access', 'Group', 'Model', 'Voice', 'Stickers', 'ImageGen', 'SearchPanel', 'SpeakUp', 'Mood', 'ScopedMemory', 'RetrievalPanel', 'MediaMemory', 'Learning', 'Tasks', 'Song', 'Bili', 'LocalApi', 'Modules', 'Diagnostics', 'Logs', 'ExtPage', 'TabBoundary', 'Wizard', 'Switch', 'WhaleIcon']
+  const names = ['Overview', 'NewFeatures', 'Connect', 'Persona', 'Access', 'Group', 'Model', 'Voice', 'Stickers', 'ImageGen', 'SearchPanel', 'SpeakUp', 'Mood', 'ScopedMemory', 'RetrievalPanel', 'MediaMemory', 'Learning', 'Tasks', 'Song', 'Bili', 'LocalApi', 'Modules', 'Diagnostics', 'Logs', 'ExtPage', 'TabBoundary', 'Wizard', 'Switch', 'WhaleIcon', 'ModOff']
   const ctx = Object.fromEntries(names.map(name => [name, name]))
   Object.assign(ctx, {
     h, TokenDashboard: tokenPage, useStyle() {}, Empty: 'Empty', Btn: 'Btn',
@@ -396,7 +396,11 @@ test('管理分组导航在模块运行时打开 Token 统计页面', () => {
   assert.ok(all(tree).find(n => n.type === tokenPage))
   st.modules[0].running = false
   tree = render()
-  assert.equal(all(tree).some(n => n.type === 'button' && n.children.includes('Token 统计')), false)
+  const tokenTab = button(tree, 'Token 统计')
+  assert.equal(tokenTab.props.role, 'tab')
+  tokenTab.props.onClick()
+  tree = render()
+  assert.ok(all(tree).find(n => n.type === 'ModOff'), '模块关掉时保留入口并显示 ModOff')
   assert.equal(draftWrites, 0)
   assert.deepEqual(calls, [])
 })

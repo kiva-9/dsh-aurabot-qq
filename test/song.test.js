@@ -166,7 +166,7 @@ test('导入音色：单个 .pth 直接导入；不是模型、不支持的格�
   assert.deepEqual(studio.listVoices(dir).map((x) => x.id), ['evil'])
 })
 
-test('安装：报错翻译成人话、安装位置检查、列出各个盘', () => {
+test('安装：报错翻译成人话、安装位置检查、列出各个盘', { skip: process.platform !== 'win32' }, () => {
   assert.match(studio.explainInstallError('spawn uv ENOENT'), /找不到需要的程序（uv）/)
   assert.match(studio.explainInstallError('error sending request for url ... connection reset'), /国内镜像/)
   assert.match(studio.explainInstallError('30 秒没进度'), /超时/)

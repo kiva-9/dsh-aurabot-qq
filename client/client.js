@@ -70,6 +70,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-tab{flex:none;border:0;background:transparent;color:var(--ab-sub);padding:6px 12px;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}
 .ab-tab:hover{background:var(--ab-hover);color:var(--ab-text)}
 .ab-tab.on{background:var(--ab-card);color:var(--ab-deep);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 1px var(--ab-line)}
+.ab-navgroup{flex:none;border:1px solid transparent;background:transparent;color:var(--ab-sub);padding:5px 14px;border-radius:999px;font-size:12.5px;cursor:pointer;white-space:nowrap;font-weight:600}
+.ab-navgroup:hover{background:var(--ab-hover);color:var(--ab-text)}
+.ab-navgroup.on{background:var(--ab-deep);color:var(--ab-bg);border-color:var(--ab-deep)}
 .ab-tab .ab-dot{width:6px;height:6px}
 .ab-grid{display:grid;gap:12px}
 .ab-g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
@@ -503,7 +506,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     // ---------------- 标签页 ----------------
     const TABS = [
       { id: 'overview', label: '概览' },
-      { id: 'new-features', label: '聊天与功能设置' },
+      { id: 'new-features', label: '聊天与附件' },
       { id: 'connect', label: '连接' },
       { id: 'persona', label: '人格' },
       { id: 'access', label: '权限' },
@@ -530,9 +533,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     ]
     // 内置标签页属于哪个模块：模块都没在跑就不显示这一页
     const TAB_MODS = { voice: ['voice'], stickers: ['stickers'], imagegen: ['imagegen'], search: ['search'], speakup: ['speakup'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['media-memory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], 'token-meter': ['token-meter'] }
-    const modOn = (st, id) => (st.modules || []).some((m) => m.id === id && m.running)
-    function ModOff({ name }) {
-      return h(Card, { title: name }, h('div', { className: 'ab-muted ab-small' }, '「' + name + '」模块关着，这部分用不了。要用的话去「扩展」页把它打开。'))
+    function ModOff({ name, go }) {
+      return h(Card, { title: name }, h('div', { className: 'ab-muted ab-small', style: { marginBottom: 10 } }, '「' + name + '」模块关着，这部分用不了。要用的话去「扩展」页把它打开。'), go ? h(Btn, { small: true, kind: 'primary', onClick: () => go('modules') }, '去扩展打开') : null)
     }
     /** 一个标签页出错时只坏这一页：显示原因和「回到概览」，不会整个面板白屏（也不会因为记住了这一页而一直白）。 */
     class TabBoundary extends React.Component {
@@ -582,6 +584,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const quick = (p, body) => async () => { const r = await post(p, body); toast(r.message || (r.ok ? '好了' : '没成功')) }
       return h('div', { className: 'ab-grid' },
         h(UpdateNotes, { st, toast }),
+        st.configError ? h('div', { className: 'ab-note err' }, '配置加载失败，当前是只读模式：' + st.configError + '。请修复 config.json 或从备份恢复后重启。') : null,
         !cfg.enabled ? h('div', { className: 'ab-note warn' }, '总开关是关着的：大肥鱼现在不会收也不会发任何 QQ 消息。准备好了就在右上角打开。') : null,
         cfg.enabled && cfg.dryRun ? h('div', { className: 'ab-note' }, '现在是试运行：她会照常思考回复，但只写进日志，不会真的发到 QQ。确认没问题后在右上角关掉「试运行」。') : null,
         cfg.enabled && !conn ? h('div', { className: 'ab-note err' }, '还没连上 QQ 网关' + (st.onebot.problem ? '：' + st.onebot.problem + '。' : '。去「连接」标签看看 SnowLuma 有没有装好、启动没有。') + ' ', h('a', { href: '#', onClick: (e) => { e.preventDefault(); go('connect') } }, '去连接 →')) : null,
@@ -1587,6 +1590,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         ),
         h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复她的消息、或者提到下面这些名字时，她一定会回。' },
           h(Row, { label: '唤醒词', hint: '一行一个' }, f.list('group.wakeWords', { placeholder: '大肥鱼\n肥鱼' })),
+          h(Row, { label: '@别人时忽略唤醒词', hint: '别人被 @ 时，正文里的唤醒词不再触发她' }, f.sw('group.ignoreAtOthers')),
           h(Row, { label: '连续任务衔接', hint: '被叫到后，同一人补图片、引用、追问或纠错，在这段时间内作为当前求助处理。普通闲聊和纯表情仍走插话策略。' }, f.num('conversation.followupSeconds', { min: 15, max: 180 }), ' 秒'),
         ),
         h(Card, { title: '会话历史窗口', desc: '达到任一上限后，从下一轮启用新的短会话；已保存的聊天和记忆仍可查询。减少旧话题干扰和长上下文等待。' },
@@ -1763,6 +1767,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             { value: 'openai', label: '兼容 OpenAI 的语音接口', desc: 'POST /audio/speech：OpenAI、硅基流动等各家平台' },
             { value: 'http', label: '自己配的 HTTP 接口', desc: '本地 CosyVoice、GPT-SoVITS 或任意返回音频的服务' },
           ])),
+          h(Row, { label: '全局默认音色', hint: '人设未指定音色时使用；HTTP 映射里的 {voice} 也取这个值' }, f.text('voice.defaultVoice', { placeholder: '例如 zh-CN-XiaoxiaoNeural' })),
+          h(Row, { label: '全局语速', hint: '人设里的语速优先' }, f.range('voice.speed', 0.5, 2, 0.1, (v) => Number(v).toFixed(1) + '×')),
           draft.voice.provider === 'openai' ? [
             h(Row, { key: 'u', label: '服务地址', hint: '一般以 /v1 结尾' }, f.text('voice.openai.baseUrl', { size: 'wide', placeholder: 'https://api.openai.com/v1' })),
             h(Row, { key: 'k', label: 'API Key', hint: '只存在本机，不会显示出来' }, f.text('voice.openai.apiKey', { type: 'password', placeholder: draft.voice.openai.apiKeySet ? '已保存（不改就留空）' : '没有就留空' })),
@@ -1776,6 +1782,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               h(Btn, { small: true, kind: 'ghost', onClick: () => setDraft(setPath(draft, 'voice.httpApi', { ...draft.voice.httpApi, method: 'GET', url: 'http://127.0.0.1:9880/tts?text={text}&text_lang=zh&ref_audio_path=&prompt_text=&prompt_lang=zh&media_type=wav', bodyType: 'none', body: '', response: 'audio', audioFormat: 'auto', sampleRate: 32000 })) }, 'GPT-SoVITS')),
             h(Row, { key: 'm', label: '请求方式' }, f.select('voice.httpApi.method', [{ value: 'POST', label: 'POST' }, { value: 'GET', label: 'GET' }], { width: 120 })),
             h(Row, { key: 'u', label: '地址', hint: '{text} 换成要念的话，{voice} 换成音色' }, f.text('voice.httpApi.url', { size: 'wide', placeholder: 'http://127.0.0.1:8000/tts' })),
+            h(Row, { key: 'hk', label: 'API Key', hint: '只存在本机，不会显示；需要鉴权的 HTTP 服务填这里' }, f.text('voice.httpApi.apiKey', { type: 'password', placeholder: draft.voice.httpApi.apiKeySet ? '已保存（不改就留空）' : '不需要就留空' })),
             draft.voice.httpApi.method === 'POST' ? h(Row, { key: 'bt', label: '请求体格式' }, f.select('voice.httpApi.bodyType', [{ value: 'json', label: 'JSON' }, { value: 'form', label: '表单' }, { value: 'none', label: '没有请求体' }], { width: 160 })) : null,
             draft.voice.httpApi.method === 'POST' && draft.voice.httpApi.bodyType !== 'none' ? h(Row, { key: 'b', label: '请求体模板', hint: 'JSON 例子：{"text":"{text}","voice":"{voice}"}' }, f.text('voice.httpApi.body', { size: 'wide' })) : null,
             h(Row, { key: 'r', label: '返回的是' }, f.select('voice.httpApi.response', [{ value: 'audio', label: '音频本身（wav / mp3 / 裸 PCM）' }, { value: 'json-base64', label: 'JSON 里的 base64' }, { value: 'json-url', label: 'JSON 里的音频地址' }], { width: 260 })),
@@ -1791,6 +1798,11 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Btn, { small: true, onClick: async () => { const r = await post('/voice/test', { text: txt }); if (r.ok) setSrc('data:' + r.mime + ';base64,' + r.data); else toast(r.message) } }, '生成'),
             src ? h('audio', { src, controls: true, autoPlay: true, style: { height: 32 } }) : null),
         ),
+        h(Card, { title: 'RVC 后处理（全局）', right: f.sw('voice.rvc.enabled'), desc: '先用上面的 TTS 合成，再交给翻唱环境的 RVC 换声；人设页可以按角色覆盖。' },
+          h(Row, { label: 'RVC 音色', hint: 'models 目录里的音色名，留空使用翻唱页默认' }, f.text('voice.rvc.voice', { size: 'wide' })),
+          h(Row, { label: '音高（半音）' }, f.num('voice.rvc.pitch', { min: -24, max: 24 })),
+          h(Row, { label: '转换失败' }, f.select('voice.rvc.fallback', [{ value: 'original', label: '使用原声' }, { value: 'error', label: '报告失败' }])),
+          h(Row, { label: '转换超时（毫秒）' }, f.num('voice.rvc.timeoutMs', { min: 1000, max: 300000, step: 1000 }))),
         h(Card, { title: '听语音（语音转文字）', right: f.sw('voice.asr'), desc: '别人发来的语音会先转成文字再交给她：优先用 QQ 自带的转文字，不行再用 DSH 自带的语音识别（要在 DSH「插件」里开启「语音输入」）。' },
           h(AsrStatus, { toast })),
       )
@@ -1829,6 +1841,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(StickerWorkspace,{key:scope.account+':'+scope.chat,scope,toast,onWorking:setWorking}),
         h('details',{className:'ab-sticker-section'},h('summary',null,'自动处理与发送设置'),
         h(Card,{title:perChat?'表情包（兼容聊天隔离）':'表情包 · 当前机器人共用图库',right:f.sw('stickers.enabled'),desc:'正常素材可自动收集、识别并加入可用图库。独立视觉模型结合回复和候选图判断发不发、选哪张；模型标签只是意图。来源聊天用于溯源。设置修改后需保存。'},
+          h(Row,{label:'收藏模式',hint:'自动收集 / 仅主人 / 由模型选择'},f.select('stickers.collectMode',[{value:'auto',label:'自动'},{value:'owner',label:'仅主人'},{value:'ask',label:'由模型选择'}])),
           h(Row,{label:'1. 自动收集表情',hint:'从已授权聊天收到的表情保存到本机图库'},f.sw('stickers.collect')),
           h(Row,{label:'2. 自动识别内容',hint:'后台调用视觉模型生成描述和标签；关闭后暂停识别队列'},f.sw('stickers.caption')),
           h(Row,{label:'3. 正常素材自动可用',hint:'识别通过的素材自动入可用库，无需逐张手工批准；异常或不确定的素材可在人工处理中核对'},f.sw('stickers.autoReview')),
@@ -3097,12 +3110,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     }
 
     /** 一个模块一行：开关、状态、报错，能复制来改 / 用回内置的 / 重新加载。 */
-    function ModuleRow({ m, draft, setModules, toast, reload }) {
+    function ModuleRow({ m, draft, setModules, setDraft, toast, reload }) {
       const s = MOD_STATE(m)
       const [open, setOpen] = useState(false)
       const setMod = async (patch) => {
-        const r = await post('/save', { modules: { [m.id]: { ...((draft.modules || {})[m.id] || {}), ...patch } } })
+        const nextModules = { ...((draft.modules || {})[m.id] || {}), ...patch }
+        const r = await post('/save', { modules: { [m.id]: nextModules } })
         if (r.ok === false) return toast(r.message, 'err')
+        // 同步全局 draft，避免之后点“保存设置”时用旧 draft 把刚切换的模块写回去。
+        if (typeof setDraft === 'function') setDraft((d) => setPath(d, 'modules', { ...(d.modules || {}), [m.id]: nextModules }))
         toast(patch.enabled === false ? `「${m.name}」关掉了` : patch.enabled ? `「${m.name}」打开了` : '好了', 'ok')
         setModules(r.modules)
         reload()
@@ -3182,6 +3198,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     /** 扩展页：所有模块（内置的 + 自己写的）、新建、安全模式。 */
     function Modules({ st, draft, setDraft, toast, reload }) {
+      const f = useField(draft, setDraft)
       const [data, setData] = useState(null)
       const [newId, setNewId] = useState('')
       const [newName, setNewName] = useState('')
@@ -3193,7 +3210,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const list = data.list || []
       const builtin = list.filter((m) => m.builtin)
       const mine = list.filter((m) => !m.builtin)
-      const props = { draft, setModules, toast, reload: () => { reload(); load() } }
+      const props = { draft, setModules, setDraft, toast, reload: () => { reload(); load() } }
       const create = async () => {
         const r = await post('/modules/create', { id: newId.trim(), name: newName.trim() })
         if (!r.ok) return toast(r.message, 'err')
@@ -3210,15 +3227,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Btn, { small: true, onClick: () => copy(data.prompt, toast, '复制好了，粘给 DSH，把【】里那句换成你想要的') }, '复制给 DSH 的话'),
             h(Btn, { small: true, kind: 'ghost', onClick: async () => { const r = await post('/modules/reload', {}); setModules(r.list); toast(r.message) } }, '重新检查')),
           h(Row, { label: '安全模式', hint: '打开后你写的模块一个都不加载，内置的全部恢复。出了问题先开它，看是不是你的模块引起的。' },
-            h(Switch, { on: st.config.safeMode, onChange: async (v) => { const r = await post('/save', { safeMode: v }); toast(v ? '安全模式开了：只跑内置模块' : '安全模式关了', 'ok'); setModules(r.modules); reload() } })),
+            h(Switch, { on: st.config.safeMode, onChange: async (v) => { const r = await post('/save', { safeMode: v }); if (r.ok === false) return toast(r.message, 'err'); setDraft((d) => setPath(d, 'safeMode', v)); toast(v ? '安全模式开了：只跑内置模块' : '安全模式关了', 'ok'); setModules(r.modules); reload() } })),
           st.config.safeMode ? h('div', { className: 'ab-note warn' }, '安全模式开着：你写的模块现在都没加载。') : null),
+        h(Card, { title: '联动', desc: '让别的程序、DSH 里的其他会话也能用她。默认关；开启后请核对允许目标。' },
+          h(Row, { label: 'DSH 全局工具', hint: '其他 DSH 会话可以用 aurabot_qq_send / aurabot_status / aurabot_call' }, f.sw('bridge.dshTools')),
+          h(Row, { label: '开放 HTTP 接口', hint: '需要密钥；默认只允许白名单目标' }, f.sw('bridge.http')),
+          h(Row, { label: '外部可发给谁' }, f.select('bridge.allowTargets', [{ value: 'whitelist', label: '白名单里的人和群' }, { value: 'owner', label: '只能发给主人' }])),
+          h(Row, { label: 'HTTP 密钥', hint: '密钥只在插件内部生成和保存，不在面板回显' },
+            h(Btn, { small: true, onClick: async () => { const r = await post('/bridge/token/reset'); if (r.ok === false) return toast(r.message, 'err'); if (r.token) copy(r.token, toast, '新密钥已复制，旧密钥立即失效'); else toast('密钥已重置') } }, '重置并复制密钥')),
+          h('div', { className: 'ab-small ab-muted' }, '修改后记得点页面底部的「保存设置」。')),
         h(Card, { title: '新建一个模块', desc: '从模板建一个能直接跑的例子（关键词自动回复 + 一个命令 + 一个工具），在它上面改。id 用小写英文，比如 weather。想改内置的本事，用下面内置模块那一行的「复制一份来改」。' },
           h('div', { className: 'ab-flex' },
             h('input', { className: 'ab-input', style: { maxWidth: 180 }, placeholder: 'id，如 weather', value: newId, onChange: (e) => setNewId(e.target.value.toLowerCase()) }),
             h('input', { className: 'ab-input', placeholder: '名字，如 查天气', value: newName, onChange: (e) => setNewName(e.target.value) }),
             h(Btn, { kind: 'primary', small: true, disabled: !newId.trim(), onClick: create }, '新建'))),
         mine.length ? h(Card, { title: '自己写的（' + mine.length + '）' }, h('div', null, mine.map((m) => h(ModuleRow, { key: m.id, m, ...props })))) : null,
-        h(Card, { title: '内置模块（' + builtin.length + '）', desc: '关掉的模块：她就没有这项本事，相关的标签页也会藏起来。连接、权限、人格、聊天这些是核心，不能关。' },
+        h(Card, { title: '内置模块（' + builtin.length + '）', desc: '关掉的模块：她就没有这项本事；对应标签页保留，但会显示未启用。连接、权限、人格、聊天这些是核心，不能关。' },
           h('div', null, builtin.map((m) => h(ModuleRow, { key: m.id, m, ...props })))),
         h(Simulate, { toast }),
       )
@@ -3230,7 +3254,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       static getDerivedStateFromError(error) { return { error } }
       render() { return this.state.error ? h('div', { className: 'ab-note err' }, '这个模块的面板出错了：' + String((this.state.error && this.state.error.message) || this.state.error)) : this.props.children }
     }
-    function ExtPanel({ m, settings, toast, reload }) {
+    function ExtPanel({ m, settings, toast, reload, setDraft }) {
       const [Comp, setComp] = useState(null)
       const [err, setErr] = useState('')
       useEffect(() => {
@@ -3246,7 +3270,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }, [m.id, m.startedAt])
       if (err) return h('div', { className: 'ab-note err' }, '面板加载失败：' + err)
       if (!Comp) return h(Empty, { icon: '⏳', text: '加载中…' })
-      const save = async (patch) => { const r = await post('/save', { ext: { [m.id]: patch } }); toast(r.ok === false ? r.message : '保存好了', r.ok === false ? 'err' : 'ok'); reload() }
+      const save = async (patch) => {
+        const r = await post('/save', { ext: { [m.id]: patch } })
+        if (r.ok !== false && typeof setDraft === 'function') setDraft((d) => setPath(d, 'ext.' + m.id, { ...((d.ext || {})[m.id] || {}), ...patch }))
+        toast(r.ok === false ? r.message : '保存好了', r.ok === false ? 'err' : 'ok')
+        reload()
+      }
       return h(PanelBoundary, null, h(Comp, { settings, save, toast, reload }))
     }
     function ExtPage({ st, draft, setDraft, toast, reload, mod, embedded }) {
@@ -3269,7 +3298,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           (m.settings || []).map((s) => h(Row, { key: s.key, label: s.label || s.key, hint: s.hint }, field(s))),
           (m.settings || []).length ? h('div', { className: 'ab-small ab-muted' }, '改完点下面的「保存设置」。') : null,
           (m.errors || []).length ? h('div', { className: 'ab-note err', style: { marginTop: 8 } }, '最近的报错：' + m.errors[0].message) : null),
-        m.panel ? h(ExtPanel, { m, settings, toast, reload }) : null)
+        m.panel ? h(ExtPanel, { m, settings, toast, reload, setDraft }) : null)
     }
 
     const BILI_KIND = { watch: '看了', comment: '评论', reply: '回复', share: '分享给你', error: '没成功' }
@@ -3279,6 +3308,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const f = useField(draft, setDraft)
       const [s, setS] = useState(null)
       const [busy, setBusy] = useState('')
+      const [shots, setShots] = useState(null)
+      const [shotChat, setShotChat] = useState('private:' + String(draft.ownerQQ || ''))
+      const [shotPersona, setShotPersona] = useState(draft.persona?.current || '')
       const load = () => get('/bili/state').then(setS)
       useEffect(() => { load() }, [])
       const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load() }
@@ -3298,7 +3330,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '额外想看的方向', hint: '一行一个；另外还会参考她的兴趣和记忆' }, f.list('bili.keywords', { placeholder: '白米饭 做法\n猫咪\n游戏解说' })),
           h(Row, { label: '播放量门槛' }, f.num('bili.minViews', { min: 0 }), h('span', { className: 'ab-muted' }, '次以上')),
           h(Row, { label: '只看最近' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
+          h(Row, { label: 'ffmpeg 路径', hint: '视频画面理解和表情动画取帧需要；留空 = PATH 里的 ffmpeg' }, f.text('bili.ffmpegPath', { size: 'wide', placeholder: 'C:\\ffmpeg\\bin\\ffmpeg.exe' })),
         ),
+        h(Card, { title: '视频画面与弹幕', desc: '视频画面理解需要 ffmpeg；弹幕只有主人能发，受每日额度限制。' },
+          h(Row, { label: '视频画面理解', hint: '抽帧交给视觉模型看画面' }, f.sw('bili.visionEnabled')),
+          h(Row, { label: '抽帧数' }, f.num('bili.visionFrames', { min: 1, max: 3 })),
+          h(Row, { label: '启用弹幕' }, f.sw('bili.danmakuEnabled')),
+          h(Row, { label: '每日弹幕上限' }, f.num('bili.maxDanmakuPerDay', { min: 0, max: 100 })),
+          h(Row, { label: '截图范围', hint: '按聊天和人设查看已保存的 B 站截图' },
+            h('input', { className: 'ab-input', value: shotChat, onChange: e => { setShotChat(e.target.value); setShots(null) }, placeholder: '聊天 ID' }),
+            h('input', { className: 'ab-input', value: shotPersona, onChange: e => { setShotPersona(e.target.value); setShots(null) }, placeholder: '人格 ID' }),
+            h(Btn, { small: true, onClick: async () => { const r = await get('/bili/screenshots?' + new URLSearchParams({ chat: shotChat, persona: shotPersona })); setShots(r); if (r.ok === false) toast(r.message, 'err') } }, '查看截图')),
+          shots?.items ? h('div', { className: 'ab-flex', style: { flexWrap: 'wrap' } }, ...shots.items.map(item => h('figure', { key: item.id }, h('img', { src: API + '/bili/screenshot/image?' + new URLSearchParams({ id: item.id, chat: shotChat, persona: shotPersona }), alt: 'B站截图 ' + item.bvid, style: { width: 150 } }), h('figcaption', null, item.bvid, h('div', { className: 'ab-small ab-muted' }, screenshotSource(item.source)), h('div', { className: 'ab-small ab-muted' }, item.id))))) : null),
         h(Card, { title: '评论、回复和分享', desc: '评论和回复要登录。试运行开着时只记日志不发。' },
           h(Row, { label: '主人 B 站昵称', hint: '可选；用于解析评论中的 @主人，不能用 QQ 称呼代替。' }, f.text('bili.ownerName', { placeholder:'留空则不解析 @主人' })),
           h(Row, { label: '主人 B 站 MID', hint: '可选；填写时请与上面的昵称对应。留空时只接受唯一的精确昵称匹配。' }, f.text('bili.ownerMid', { placeholder:'数字 MID，可留空' })),
@@ -3706,7 +3749,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const qqOk = /^\d{5,11}$/.test(draft.botQQ || '') && /^\d{5,11}$/.test(draft.ownerQQ || '') && draft.botQQ !== draft.ownerQQ
       const canNext = [qqOk, sl.installed, sl.running && sl.consented, conn && login && login.uin === st.config.botQQ, true][step]
       const next = async () => {
-        if (step === 0 || step === 1) await save({ ...draft, enabled: true })
+        if (step === 0 || step === 1) {
+          const saved = await save({ ...draft, enabled: true })
+          if (saved?.ok === false) return
+        }
         if (step === 3) {} // 已连上
         go(Math.min(step + 1, WIZ_STEPS.length - 1))
         reload()
@@ -3757,7 +3803,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       ][step]
       return h('div', { className: 'ab-card', style: { padding: '20px 22px' } },
         h('div', { className: 'ab-flex', style: { marginBottom: 6 } }, h('h3', { style: { margin: 0, fontSize: 16 } }, '设置向导'), h('span', { className: 'ab-muted ab-small' }, '第 ' + (step + 1) + ' / ' + WIZ_STEPS.length + ' 步 · ' + WIZ_STEPS[step]), h('div', { className: 'ab-spacer' }),
-          st.config.setupDone && onClose ? h(Btn, { small: true, kind: 'ghost', onClick: onClose }, '关闭向导') : null),
+          st.config.setupDone && onClose ? h(Btn, { small: true, kind: 'ghost', onClick: onClose }, '关闭向导') : null,
+          !st.config.setupDone && onClose ? h(Btn, { small: true, kind: 'ghost', onClick: onClose }, '先跳过，稍后设置') : null),
         h('div', { className: 'ab-wiz-bar' }, WIZ_STEPS.map((s, i) => h('button', { key: s, type: 'button', className: cx('seg', i < step && 'done', i === step && 'on'), onClick: () => i <= step && go(i), title: s }, h('span', null, s)))),
         h('div', { style: { minHeight: 220, marginTop: 14 } }, body),
         h('div', { className: 'ab-flex', style: { marginTop: 16, borderTop: '1px solid var(--ab-line)', paddingTop: 12 } },
@@ -3787,20 +3834,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         at ? '画面 ' + at : '', requested && requested !== at ? '请求 ' + requested : ''].filter(Boolean).join(' · ')
     }
 
-    function NewFeatures({ draft, setDraft, toast }) {
+    function NewFeatures({ draft, setDraft }) {
       const f = useField(draft, setDraft)
       const policies = draft.crossChatHistory || []
       const editPolicy = (i, key, value) => { const rows = clone(policies); rows[i][key] = value; setDraft(setPath(draft, 'crossChatHistory', rows)) }
-      const [target, setTarget] = useState('')
-      const [shots, setShots] = useState(null)
-      const [shotChat, setShotChat] = useState('private:' + String(draft.ownerQQ||''))
-      const [shotPersona, setShotPersona] = useState(draft.persona?.current || '')
-      const shotSeq = useRef(0)
-      useEffect(() => () => { shotSeq.current++ }, [])
       return h('div', {className:'ab-grid'},
         h(Card,{title:'聊天与附件',desc:'收到的文件只在当前聊天中按需读取；历史默认不跨聊天。'},
           h(Row,{label:'接收文本附件'},f.sw('incomingFiles.enabled')),
-          h(Row,{label:'@别人时忽略唤醒词'},f.sw('group.ignoreAtOthers')),
           h(Row,{label:'忽略发送者 QQ',hint:'每行一个 QQ 号；不会凭昵称或头衔猜测身份。'},f.list('ignoredSenderQQs',{numbers:true})),
           h(Row,{label:'新会话带入历史'},f.sw('conversation.seedHistory')),
           h(Row,{label:'宿主审批通知'},f.sw('approvalNotify'))),
@@ -3809,25 +3849,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Row,{label:'启用'},h(Switch,{on:!!p.enabled,onChange:v=>editPolicy(i,'enabled',v)})),
             ...[['account','机器人 QQ'],['persona','人格 ID'],['fromChatId','来源聊天'],['targetChatId','目标群']].map(([key,label])=>h(Row,{key,label},h('input',{className:'ab-input',value:p[key]||'',placeholder:key==='targetChatId'?'group:群号':key==='fromChatId'?'private:主人QQ':'',onChange:e=>editPolicy(i,key,e.target.value)}))),
             h(Btn,{kind:'ghost',small:true,onClick:()=>setDraft(setPath(draft,'crossChatHistory',policies.filter((_,j)=>j!==i)))},'移除'))),
-          h(Btn,{small:true,onClick:()=>setDraft(setPath(draft,'crossChatHistory',[...policies,{enabled:false,account:String(draft.botQQ||''),persona:'',fromChatId:'private:'+String(draft.ownerQQ||''),targetChatId:''}]))},'＋ 添加策略')),
-        h(Card,{title:'表情与语音'},
-          h(Row,{label:'表情收集方式'},f.select('stickers.collectMode',[{value:'auto',label:'自动'},{value:'owner',label:'仅主人'},{value:'ask',label:'由模型选择'}])),
-          h(Row,{label:'RVC 后处理'},f.sw('voice.rvc.enabled')),
-          h(Row,{label:'RVC 音色'},f.text('voice.rvc.voice')),
-          h(Row,{label:'RVC 音高'},f.num('voice.rvc.pitch',{min:-24,max:24})),
-          h(Row,{label:'转换失败'},f.select('voice.rvc.fallback',[{value:'original',label:'使用原声'},{value:'error',label:'报告失败'}])),
-          h(Row,{label:'转换超时（毫秒）'},f.num('voice.rvc.timeoutMs',{min:1000,max:300000}))),
-        h(Card,{title:'主动搭话'},
-          h(Row,{label:'目标聊天',hint:'每行 private:QQ 或 group:群号；留空只发给主人私聊。'},f.list('speakUp.targets')),
-          h(Row,{label:'模式'},f.select('speakUp.mode',[{value:'ordinary',label:'普通'},{value:'purpose',label:'目的驱动'}])),
-          h(Row,{label:'手动触发'},h('input',{className:'ab-input',value:target,placeholder:'留空为主人私聊',onChange:e=>setTarget(e.target.value)}),h(Btn,{small:true,onClick:async()=>{const r=await post('/speakup/fire',{target:target||undefined});toast(r.message || (r.ok?'已提交':'触发失败'),r.ok?'ok':'err')}},'尝试搭话'))),
-        h(Card,{title:'B 站'},
-          h(Row,{label:'启用弹幕'},f.sw('bili.danmakuEnabled')),
-          h(Row,{label:'每日弹幕上限'},f.num('bili.maxDanmakuPerDay',{min:0,max:100})),
-          h(Row,{label:'视频画面理解'},f.sw('bili.visionEnabled')),
-          h(Row,{label:'抽帧数'},f.num('bili.visionFrames',{min:1,max:3})),
-          h(Row,{label:'截图范围'},h('input',{className:'ab-input',value:shotChat,onChange:e=>{shotSeq.current++;setShotChat(e.target.value);setShots(null)},placeholder:'聊天 ID'}),h('input',{className:'ab-input',value:shotPersona,onChange:e=>{shotSeq.current++;setShotPersona(e.target.value);setShots(null)},placeholder:'人格 ID'}),h(Btn,{small:true,onClick:async()=>{const request=++shotSeq.current;const r=await get('/bili/screenshots?'+new URLSearchParams({chat:shotChat,persona:shotPersona}));if(request!==shotSeq.current)return;setShots(r);if(r.ok===false)toast(r.message,'err')}},'查看截图')),
-          shots?.items ? h('div',{className:'ab-flex',style:{flexWrap:'wrap'}},...shots.items.map(item=>h('figure',{key:item.id},h('img',{src:API+'/bili/screenshot/image?'+new URLSearchParams({id:item.id,chat:shotChat,persona:shotPersona}),alt:'B站截图 '+item.bvid,style:{width:150}}),h('figcaption',null,item.bvid,h('div',{className:'ab-small ab-muted'},screenshotSource(item.source)),h('div',{className:'ab-small ab-muted'},item.id))))) : null))
+          h(Btn,{small:true,onClick:()=>setDraft(setPath(draft,'crossChatHistory',[...policies,{enabled:false,account:String(draft.botQQ||''),persona:'',fromChatId:'private:'+String(draft.ownerQQ||''),targetChatId:''}]))},'＋ 添加策略')))
     }
 
     // ---------------- 面板主体 ----------------
@@ -3841,6 +3863,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [tab, setTab] = useState(() => { try { return localStorage.getItem('aurabot.tab') || 'overview' } catch (e) { return 'overview' } })
       const [toastMsg, setToastMsg] = useState(null)
       const [wizardOpen, setWizardOpen] = useState(false)
+      const [wizardDismissed, setWizardDismissed] = useState(false)
       const [navSearch, setNavSearch] = useState('')
       const [navGroup, setNavGroup] = useState(() => panelGroupOf(tab))
       const [personaVisited, setPersonaVisited] = useState(false)
@@ -3848,6 +3871,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const toastTimer = useRef(null)
       const dirtyRef = useRef(false)
       const saveRef = useRef(null)
+      const stateSeqRef = useRef(0)
+      const savingRef = useRef(false)
       // kind：ok / err / 不填 = 普通
       const toast = (m, kind) => {
         const text = String(m || '')
@@ -3857,13 +3882,26 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         toastTimer.current = setTimeout(() => setToastMsg(null), 3200)
       }
       const reload = useCallback(async () => {
+        if (savingRef.current) return
+        const seq = ++stateSeqRef.current
         const r = await get('/state')
+        // 保存中/之后返回的旧 /state 不能覆盖刚保存的草稿。
+        if (seq !== stateSeqRef.current || savingRef.current) return
         if (!r || r.ok === false) { setErr(r && r.message ? r.message : '读不到插件状态'); return }
         setErr('')
         setSt(r)
         if (!dirtyRef.current) setDraft(clone(r.config))
       }, [])
       useEffect(() => { reload(); const t = setInterval(reload, 5000); return () => clearInterval(t) }, [reload])
+      // localStorage 里的 tab 可能是旧版本/已删除的用户模块页面：回退到概览。
+      useEffect(() => {
+        if (!st) return
+        const known = TABS.some((t) => t.id === tab) || tab.startsWith('ext:')
+        if (!known) {
+          setTab('overview'); setNavGroup('常用')
+          try { localStorage.setItem('aurabot.tab', 'overview') } catch (e) {}
+        }
+      }, [st, tab])
       const go = (id) => { if(id === 'persona') setPersonaVisited(true); setNavGroup(panelGroupOf(id)); setNavSearch(''); setTab(id); try { localStorage.setItem('aurabot.tab', id) } catch (e) {} }
       // 标签多、一屏放不下：滚轮横着滚，选中的标签自动滚进视野
       const tabsRef = useRef(null)
@@ -3880,15 +3918,33 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const setD = (d) => setDraft(d)
       const save = async (override) => {
         const body = override || draft
+        if (!body) return { ok: false, message: '没有可保存的内容' }
         for (const p of body.imageGen?.profiles || []) for (const [key, value] of Object.entries(p.extra || {})) {
-          if (['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers'].includes(key) && value != null && (typeof value !== 'object' || Array.isArray(value))) { toast(`「${p.name}」的 ${key} 不是合法 JSON 对象，请修正后再保存`, 'err'); return }
+          if (['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers'].includes(key) && value != null && (typeof value !== 'object' || Array.isArray(value))) { toast(`「${p.name}」的 ${key} 不是合法 JSON 对象，请修正后再保存`, 'err'); return { ok: false } }
         }
-        const r = await post('/save', body)
-        if (r.ok === false) { toast(r.message || '保存失败', 'err'); return }
+        const bodyJson = JSON.stringify(body)
+        const expectedRevision = st?.configRevision ?? st?.config?.configRevision
+        savingRef.current = true
+        stateSeqRef.current++
+        let r
+        try {
+          r = await post('/save', { ...body, configRevision: expectedRevision })
+        } finally {
+          savingRef.current = false
+        }
+        if (r?.ok === false) {
+          if (r.code === 'CONFIG_CONFLICT') {
+            toast('配置已在别处修改，正在刷新最新设置', 'err')
+            reload()
+          } else toast(r.message || '保存失败', 'err')
+          return r
+        }
         dirtyRef.current = false
         setSt(r)
-        setDraft(clone(r.config))
+        // 保存请求进行期间用户继续输入的内容不能被旧响应覆盖。
+        setDraft(current => JSON.stringify(current) === bodyJson ? clone(r.config) : current)
         toast(r.message || '保存好了', 'ok')
+        return r
       }
       saveRef.current = save
       // 右上角的开关立刻生效；有没保存的改动时连同改动一起保存，不会把它们冲掉
@@ -3916,29 +3972,41 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const status = !cfg.enabled ? { cls: '', text: '休息中（总开关关着）' } : !conn ? { cls: 'err', text: 'QQ 没连上' } : cfg.dryRun ? { cls: 'warn', text: '在线 · 试运行' } : { cls: 'ok', text: '在线' }
       const persona = st.personas.find((p) => p.id === cfg.persona.current)
       const props = { st, draft, setDraft: setD, toast, reload, go, openWizard: () => setWizardOpen(true) }
-      const showWizard = !cfg.setupDone || wizardOpen
-      // 标签页：内置的按模块在不在跑决定显示；自己写的模块有设置或面板的各占一页
+      const showWizard = wizardOpen || (!cfg.setupDone && !wizardDismissed)
+      // 标签页：内置页始终保留（模块关掉时显示 ModOff）；自己写的模块有设置或面板的各占一页
       const mods = st.modules || []
       const running = (id) => { const m = mods.find((x) => x.id === id); return Boolean(m && m.running) }
       const hasUi = (m) => m.running === 'user' && !m.builtin && ((m.settings || []).length || m.panel)
       // 写了 tab 的模块嵌进那个内置标签页；没写（或写的页不存在）的单独一页
       const intoTab = (m) => Boolean(m.tab && TABS.some((t) => t.id === m.tab))
       const extTabs = mods.filter((m) => hasUi(m) && !intoTab(m)).map((m) => ({ id: 'ext:' + m.id, label: m.name, ext: m.id }))
-      const tabs = TABS.filter((t) => !TAB_MODS[t.id] || TAB_MODS[t.id].some(running))
+      // 业务模块被关掉时仍保留标签入口，避免用户找不到重新打开的入口。
+      const tabs = [...TABS]
       tabs.splice(tabs.findIndex((t) => t.id === 'logs'), 0, ...extTabs)
       const groups = PANEL_GROUPS, groupOf = panelGroupOf
       const visibleTabs = tabs.filter(t => navSearch.trim() ? t.label.toLowerCase().includes(navSearch.trim().toLowerCase()) : groupOf(t.id) === navGroup)
       const curTab = tabs.find((t) => t.id === tab) || tabs[0]
-      const body = curTab.ext ? ExtPage : {
+      const pageOf = {
         overview: Overview, 'new-features': NewFeatures, connect: Connect, persona: Persona, access: Access, group: Group, model: Model, voice: Voice,
         stickers: Stickers, imagegen: ImageGen, search: SearchPanel, speakup: SpeakUp, mood: Mood, memory: ScopedMemory, retrieval: RetrievalPanel, 'media-memory': MediaMemory, learning: Learning, tasks: Tasks, song: Song, bili: Bili, local: LocalApi, modules: Modules, 'token-meter': TokenDashboard, diagnostics: Diagnostics, logs: Logs,
       }[curTab.id] || Overview
-      // 哪些标签有没保存的改动
-      const TAB_KEYS = { 'new-features': ['incomingFiles','group','ignoredSenderQQs','conversation','approvalNotify','crossChatHistory','stickers','voice','speakUp','bili'], connect: ['snowluma', 'botQQ'], access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'], group: ['group', 'merge', 'participation', 'conversation'], model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'], voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], search: ['search'], speakup: ['speakUp'], mood: ['mood'], memory: ['memory'], retrieval:['retrieval'], 'media-memory':['mediaMemory'], learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], local: ['local'] }
+      const moduleOff = (id) => Boolean(TAB_MODS[id]) && !TAB_MODS[id].some(running)
+      const body = curTab.ext ? ExtPage : moduleOff(curTab.id) ? ModOff : pageOf
+      // 哪些标签有没保存的改动：按叶子路径比较，避免整对象映射（voice/stickers/bili）互相点亮。
+      const TAB_KEYS = {
+        'new-features': ['incomingFiles.enabled','ignoredSenderQQs','conversation.seedHistory','approvalNotify','crossChatHistory'],
+        connect: ['snowluma', 'botQQ'],
+        access: ['ownerQQ', 'ownerName', 'ownerLevel', 'longTasks', 'profilePerms', 'allow'],
+        group: ['group', 'merge', 'participation', 'conversation', 'security', 'files'],
+        model: ['model', 'chatModels', 'roles', 'toolCallsPerTurn'],
+        voice: ['voice'], stickers: ['stickers'], imagegen: ['imageGen'], search: ['search'], speakup: ['speakUp'],
+        mood: ['mood'], memory: ['memory'], retrieval: ['retrieval'], 'media-memory': ['mediaMemory'],
+        learning: ['learning'], tasks: ['tasks'], song: ['song'], bili: ['bili'], local: ['local'],
+      }
       const tabDirty = (id) => {
         if (!dirty) return false
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((cfg.ext || {})[k]) }
-        return (TAB_KEYS[id] || []).some((k) => JSON.stringify(draft[k]) !== JSON.stringify(cfg[k]))
+        return (TAB_KEYS[id] || []).some((k) => JSON.stringify(getPath(draft, k)) !== JSON.stringify(getPath(cfg, k)))
       }
       return h('div', { className: 'ab-root' },
         h('div', { className: 'ab-wrap' },
@@ -3954,10 +4022,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-hero-side' },
               h('div', { className: 'ab-switch-row' }, h('span', null, '总开关'), h(Switch, { on: cfg.enabled, onChange: (v) => quickToggle('enabled', v) })),
               h('div', { className: 'ab-switch-row' }, h('span', { className: 'ab-muted' }, '试运行'), h(Switch, { on: cfg.dryRun, onChange: (v) => quickToggle('dryRun', v), title: '开着时只写日志，不真的发到 QQ' })))),
-          showWizard ? h(Wizard, { st, draft, setDraft: setD, save, toast, reload, onClose: () => setWizardOpen(false) }) : null,
+          showWizard ? h(Wizard, { st, draft, setDraft: setD, save, toast, reload, onClose: () => { setWizardDismissed(true); setWizardOpen(false) } }) : null,
           showWizard ? null : h('div', {className:'ab-grid',style:{gap:6,marginTop:16}},
             h('div',{className:'ab-flex',style:{flexWrap:'wrap',gap:6}},
-              ...[...Object.keys(groups),...(extTabs.length?['扩展']:[])].map(g=>h('button',{key:g,type:'button',className:cx('ab-tab',navGroup===g&&!navSearch&&'on'),onClick:()=>{setNavGroup(g);setNavSearch('')}},g)),
+              ...[...Object.keys(groups),...(extTabs.length?['扩展']:[])].map(g=>h('button',{key:g,type:'button',className:cx('ab-navgroup',navGroup===g&&!navSearch&&'on'),onClick:()=>{ const first=tabs.find(t=>groupOf(t.id)===g); if(first) go(first.id); else { setNavGroup(g); setNavSearch('') } }},g)),
               h('input',{ref:navSearchRef,className:'ab-input',placeholder:'搜索页面（Alt+K）',value:navSearch,onChange:e=>setNavSearch(e.target.value),'aria-label':'搜索页面'})),
             h('div', { className: 'ab-tabs', role: 'tablist', ref: tabsRef, style:{margin:'0 0 10px'} }, visibleTabs.map((t) => {
               const flag = t.flag === 'group' ? cfg.allow.groups.length > 0 : t.flag ? getPath(cfg, t.flag) : null
@@ -3965,7 +4033,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 tabDirty(t.id) ? h('i', { className: 'dirty', title: '有没保存的改动' }) : t.flag ? h('i', { className: cx('ab-dot', flag && 'ok'), title: flag ? '开着' : '关着' }) : null)
             }))),
           showWizard ? null : h('div',{style:{display:curTab.id==='persona'?'':'none'}},(personaVisited || curTab.id==='persona') ? h(TabBoundary,{onHome:()=>go('overview')},h(Persona,props)) : null),
-          showWizard || curTab.id==='persona' ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, mod: curTab.ext })),
+          showWizard || curTab.id==='persona' ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, name: curTab.label, mod: curTab.ext })),
           showWizard || curTab.ext ? null : mods.filter((m) => hasUi(m) && m.tab === curTab.id).map((m) => h('div', { key: 'embed-' + m.id, style: { marginTop: 14 } }, h(ExtPage, { ...props, mod: m.id, embedded: true }))),
           dirty && !showWizard ? h('div', { className: 'ab-savebar' }, h('span', { className: 'msg' }, '有改动还没保存'),
             h('span', { className: 'ab-muted ab-small' }, h('span', { className: 'ab-kbd' }, 'Ctrl'), ' + ', h('span', { className: 'ab-kbd' }, 'S')),

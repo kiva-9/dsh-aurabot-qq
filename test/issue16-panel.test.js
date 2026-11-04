@@ -16,7 +16,9 @@ test('settings panel renders scoped controls and edits policy without sending re
   runInNewContext(code+'\nglobalThis.render=NewFeatures',ctx)
   const tree=ctx.render({draft,setDraft:v=>{draft=v},toast:()=>{}})
   const walk=n=>{if(!n||typeof n!=='object')return;nodes.push(n);(n.children||[]).forEach(walk)};walk(tree)
-  for(const path of ['incomingFiles.enabled','group.ignoreAtOthers','ignoredSenderQQs','conversation.seedHistory','approvalNotify','stickers.collectMode','voice.rvc.enabled','speakUp.targets','speakUp.mode','bili.visionEnabled','bili.danmakuEnabled']) assert.ok(fields.includes(path),path)
+  for(const path of ['incomingFiles.enabled','ignoredSenderQQs','conversation.seedHistory','approvalNotify']) assert.ok(fields.includes(path),path)
+  // 这些设置已经搬回各自功能页，保证仍然有唯一可达入口。
+  for(const path of ['group.ignoreAtOthers','stickers.collectMode','voice.rvc.enabled','speakUp.targets','speakUp.mode','bili.visionEnabled','bili.danmakuEnabled']) assert.ok(source.includes("'"+path+"'"),path)
   assert.deepEqual(calls,[])
   const add=nodes.find(n=>n.type==='Btn'&&n.children.includes('＋ 添加策略'));add.props.onClick()
   assert.equal(draft.crossChatHistory.length,1);assert.equal(draft.crossChatHistory[0].enabled,false)

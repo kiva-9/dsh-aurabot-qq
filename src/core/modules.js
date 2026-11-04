@@ -325,8 +325,33 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     done.then(() => rec.pending.delete(done))
     return done
   }
-  async function drainPending(rec) {
-    while (rec.pending.size) await Promise.allSettled([...rec.pending])
+  async function drainPending(rec, timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs
+    while (rec.pending.size) {
+      const left = deadline - Date.now()
+      if (left <= 0) {
+        log.warn(`模块「${rec.id}」清理超时，仍有 ${rec.pending.size} 个异步清理未结束，已放弃等待`)
+        rec.pending.clear()
+        break
+      }
+      const timeout = new Promise(resolve => setTimeout(() => resolve('timeout'), left))
+      const result = await Promise.race([Promise.allSettled([...rec.pending]).then(() => 'settled'), timeout])
+      if (result === 'timeout') {
+        log.warn(`模块「${rec.id}」清理超时，仍有 ${rec.pending.size} 个异步清理未结束，已放弃等待`)
+        rec.pending.clear()
+        break
+      }
+    }
+  }
+
+  function withTimeout(promise, ms, message) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Object.assign(new Error(message), { code: 'SETUP_TIMEOUT' })), ms)
+      Promise.resolve(promise).then(
+        value => { clearTimeout(timer); resolve(value) },
+        error => { clearTimeout(timer); reject(error) },
+      )
+    })
   }
 
   function note(id, label, error) {
@@ -367,7 +392,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     try {
       const api = makeApi(id, source, rec)
       const r = def.setup(api)
-      const setup = Promise.resolve(r)
+      const setup = withTimeout(Promise.resolve(r), 15_000, `模块「${def.name || id}」setup 超过 15 秒未返回`)
       rec.pending.add(setup)
       try { rec.exports = (await setup) ?? {} } finally { rec.pending.delete(setup) }
       if (disposed || rec.stopped || live.get(id) !== rec || !isEnabled(id) || (source === 'user' && !isUserOn())) {

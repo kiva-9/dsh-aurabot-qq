@@ -1,6 +1,7 @@
 // 插件配置：默认值 + 归一化 + 读写。配置文件 ~/.dsh/plugins-data/aurabot/config.json
 
-import { dataDir, readJson, writeJson } from './store.js'
+import { copyFileSync, existsSync } from 'node:fs'
+import { dataDir, readJsonStrict, writeJson } from './store.js'
 import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
@@ -15,6 +16,7 @@ import { RETRIEVAL_DEFAULTS, RETRIEVAL_SECRET_FIELDS, normalizeRetrievalConfig, 
 export const DEFAULTS = {
   schemaVersion: 2,
   policyRevision: 0,
+  configRevision: 0, // 面板保存的乐观锁版本；每次成功写入 +1
   enabled: false, // 总开关：关着一句都不发
   dryRun: true, // 试运行：只记日志不真发
   setupDone: false, // 首次使用向导走完了没有
@@ -209,12 +211,24 @@ const hhmm = (v, d) => (/^\d{1,2}:\d{2}$/.test(String(v)) ? String(v) : d)
 export function normalize(raw) {
   if (Number(raw?.schemaVersion) > 2) throw new Error('配置版本高于当前插件，请先升级插件')
   const c = deepMerge(DEFAULTS, raw)
+  // JSON 里的 null/数组/字符串 section 不能让 normalize 在后续字段上崩溃。
+  // 对缺失、null、错误类型的 section 统一回落到默认对象，再逐字段归一化。
+  for (const key of ['profilePerms', 'files', 'incomingFiles', 'security', 'conversation', 'allow', 'snowluma',
+    'model', 'roles', 'chatModels', 'merge', 'imageGen', 'persona', 'group', 'participation', 'mediaMemory',
+    'voice', 'stickers', 'local', 'bili', 'speakUp', 'mood', 'learning', 'memory', 'search', 'retrieval',
+    'song', 'tabs', 'modules', 'ext', 'bridge']) {
+    if (!isObj(c[key])) c[key] = structuredClone(DEFAULTS[key])
+  }
+  for (const [parent, key] of [['voice', 'httpApi'], ['voice', 'rvc'], ['imageGen', 'quota'], ['imageGen', 'routing'], ['group', 'overrides'], ['memory', 'extraction']]) {
+    if (!isObj(c[parent][key])) c[parent][key] = structuredClone(DEFAULTS[parent][key])
+  }
   c.enabled = bool(c.enabled, false)
   c.dryRun = bool(c.dryRun, true)
   c.botQQ = qq(c.botQQ)
   c.ownerQQ = qq(c.ownerQQ)
   // 视觉能力：auto = 问 DSH 的模型元数据；on / off = 主人手动声明（覆盖元数据）
   c.model.vision = c.model.vision === 'on' || c.model.vision === 'off' ? c.model.vision : 'auto'
+  c.configRevision = Math.max(0, Math.floor(Number(c.configRevision) || 0))
   for (const k of Object.keys(DEFAULTS.roles)) {
     const x = isObj(c.roles[k]) ? c.roles[k] : {}
     c.roles[k] = { provider: String(x.provider || ''), model: String(x.model || ''), reasoningEffort: String(x.reasoningEffort || '') }
@@ -251,6 +265,9 @@ export function normalize(raw) {
   if (!Array.isArray(g.quietHours) || g.quietHours.length !== 2) g.quietHours = DEFAULT_GROUP_POLICY.quietHours
   g.quietHours = g.quietHours.map((h) => num(h, 0, 0, 23))
   if (!isObj(g.overrides)) g.overrides = {}
+  c.voice.enabled = bool(c.voice.enabled, true)
+  c.stickers.enabled = bool(c.stickers.enabled, true)
+  c.speakUp.enabled = bool(c.speakUp.enabled, true)
   c.voice.autoChance = num(c.voice.autoChance, 0.15, 0, 1)
   c.voice.groupAutoChance = num(c.voice.groupAutoChance, 0, 0, 1)
   c.voice.autoMaxChars = num(c.voice.autoMaxChars, 80, 1, 500)
@@ -512,7 +529,18 @@ const FILE = () => dataDir('config.json')
 export const OPT_IN_ON_UPDATE = ['bili']
 
 export function loadConfig() {
-  const raw = readJson(FILE(), {})
+  const { value: raw, error } = readJsonStrict(FILE(), {})
+  if (error && error.code !== 'ENOENT') {
+    // 不能静默回默认值：保留坏文件证据，明确告诉宿主/面板配置无法加载。
+    let backup = ''
+    try {
+      if (existsSync(FILE())) {
+        backup = `${FILE()}.bad-${Date.now()}`
+        copyFileSync(FILE(), backup)
+      }
+    } catch (copyError) {}
+    throw Object.assign(new Error(`配置文件无法读取或不是合法 JSON${backup ? '，已备份到 ' + backup : ''}：${error.message}`), { code: 'CONFIG_UNREADABLE', backup })
+  }
   // 老配置（向导上线前就填好了两个号）直接算向导已完成
   if (raw && raw.setupDone === undefined && raw.botQQ && raw.ownerQQ) raw.setupDone = true
   // 更新插件后新增的、会公开发东西的功能：老用户先关着，等他们自己在面板里打开（新安装照常默认开）
@@ -527,6 +555,19 @@ export function saveConfig(cfg) {
 }
 
 /** 给面板看的版本：密码 / token 不回传原文，只告诉有没有填。 */
+const SECRET_NAME_RE = /(?:api[_-]?key|access[_-]?token|token|password|passwd|secret|authorization|cookie|sessdata|bili_?jct)/i
+function maskSecretFields(value) {
+  if (!value || typeof value !== 'object') return value
+  if (Array.isArray(value)) { for (const item of value) maskSecretFields(item); return value }
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === 'string' && SECRET_NAME_RE.test(key)) {
+      value[`${key}Set`] = value[`${key}Set`] === true || Boolean(child)
+      value[key] = ''
+    } else if (child && typeof child === 'object') maskSecretFields(child)
+  }
+  return value
+}
+
 export function publicConfig(cfg) {
   const c = structuredClone(cfg)
   for (const [g, k] of HINTED) c[g][`${k}Hint`] = c[g][k] ? '…' + String(c[g][k]).slice(-4) : ''
@@ -537,13 +578,32 @@ export function publicConfig(cfg) {
     p[`${k}Set`] = Boolean(p[k])
     p[k] = ''
   }
+  // 未启动/被安全模式跳过的用户模块也要脱敏；所有扩展设置按字段名兜底掩码。
+  maskSecretFields(c.ext)
   // 生图服务的密钥在数组里：同样只告诉面板有没有填
-  for (const p of c.imageGen?.profiles || []) { p.apiKeySet = Boolean(p.apiKey); p.apiKey = '' }
+  for (const p of c.imageGen?.profiles || []) {
+    p.apiKeySet = Boolean(p.apiKey); p.apiKey = ''
+    // extra 里可能是一整份 ComfyUI workflow，不能递归按字段名脱敏，否则保存会改坏工作流。
+    if (p.extra && typeof p.extra.apiKey === 'string') { p.extra.apiKeySet = Boolean(p.extra.apiKey); p.extra.apiKey = '' }
+  }
   hideHeaders(c)
   return c
 }
 
 /** 面板保存时：没改的密码字段（空串）保留原值。 */
+/** 面板回传的扩展设置里，空串密钥表示“没改”；未启动模块的密钥也必须按原值恢复。 */
+function restoreExtSecrets(current, next) {
+  if (!isObj(current) || !isObj(next)) return
+  for (const [key, value] of Object.entries(next)) {
+    if (key.endsWith('Set') || key.endsWith('Hint')) { delete next[key]; continue }
+    if (typeof value === 'string' && SECRET_NAME_RE.test(key)) {
+      if (value === '' && typeof current[key] === 'string') next[key] = current[key]
+      continue
+    }
+    if (isObj(value) && isObj(current[key])) restoreExtSecrets(current[key], value)
+  }
+}
+
 export function mergeFromPanel(current, incoming) {
   if (incoming?.stickers?.libraryScope !== undefined && !['account', 'chat'].includes(incoming.stickers.libraryScope)) throw new Error('表情图库范围只能是 account 或 chat')
   if(incoming?.retrieval?.roles!==undefined) {
@@ -589,6 +649,7 @@ export function mergeFromPanel(current, incoming) {
     }
   }
   const next = deepMerge(current, incoming || {})
+  if (isObj(next.ext) && isObj(current.ext)) restoreExtSecrets(current.ext, next.ext)
   if(incoming?.retrieval?.roles!==undefined)next.retrieval.roles=structuredClone(incoming.retrieval.roles)
   for (const path of allSecrets()) {
     const v = getAt(incoming || {}, path)

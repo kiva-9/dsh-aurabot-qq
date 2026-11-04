@@ -132,6 +132,18 @@ function ffmpegAvailable() {
   try { execFileSync('ffmpeg', ['-version'], { shell: false, windowsHide: true, timeout: 5000, stdio: ['ignore', 'ignore', 'ignore'] }); return true } catch { return false }
 }
 const real = ffmpegAvailable()
+const ffmpegHasEncoder = (codec) => {
+  if (!real) return false
+  try { return execFileSync('ffmpeg', ['-hide_banner', '-encoders'], { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 }).includes(codec) } catch { return false }
+}
+const ffmpegHasFormat = (name) => {
+  if (!real) return false
+  try { return new RegExp('\\b' + name + '\\b').test(execFileSync('ffmpeg', ['-hide_banner', '-formats'], { encoding: 'utf8', timeout: 5000, maxBuffer: 1024 * 1024 })) } catch { return false }
+}
+const frameFormats = [
+  ['image/png', 'apng', 'apng', 'apng'],
+  ['image/webp', 'libwebp_anim', 'webp', 'webp_anim'],
+].filter(([, codec, , demuxer]) => ffmpegHasEncoder(codec) && ffmpegHasFormat(demuxer))
 test('本机真实ffmpeg生成横向GIF，经管道有界取样且包含不同时间的画面', { skip: !real, timeout: 30000 }, async () => {
   const bytes = execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=5:duration=2',
     '-threads', '1', '-filter_threads', '1', '-vf', 'format=rgb8', '-frames:v', '10', '-f', 'gif', 'pipe:1'],
@@ -144,10 +156,10 @@ test('本机真实ffmpeg生成横向GIF，经管道有界取样且包含不同�
   assert.equal(new Set(r.frames.map(f => createHash('sha256').update(f.bytes).digest('hex'))).size, 6)
 })
 
-test('本机真实APNG与动画WebP按声明帧序取样；临时生成文件及时清除', { skip: !real, timeout: 30000 }, async () => {
+test('本机真实APNG与动画WebP按声明帧序取样；临时生成文件及时清除', { skip: !real || !frameFormats.length, timeout: 30000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'aurabot-sticker-frames-'))
   try {
-    for (const [mime, codec, format] of [['image/png', 'apng', 'apng'], ['image/webp', 'libwebp_anim', 'webp']]) {
+    for (const [mime, codec, format] of frameFormats) {
       const file = join(root, 'animation.' + format)
       execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=80x48:rate=4:duration=1',
         '-threads', '1', '-filter_threads', '1', '-c:v', codec, '-frames:v', '4', '-f', format, file], { shell: false, windowsHide: true, timeout: 12000, maxBuffer: 100000 })
