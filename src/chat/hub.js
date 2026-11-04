@@ -133,6 +133,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   const groupEngaged = new Map() // groupId → 加入话题到什么时候（毫秒）
   const ENGAGE_MS = 3 * 60_000
   const groupNames = new Map()
+  const groupNameMisses = new Map() // groupId → 上次拉群资料失败的时间（负缓存，别每批都等 30 秒）
   const followups = createFollowupTracker({ windowMs: () => (getConfig().conversation?.followupSeconds || 90) * 1000 })
   const sentIds = new Map() // [account, chatId, platformMsgId] → 发送确认时间
   const sentKey = (account, chatId, id) => JSON.stringify([String(account), chatId, String(id)])
@@ -246,19 +247,23 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     const level = chat.kind === 'system' ? (chat.noTools ? 'chat' : 'social') : levelFor(cfg, chat)
     const preset = presetFor(level, cfg)
     const entry = map().chats[chat.chatId]
-    let sid = entry && entry.preset === preset && entry.level === level ? entry.sessionId : ''
+    // 档位 / 预设变了就是换了一个会话身份：旧会话必须完整拆掉（代次、工具、映射、事件路由），
+    // 不能只新建一个 session，否则旧回合的迟到事件和回复会串到新会话。
+    const identityChanged = Boolean(entry && (entry.preset !== preset || entry.level !== level))
+    let sid = entry && !identityChanged ? entry.sessionId : ''
+    if (identityChanged) {
+      log.info(`${chat.chatId}：档位 / 预设变了（${entry.level}/${entry.preset} → ${level}/${preset}），拆掉旧会话`)
+      teardownSession(chat.chatId, entry.sessionId, '档位或预设变化')
+      const m0 = map(); delete m0.chats[chat.chatId]; saveMap(m0)
+      sid = ''
+    }
     // Old desktop context remains in accepted history after tool restrictions.
     const history = cfg.conversation || {}
     if (sid && level !== 'full' && !running.has(chat.chatId) && (entry.scopeVersion !== SOCIAL_SCOPE_VERSION ||
       (entry.turns || 0) >= (history.maxTurns || 48) || (entry.contextTokens || 0) >= (history.maxContextTokens || 48000) ||
       Date.now() - entry.createdAt >= (history.maxAgeMinutes || 480) * 60000)) {
-      const old = dsh.agents?.get?.(sid) || dsh.agents?.get?.('session-' + sid)
-      old?.cancel?.({ kind: 'hook', reason: '群会话隔离或历史预算轮换' })
-      unmount(sessionKey(sid))
-      turnState.get(sessionKey(sid))?.controller?.abort()
-      turnState.delete(sessionKey(sid)); sessionToChat.delete(sessionKey(sid))
-      const reg = dsh.workspaceRegistry || dsh.get?.('workspaceRegistry')
-      try { reg?.archiveSession?.(sid) } catch {}
+      teardownSession(chat.chatId, sid, '群会话隔离或历史预算轮换')
+      const m0 = map(); delete m0.chats[chat.chatId]; saveMap(m0)
       log.info(`${chat.chatId}：轮换群会话，保留聊天证据与任务账本`)
       sid = ''
     }
@@ -458,12 +463,29 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
 
   /** 真正发到 QQ。返回网关结果；按设置不发时返回 null；网关出错时抛出（带 outcome，outbox 据此决定重不重发）。 */
-  async function transmit(chatId, message, note, { force = false } = {}) {
+  async function transmit(chatId, message, note, { force = false, epoch } = {}) {
     if (disposed) return null
     const permit = message[verifiedSticker]
     const approvedSticker = permit && JSON.stringify(permit.segment)
     const tgt = targetOf(chatId)
     if (!tgt) return null
+    const cfg = getConfig()
+    // 发送策略在 hooks.send 之前就定下来：试运行永远不发（force 也不能绕过），
+    // force 只允许在非试运行时绕过总开关（命令回执的语义）。
+    if (cfg.dryRun) {
+      log.info(`试运行（没真发）→ ${chatId}：${note}`)
+      return null
+    }
+    if (!cfg.enabled && !force) {
+      log.info(`总开关关着，没发 → ${chatId}：${note}`)
+      return null
+    }
+    // 普通消息也要在最后一个 await 之后核对代次与取消信号（sending 段的迟到发送）。
+    if (epoch !== undefined && epoch !== null && Number(epoch) !== storage.epochs.current(chatId))
+      throw Object.assign(new Error('会话代次已变，取消发送'), { outcome: 'rejected' })
+    const liveGuard = deliveryGuard.getStore()
+    if (liveGuard?.signal?.aborted)
+      throw Object.assign(new Error('当前回合已取消'), { outcome: 'rejected' })
     // 扩展模块最后改一次（加签名、过滤敏感词、转发到别处……）；返回 null 就不发
     if (hooks?.send) {
       try {
@@ -475,7 +497,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
     }
     if (disposed) return null
-    const cfg = getConfig()
     const account = String(cfg.botQQ)
     if (permit) {
       // hooks.send may await, so check again at the last boundary before QQ.
@@ -495,15 +516,11 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       message = message.filter(s => !isStickerSegment(s))
       if (!message.some(s => s?.type !== 'reply')) return null
     }
-    if (force) {}
-    else if (!cfg.enabled) {
-      log.info(`总开关关着，没发 → ${chatId}：${note}`)
-      return null
-    }
-    else if (cfg.dryRun) {
-      log.info(`试运行（没真发）→ ${chatId}：${note}`)
-      return null
-    }
+    if (disposed) return null
+    if (epoch !== undefined && epoch !== null && Number(epoch) !== storage.epochs.current(chatId))
+      throw Object.assign(new Error('会话代次已变，取消发送'), { outcome: 'rejected' })
+    if (deliveryGuard.getStore()?.signal?.aborted)
+      throw Object.assign(new Error('当前回合已取消'), { outcome: 'rejected' })
     const action = tgt.kind === 'group' ? 'send_group_msg' : 'send_private_msg'
     if (!canSend()) throw Object.assign(new Error('机器人账号尚未核对通过，暂不发送'), { outcome: 'not_sent' })
     const params = tgt.kind === 'group' ? { group_id: Number(tgt.id), message } : { user_id: Number(tgt.id), message }
@@ -571,11 +588,36 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     return out
   }
 
-  const outbox = createOutbox({ storage, send: (chatId, message, info) => transmit(chatId, message, info.note, { force: info.force }), resolve: resolveMessage, log })
+  const outbox = createOutbox({ storage, send: (chatId, message, info) => transmit(chatId, message, info.note, { force: info.force, epoch: info.epoch }), resolve: resolveMessage, log })
+
+  /**
+   * 重启恢复普通会话回复：启动时没有旧的 AbortController，只按仍然可核实的事实放行——
+   * 账号、会话代次、总开关 / 试运行、请求状态与来源账号。job 批次（image: / image-notice:）
+   * 留给各自的 job worker，别在这里当普通回复取消掉。
+   */
+  function recoverOutbox(options = {}) {
+    if (typeof options.shouldSend === 'function') return outbox.recover(options)
+    const cfg = getConfig(), account = String(cfg.botQQ || '')
+    const safeGuard = (row) => {
+      if (disposed || !cfg.enabled || cfg.dryRun || !canSend()) return false
+      if (!account || (row.account && String(row.account) !== account)) return false
+      if (row.batchKind && row.batchKind !== 'sessionReply') return false
+      if (Number(row.epoch) !== storage.epochs.current(row.chatId)) return false
+      if (row.requestId) {
+        const request = storage.requests.get(row.requestId)
+        if (!request || request.chatId !== row.chatId || Number(request.epoch) !== Number(row.epoch)) return false
+        if (['canceled', 'cancel_requested', 'closed', 'expired', 'answered'].includes(request.state)) return false
+        const sources = request.sourceMessageIds.map((id) => storage.messages.get(id)).filter(Boolean)
+        if (sources.some((m) => m.account !== account || m.chatId !== row.chatId)) return false
+      }
+      return true
+    }
+    return outbox.recover({ ...options, batchKind: 'sessionReply', shouldSend: safeGuard })
+  }
 
   /** 发一组 outbox 段；模拟测试里直接截下来，不落库。返回 outbox 的汇总和每段的结果。 */
   function sendItems(...args) { return disposed ? Promise.resolve({ delivered: 0, failed: 0, unknown: 0, skipped: 0, canceled: 1, pending: 0, messageIds: [], rows: [] }) : track(sendItemsNow)(...args) }
-  async function sendItemsNow(chatId, items, { epoch, requestId, batchId: stableBatchId, shouldSend, signal, retry = false } = {}) {
+  async function sendItemsNow(chatId, items, { epoch, requestId, batchId: stableBatchId, shouldSend, signal, retry = false, account, batchKind } = {}) {
     const cap = captureStore.getStore()
     if (cap) {
       const rows = []
@@ -585,7 +627,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }
       return { delivered: items.length, failed: 0, unknown: 0, canceled: 0, skipped: 0, messageIds: rows.map((r) => r.platformMsgId), rows }
     }
-    const batchId = outbox.enqueue({ batchId: stableBatchId, chatId, requestId, epoch, items, requiresGuard: typeof shouldSend === 'function' })
+    const kind = batchKind || (stableBatchId && /^(?:image|image-notice):/.test(String(stableBatchId)) ? 'job' : 'sessionReply')
+    const batchId = outbox.enqueue({ batchId: stableBatchId, chatId, requestId, epoch, items, requiresGuard: typeof shouldSend === 'function',
+      batchKind: kind, account: account ?? String(getConfig().botQQ) })
     const sum = await deliveryGuard.run({ shouldSend, signal }, () => retry ? outbox.retry(batchId, { shouldSend }) : outbox.deliver(batchId, { shouldSend }))
     return { ...sum, rows: outbox.rows(batchId) }
   }
@@ -924,7 +968,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       } : opts.shouldSend
       let res
       if (stickerGroup) stickerAttempted = true
-      try { res = await sendItems(chatId, g, { epoch, requestId: opts.requestId, shouldSend: stickerGuard, signal }) }
+      try { res = await sendItems(chatId, g, { epoch, requestId: opts.requestId, shouldSend: stickerGuard, signal, account: accountId }) }
       catch (error) {
         if (!stickerGroup) throw error
         // Outbox may have reached QQ before a local persistence error.
@@ -948,7 +992,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         // 语音条网关不收：这一段改发文字
         if (it.kind === 'voice' && row.state === 'failed' && it.fallbackText) {
           log.warn('语音没发出去，改发文字')
-          const fallback = await sendItems(chatId, [textItem(it.fallbackText)], { epoch: opts.epoch, requestId: opts.requestId, shouldSend: opts.shouldSend })
+          const fallback = await sendItems(chatId, [textItem(it.fallbackText)], { epoch, requestId: opts.requestId, shouldSend: opts.shouldSend, account: accountId })
           deliveries.push(fallback)
           for (const row of fallback.rows) if (row.state === 'delivered') confirmed.push({ ...textItem(it.fallbackText), platformMsgId: row.platformMsgId })
         }
@@ -958,11 +1002,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (missedMentions.length) log.debug(`${chatId}：有 @ 没对上：${missedMentions.join('、')}`)
     if (!confirmed.length) return { confirmed: false, complete: false, deliveries, missedMentions }
     if (inGroup) {
-      const gid = chatId.slice(6)
-      const said = (groupSaid.get(gid) || []).filter((t) => Date.now() - t < 3600_000)
-      said.push(Date.now())
+      const gid = chatId.slice(6), at = Date.now()
+      const said = (groupSaid.get(gid) || []).filter((t) => at - t < 3600_000)
+      said.push(at)
       groupSaid.set(gid, said)
-      groupEngaged.set(gid, Date.now() + ENGAGE_MS) // 在群里说了话 = 加入了话题
+      groupEngaged.set(gid, at + ENGAGE_MS) // 在群里说了话 = 加入了话题
+      // 确认发出的群消息都计入「她主动开口」的时间：group-policy 的 cooldown / maxPerHour 不再读空数组。
+      const interjects = (groupInterjects.get(gid) || []).filter((t) => at - t < 3600_000)
+      interjects.push(at)
+      groupInterjects.set(gid, interjects)
     }
     const deliveredText = confirmed.map(i => i.kind === 'text' ? plainOf(i.message) : i.kind === 'voice' ? i.fallbackText || '[语音]' : `[${i.kind}]`).join('\n')
     // Only confirmed gateway receipts are history; generated model text and
@@ -1030,7 +1078,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         st.controller?.abort(); st.controller = new AbortController(); st.account = String(getConfig().botQQ)
         st.epoch = storage.epochs.current(chatId); st.turnId = randomUUID(); st.requests = []; st.stickerSuggestions = []
         st.stickerTargetEpochs = new Map([[chatId, st.epoch]]); st.toolCalls = 0; st.plannerControl = null; st.plannerContext = null
-        running.add(chatId)
+        running.set(chatId, st.turnId); runningToken.set(chatId, scheduler.tokenOf(chatId) ?? null)
       }
       st.activeTurn=event.data?.turn;return
     }
@@ -1068,9 +1116,15 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       return
     }
     if (event.type === 'turn/end') {
-      running.delete(chatId)
-      stopTyping(key)
       const d = event.data || {}
+      // 迟到 / 串台的 turn/end 不能释放新回合：只有当前登记的 turnId 才能放开。
+      const liveTurn = running.get(chatId)
+      if (liveTurn !== undefined && st.turnId !== undefined && liveTurn !== st.turnId) {
+        log.debug(`${chatId}：迟到的 turn/end（${st.turnId} ≠ ${liveTurn}），忽略`)
+        return
+      }
+      if (liveTurn === undefined || liveTurn === st.turnId) { running.delete(chatId); runningToken.delete(chatId) }
+      stopTyping(key)
       const completed = d.reason && d.reason.kind === 'completed'
       const text = st.lastTurn === d.turn ? st.text : ''
       const sys = st.system
@@ -1096,7 +1150,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       st.system = null
       st.wantVoice = false
       st.stickerSuggestions = []
-      if(control){release(chatId);return}
+      if(control){release(chatId, turnId);return}
       if(part&&completed)participation.observeDecision(part.scope,{...part,decision:parseReply(text).items.length?'reply':'skip'})
       if (sys) {
         if (completed) sys.resolve(text)
@@ -1107,20 +1161,20 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       if (fallbackText && !requests.length && epoch === storage.epochs.current(chatId) && !(completed && parseReply(text).items.length)) {
         log.info(`${chatId}：这一轮没有可发的正文，用固定的话补上`)
         track(deliver)(chatId, fallbackText, { epoch, persona, turnId, accountId, signal: controller?.signal, shouldSend: () => !disposed && !controller?.signal.aborted })
-          .catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
+          .catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId, turnId))
         return
       }
       if (!completed) {
         for(const q of requests)storage.requests.setState(q.id,'ended')
         log.warn(`${chatId} 这一轮没正常结束（${d.reason?.kind || '?'}），不发`)
-        release(chatId)
+        release(chatId, turnId)
         return
       }
-      if (!text && !requests.length && !suggestions.length) return release(chatId)
+      if (!text && !requests.length && !suggestions.length) return release(chatId, turnId)
       // 这一轮开始后换过人设 / 重开过：迟到的回复不发
       if (epoch !== undefined && epoch !== storage.epochs.current(chatId)) {
         log.info(`${chatId}：会话已经换过代次，上一代的回复不发`)
-        return release(chatId)
+        return release(chatId, turnId)
       }
       // 发完再放开：发送期间来的消息也攒到下一段
       const shouldSend=()=>!disposed&&!controller?.signal.aborted&&(!context||getPlanner()?.shouldContinue(context)!==false)
@@ -1135,17 +1189,19 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         } catch (error) { log.warn('记录请求批次关联失败：', error.message) }
         if(part)participation.observeReply(part.scope,{...part,status:result?.complete?'delivered':result?.confirmed?'partial':result?.deliveries?.some(d=>d.unknown)?'unknown':'skipped',deliveredCount:result?.confirmed?1:0,dryRun:getConfig().dryRun})
         for(const q of requests)storage.requests.setState(q.id,result?.complete?'answered':result?.deliveries?.some(d=>d.unknown)?'delivery_unknown':result?.confirmed?'delivery_partial':'ended')
-      }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId))
+      }).catch((error) => log.warn('发送出错：', error.message)).finally(() => release(chatId, turnId))
     }
   }
 
   // ---------- 收 QQ ----------
   async function groupName(gid) {
     if (groupNames.has(gid)) return groupNames.get(gid)
+    const missed = groupNameMisses.get(gid)
+    if (missed && Date.now() - missed < 60_000) return gid
     try {
       const info = await onebot.call('get_group_info', { group_id: Number(gid) })
-      if (info?.group_name) groupNames.set(gid, info.group_name)
-    } catch (error) {}
+      if (info?.group_name) { groupNames.set(gid, info.group_name); groupNameMisses.delete(gid) }
+    } catch (error) { groupNameMisses.set(gid, Date.now()) }
     return groupNames.get(gid) || gid
   }
 
@@ -1235,16 +1291,9 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     }
     const dbId = ing.id
     msg.dbId = dbId
+    try {
     bump('received')
     const now = Date.now()
-
-    // 群里的每条消息都记进缓冲（给上下文和「群里在不在聊」用）
-    if (msg.kind === 'group') {
-      const buf = groupBuf.get(msg.groupId) || []
-      buf.push({ t: now, seq: ing.recvSeq, uid: msg.userId, nick: msg.nickname, text: msg.text, at: msg.mentioned, mid: msg.messageId, dbId })
-      while (buf.length > 40) buf.shift()
-      groupBuf.set(msg.groupId, buf)
-    }
 
     const allowed = checkAllowed(cfg, msg)
     // 偷表情：只从白名单里的会话偷
@@ -1255,6 +1304,13 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!allowed.allowed) {
       log.debug(`忽略 ${msg.chatId}（${allowed.reason}）`)
       return
+    }
+    // 群里的每条消息都记进缓冲（给上下文和「群里在不在聊」用）；只记白名单群，别让陌生群占内存
+    if (msg.kind === 'group') {
+      const buf = groupBuf.get(msg.groupId) || []
+      buf.push({ t: now, seq: ing.recvSeq, uid: msg.userId, nick: msg.nickname, text: msg.text, at: msg.mentioned, mid: msg.messageId, dbId })
+      while (buf.length > 40) buf.shift()
+      groupBuf.set(msg.groupId, buf)
     }
     // 主人命令（/silent /active …）：总开关关着也处理，回复直接发
     if (onCommand && isOwner(cfg, msg.userId)) {
@@ -1348,6 +1404,16 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
     const stickerOnly = msg.stickers.length > 0 && !msg.images.length && !msg.records.length && !msg.text.replace(/\[[^\]]*\]/g, '').trim()
     scheduler.add(chat, { messageId: dbId, actorId: msg.userId, mentioned: msg.mentioned, attentionOnly: msg.mentioned && !msg.text.trim() && !msg.media.length, stickerOnly, mode, msg, quote, wantVoice: wantsVoice(msg.text) })
+    } catch (error) {
+      // 已经入库但没进调度器：重放会被 duplicate 挡掉，必须留下可追的死信记录。
+      log.error?.(`处理入站消息 ${dbId}（${msg.chatId}）失败：`, error.message)
+      try {
+        storage.meta.set(`chat:deadletter:${dbId}`, {
+          at: Date.now(), account, chatId: msg.chatId, platformMsgId: msg.messageId,
+          authorId: msg.userId, text: clipText(msg.text || '', 500), error: String(error?.message || error || 'unknown'),
+        })
+      } catch (writeError) { log.debug('写入站死信出错：', writeError.message) }
+    }
   }
 
   /**
@@ -1503,7 +1569,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
   // ---------- 调度：人常常一口气发好几句，等对方说完再一起交给她，别一句一回 ----------
   // 群聊再加一层：她正在回上一段时，新消息先攒着，等她说完再一起交给她（不会一条消息一轮、挨个回）
-  const running = new Set() // chatId → 这一轮还在跑（模型 / 工具还没结束，turn/end 之前）；私聊此时新消息直接 steer 进去
+  const running = new Map() // chatId → turnId：这一轮还在跑（模型 / 工具还没结束，turn/end 之前）；私聊此时新消息直接 steer 进去
+  const runningToken = new Map() // chatId → 调度器回合令牌；迟到 turn/end 不能释放新回合
   const scheduler = createScheduler({
     settings: (chat) => {
       const m = getConfig().merge
@@ -1516,7 +1583,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         mediaExtraMs: m.mediaExtraSec * 1000,
       }
     },
-    canSteer: (chatId) => running.has(chatId),
+    canSteer: (chatId) => running.has(chatId) && agentCaps?.caps?.['agent.steer'] !== false,
     mediaReady: (e) => media.isReady(e.messageId) && (!e.quote?.messageId || media.isReady(e.quote.messageId)),
     dispatch: track((chat, batch, info) => dispatch(chat, batch, info)),
     log,
@@ -1642,13 +1709,33 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     return text
   }
 
+  /** 一批消息到期：失败时写死信并标请求 dispatch_failed，不能静默消失。 */
+  async function dispatch(chat, batch, info = {}) {
+    const createdRequests = []
+    try {
+      return await dispatchInner(chat, batch, { ...info, createdRequests })
+    } catch (error) {
+      const messageIds = (batch.entries || []).map((e) => e.messageId)
+      for (const q of createdRequests) {
+        try { storage.requests.setState(q.id, 'dispatch_failed') } catch (writeError) { log.debug('标记请求派发失败出错：', writeError.message) }
+      }
+      try {
+        storage.meta.set(`chat:deadletter:dispatch:${messageIds[0] || randomUUID()}`, {
+          at: Date.now(), chatId: chat?.chatId, messageIds, error: String(error?.message || error || 'unknown'),
+        })
+      } catch (writeError) { log.debug('写派发死信出错：', writeError.message) }
+      log.error?.(`派发 ${chat?.chatId || '?'} 失败（消息 ${messageIds.join(',') || '-'}）：`, error.message)
+      throw error
+    }
+  }
+
   /** 一批消息到期：拼好提示词、给每个提出请求的人登记请求，交给她。 */
-  async function dispatch(chat, batch, { steer }) {
+  async function dispatchInner(chat, batch, { steer, token, createdRequests }) {
     const cfg = getConfig()
     let groupDecisionEvent
-    if (!cfg.enabled || !checkAllowed(cfg, chat).allowed || isMuted?.(chat.chatId)) return release(chat.chatId)
+    if (!cfg.enabled || !checkAllowed(cfg, chat).allowed || isMuted?.(chat.chatId)) return release(chat.chatId, token)
     batch.entries = batch.entries.filter(e => { const m = storage.messages.get(e.messageId); return m?.account === String(cfg.botQQ) && historyTimeAllowed(storage, m.account, m.platformTime) })
-    if (!batch.entries.length) return release(chat.chatId)
+    if (!batch.entries.length) return release(chat.chatId, token)
     for (const e of batch.entries) if (e.quote && (e.quote.account !== String(cfg.botQQ) || !historyTimeAllowed(storage, e.quote.account, e.quote.platformTime))) e.quote = null
     if(chat.kind==='group') {
       const now=Date.now(),pol0=policyFor(cfg.group,cfg.group.overrides,chat.groupId),scope={account:String(cfg.botQQ),chatId:chat.chatId}
@@ -1674,7 +1761,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       if(!decision.reply) {
         participation.observeDecision(scope,{...part,decision:throttled?'throttled':'skip'})
         for(const e of batch.entries)logChat(chat.chatId,e.msg.nickname,e.msg.text,e.actorId)
-        release(chat.chatId);return
+        release(chat.chatId, token);return
       }
       batch.mode=decision.mode;batch.participation=part
     }
@@ -1752,7 +1839,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (persona?.error) {
       log.error(`${chat.chatId}：${persona.error}，这一轮不交给她`)
       if (chat.kind === 'private' && isOwner(cfg, chat.userId)) await sendText(chat.chatId, `（人设配置有误：${persona.error}。请到面板「人格」页检查）`)
-      release(chat.chatId)
+      release(chat.chatId, token)
       return
     }
     // 请求：每个提出请求的人一份（只当上下文的消息不算），提出者由这里确定，模型和工具改不了
@@ -1763,20 +1850,30 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       byActor.get(e.actorId).push(e.messageId)
     }
     const requests = [...byActor.entries()].map(([actorId, ids]) => storage.requests.create({ chatId: chat.chatId, actorId, sourceMessageIds: ids, policyRevision: getConfig().policyRevision || 0 }))
+    if (createdRequests) createdRequests.push(...requests)
     if (requests.length) try { onRequestBatch?.({ account: String(cfg.botQQ), chatId: chat.chatId, epoch: requests[0].epoch, requestIds: requests.map(q => q.id), decisionEventIds: groupDecisionEvent?.id ? [groupDecisionEvent.id] : [] }) }
     catch (error) { log.warn('记录聚合请求失败：', error.message) }
     const actors = [...byActor.keys()]
     await pushToSession(chat, content, actors[0], {
-      wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests, persona,
+      wantVoice: batch.entries.some((e) => e.wantVoice), extraSenders: actors.slice(1), queryText: query, speakers, steer, requests, persona, turnToken: token,
       images: images.map(({ data, ...rest }) => rest),
       participation:batch.participation, autoReply,
     })
   }
 
-  /** 她这一轮说完了（或者没说）：放开，把这期间攒下的消息交给她。 */
-  function release(chatId) {
-    running.delete(chatId)
-    scheduler.turnEnded(chatId)
+  /**
+   * 她这一轮说完了（或者没说）：只有登记在同一 turnId 上的释放才有效。
+   * 迟到的旧回合 release 不能放开新回合；调度器只认同一 token。
+   */
+  function release(chatId, turnId) {
+    const current = running.get(chatId)
+    if (turnId !== undefined && current !== undefined && current !== turnId) {
+      log.debug(`${chatId}：迟到的释放（${turnId} ≠ ${current}），忽略`)
+      return
+    }
+    const token = runningToken.get(chatId) ?? scheduler.tokenOf(chatId)
+    if (turnId === undefined || current === undefined || current === turnId) { running.delete(chatId); runningToken.delete(chatId) }
+    scheduler.turnEnded(chatId, token ?? undefined)
   }
 
   async function admit(agent, content) {
@@ -1853,7 +1950,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (!opts.steer || !st.persona) st.persona = opts.persona || null
     if (senderId) st.senders.add(String(senderId))
     for (const s of opts.extraSenders || []) st.senders.add(String(s))
-    if (!opts.steer) { st.toolCalls = 0; st.controller?.abort(); st.controller = new AbortController(); st.plannerControl=null;st.decisionId=null;st.activeTurn=undefined;st.plannerContext=null;st.account=String(getConfig().botQQ);st.wakeId=opts.wakeId||null;st.turnId=opts.requests?.[0]?.id || randomUUID();st.stickerSuggestions=[];st.stickerTargetEpochs=new Map() }
+    if (!opts.steer) { st.toolCalls = 0; st.controller?.abort(); st.controller = new AbortController(); st.plannerControl=null;st.decisionId=null;st.activeTurn=undefined;st.plannerContext=null;st.account=String(getConfig().botQQ);st.wakeId=opts.wakeId||null;st.turnId=opts.requests?.[0]?.id || randomUUID();st.schedulerToken=opts.turnToken || scheduler.tokenOf(chat.chatId) || null;st.stickerSuggestions=[];st.stickerTargetEpochs=new Map() }
     if(!opts.steer)st.participation=opts.participation||null
     if(!opts.steer)st.fallbackText=opts.fallbackText||null
     // 插话时换了个人找她就不知道该引用谁了，不猜
@@ -1939,7 +2036,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       log.info(`${chat.chatId}：她还在忙，这句直接插进当前这一轮（steer）`)
       await agent.steer(message)
     } else {
-      running.add(chat.chatId)
+      running.set(chat.chatId, st.turnId)
+      if (st.schedulerToken) runningToken.set(chat.chatId, st.schedulerToken)
       const m = map(), item = m.chats[chat.chatId]
       if (item) { item.turns = (item.turns || 0) + 1; saveMap(m) }
       await agent.followup(message)
@@ -2106,36 +2204,60 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
   }
 
   /**
+   * 彻底拆掉一个会话：代次 +1（还没发出去的上一代回复作废）、停掉旧回合、卸掉工具 / 上下文、
+   * 删掉事件路由和回合状态、清掉群运行时状态，最后归档。调用方负责删 sessions.json 里的条目。
+   * 换档位 / 预设、换人设、重开会话都必须走这里，不能只新建一个 session。
+   */
+  function teardownSession(chatId, sessionId, reason = '会话已切换') {
+    if (!sessionId) return
+    const key = sessionKey(sessionId)
+    const st = turnState.get(key)
+    sessionNotes.delete(chatId); imageNotes.delete(chatId)
+    try { st?.controller?.abort() } catch (error) {}
+    try { storage.epochs.bump(chatId, reason) } catch (error) {}
+    try { outbox.cancelPending(chatId, reason) } catch (error) {}
+    const agent = dsh.agents?.get?.(sessionId) || dsh.agents?.get?.('session-' + sessionId)
+    try { if (agent?.status === 'running') agent.cancel?.({ kind: 'hook', reason }, { keepInbox: false }) } catch (error) { log.debug('停下这一轮失败：', error.message) }
+    stopTyping(key)
+    unmount(key)
+    sessionToChat.delete(key)
+    turnState.delete(key)
+    if (chatId.startsWith('group:')) {
+      const gid = chatId.slice(6)
+      for (const mapRef of [groupBuf, groupInterjects, groupSaid, groupFedAt, groupRefs, groupEngaged]) mapRef.delete(gid)
+      try { participation.reset({ account: String(getConfig().botQQ), chatId }) } catch (error) {}
+    }
+    // 旧会话的这一轮已经死了：只有它自己能放开调度器；新回合已经在跑时不能误释放。
+    // 如果正在为这个聊天 dispatch（scheduler 忙、running 还没登记），放开会让后续批次并发启动，必须留给本批自己 release。
+    const live = running.get(chatId)
+    if (live !== undefined && live === st?.turnId) {
+      const token = runningToken.get(chatId) ?? scheduler.tokenOf(chatId)
+      running.delete(chatId); runningToken.delete(chatId)
+      if (!proactiveRunning.has(chatId)) scheduler.turnEnded(chatId, token ?? undefined)
+    } else if (live !== undefined && st === undefined) {
+      running.delete(chatId); runningToken.delete(chatId)
+      if (!proactiveRunning.has(chatId)) scheduler.turnEnded(chatId)
+    }
+    const reg = dsh.workspaceRegistry || dsh.get?.('workspaceRegistry')
+    try { Promise.resolve(reg?.archiveSession?.(sessionId)).catch((error) => log.debug('归档旧会话失败：', error.message)) }
+    catch (error) { log.debug('归档旧会话失败：', error.message) }
+  }
+
+  /**
    * 放下一个聊天当前的一切：代次 +1（还没发出去的上一代回复作废）、丢掉攒着的消息、
    * 停下正在跑的这一轮。换人设、重开会话时用。
    */
   function abandonChat(chatId, sessionId, reason) {
-    sessionNotes.delete(chatId); imageNotes.delete(chatId)
-    turnState.get(sessionKey(sessionId))?.controller?.abort()
-    try { storage.epochs.bump(chatId, reason) } catch (error) {}
     scheduler.drop(chatId)
-    try { outbox.cancelPending(chatId, reason) } catch (error) {}
-    if (running.has(chatId) && sessionId) {
-      const agent = dsh.agents?.get?.(sessionId) || dsh.agents?.get?.('session-' + sessionId)
-      try { agent?.cancel?.({ kind: 'hook', reason }, { keepInbox: false }) } catch (error) { log.debug('停下这一轮失败：', error.message) }
-    }
-    running.delete(chatId)
+    teardownSession(chatId, sessionId, reason)
+    running.delete(chatId); runningToken.delete(chatId)
     // 重置会删除会话映射，迟到的 turn/end 不再能释放普通回合。主动回合由自己的 finally 释放。
     if (!proactiveRunning.has(chatId)) scheduler.turnEnded(chatId)
   }
 
   /** 换身份：代次 +1、作废上一代没发出去的段、停下旧会话、归档。攒着的新消息不丢（它们要交给新角色）。 */
   function switchIdentity(chatId, sessionId) {
-    sessionNotes.delete(chatId); imageNotes.delete(chatId)
-    turnState.get(sessionKey(sessionId))?.controller?.abort()
-    try { storage.epochs.bump(chatId, '换人设') } catch (error) {}
-    try { outbox.cancelPending(chatId, '换人设') } catch (error) {}
-    const agent = dsh.agents?.get?.(sessionId) || dsh.agents?.get?.('session-' + sessionId)
-    try { if (agent?.status === 'running') agent.cancel?.({ kind: 'hook', reason: '换人设' }, { keepInbox: false }) } catch (error) {}
-    const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
-    Promise.resolve(reg?.archiveSession?.(sessionId)).catch((error) => log.debug('归档旧会话失败：', error.message))
-    sessionToChat.delete(sessionKey(sessionId))
-    turnState.delete(sessionKey(sessionId))
+    teardownSession(chatId, sessionId, '换人设')
     const m = map()
     delete m.chats[chatId]
     saveMap(m)
@@ -2143,15 +2265,10 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
 
   /** 只让一个聊天重新开始：归档它的会话，下一条消息开新会话。 */
   function resetChat(chatId) {
-    const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
     const m = map()
     const e = m.chats[chatId]
     if (!e) return false
     abandonChat(chatId, e.sessionId, '重新开始')
-    try { Promise.resolve(reg?.archiveSession?.(e.sessionId)).catch((error) => log.debug('归档会话失败：', error.message)) }
-    catch (error) { log.debug('归档会话失败：', error.message) }
-    sessionToChat.delete(sessionKey(e.sessionId))
-    turnState.delete(sessionKey(e.sessionId))
     delete m.chats[chatId]
     saveMap(m)
     log.info(`${chatId} 重新开始`)
@@ -2259,7 +2376,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     noteToSession,
     noteImageToSession,
     reviewArtwork,
-    recoverOutbox: (o) => outbox.recover(o),
+    recoverOutbox,
     resetChat,
     joinTopic: (gid) => groupEngaged.set(String(gid), Date.now() + ENGAGE_MS),
     leaveTopic: (gid) => groupEngaged.delete(String(gid)),
@@ -2267,7 +2384,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     resetSessions,
     accountChanged: () => {
       resetSessions()
-      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames,memberCache])map.clear()
+      for(const map of [groupBuf,groupInterjects,groupSaid,groupFedAt,groupRefs,groupEngaged,groupNames,groupNameMisses,memberCache])map.clear()
       participation.reset()
       sentIds.clear();followups.clear();selfId='';lastChatAt=0;lastOwnerChatAt=0;lastBotToOwner={at:0,text:''}
     },
@@ -2298,5 +2415,6 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     personaFor: (chatId) => personaOf?.({ chatId }),
     scopeFor: (chatId, { persona = true } = {}) => ({ account: String(getConfig().botQQ), chat: chatId, persona: persona ? personaOf?.({ chatId })?.personaId || '' : '' }),
     groupNames,
+    groupInterjectTimes: (groupId) => groupInterjects.get(String(groupId)) || [],
   }
 }
