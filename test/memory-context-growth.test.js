@@ -90,3 +90,37 @@ test('中枢把上一句和会话传给 prompt 钩子', async t => {
   assert.equal(seen[1].prevText, '第一句')
   assert.equal(seen[1].sessionId, f.hub.sessions()[privateChat().chatId].sessionId)
 })
+
+test('画完图回看的那一轮不带相关记忆：钩子看到 artwork 就原样放行', async t => {
+  const hooks = {}, storage = createStorage({ file: ':memory:', filesDir: '/tmp/unused-aurabot-assets' })
+  const api = { core: { hub: { selfId: '1' }, http: {}, storage }, dsh: {}, config: () => ({ botQQ: '1', memory: { enabled: true, recallCount: 6 } }), log: { warn() {}, info() {}, debug() {} },
+    on: (name, fn) => { hooks[name] = fn }, onDispose() {}, context() {}, every() {}, tool() {}, route() {}, panel() {} }
+  const memory = memoryModule.setup(api)
+  t.after(async () => { await memory.dispose?.(); storage.close() })
+  const text = '画了一张图：1girl, solo, blue hair'
+  assert.equal(memory.add({ scope, text, subject: '2', predicate: 'did', value: text, speakerId: '2', polarity: 'positive', modality: 'asserted', conditions: [], eventTime: null, validFrom: null, validTo: null, stability: 'stable', manualEvidence: { kind: 'manual', text, speakerId: '2', actorId: '2' } }).ok, true)
+  const content = [{ type: 'text', text: '【画图结果】…' }]
+  const info = { chat, queryText: '1girl, solo, blue hair', senderId: '2', persona: null }
+  assert.match(hooks.prompt(content, info)[0].text, /相关记忆/, '普通回合照常召回（对照）')
+  assert.equal(hooks.prompt(content, { ...info, artwork: true }), content, '回看回合不召回')
+})
+
+test('中枢把「回看回合」标记传给 prompt / prompt/prepared / context/prepare', async t => {
+  const seen = { prompt: [], prepared: [], context: [] }
+  const f = await hubFixture(t, {
+    hooks: {
+      prompt: (content, info) => { seen.prompt.push(info.artwork); return content },
+      preparedPrompt: (content, info) => { seen.prepared.push(info.artwork); return content },
+    },
+    prepareContext: (args) => { seen.context.push(args.artwork) },
+  })
+  await f.hub.pushToSession(privateChat(), [{ type: 'text', text: '普通一句' }], OWNER, { queryText: '普通一句' })
+  await until(() => f.fake.turns.length === 1)
+  await f.hub.pushToSession(privateChat(), [{ type: 'text', text: '【画图结果】…' }], undefined, { queryText: '1girl', artwork: true })
+  await until(() => f.fake.turns.length === 2)
+  assert.deepEqual(seen.prompt, [undefined, true])
+  assert.deepEqual(seen.prepared, [undefined, true])
+  assert.deepEqual(seen.context, [false, true])
+  const { readFileSync } = await import('node:fs')
+  assert.match(readFileSync(new URL('../src/chat/hub.js', import.meta.url), 'utf8'), /fallbackText:'画好啦',artwork:true\}/, '画图回看就是用这个标记推进会话的')
+})
