@@ -5,10 +5,20 @@ import {buildIndex,search} from './lexical.js'
 const marks=items=>items.map(()=>'?').join(',')
 const chunks=items=>Array.from({length:Math.ceil(items.length/400)},(_,i)=>items.slice(i*400,i*400+400))
 export const deletionKey=(kind,key,scope)=>JSON.stringify([kind,key,scope.account,scope.chat,['message','fingerprint'].includes(kind)?'*':scope.persona])
-const parse=row=>row ? JSON.parse(row.body) : null
+const parse=row=>{
+  if(!row) return null
+  try { const value=JSON.parse(row.body); return value && typeof value==='object' && !Array.isArray(value) ? value : null } catch { return null }
+}
+const parseList=(text)=>{ try { const value=JSON.parse(text || '[]'); return Array.isArray(value) ? value : [] } catch { return [] } }
+// A corrupt deletion barrier must fail closed. Dropping it would resurrect a
+// fact that the user may have explicitly deleted.
+const barrierBody=(row)=>{
+  const body=parse(row)
+  return body || { kind:row.kind, key:row.key, deletedAt:row.deleted_at, token:'corrupt_tombstone_fail_closed' }
+}
 const message=row=>({id:row.id,account:row.account_id,chatId:row.chat_id,authorId:row.author_id,authorName:row.author_name,
   text:row.text,eventKind:row.event_kind,platformMsgId:row.platform_msg_id,platformTime:row.platform_time,receivedAt:row.received_at,
-  recvSeq:Number(row.recv_seq),segments:JSON.parse(row.segments_json || '[]'),replyTo:row.reply_to,forwards:JSON.parse(row.forwards_json || '[]'),recalledAt:row.recalled_at})
+  recvSeq:Number(row.recv_seq),segments:parseList(row.segments_json),replyTo:row.reply_to,forwards:parseList(row.forwards_json),recalledAt:row.recalled_at})
 const clamp=(value,fallback,max)=>Number.isSafeInteger(Number(value)) && Number(value)>=0 ? Math.min(max,Number(value)) : fallback
 
 /** One page shares all fact/evidence/message/tombstone reads. No per-fact SQL. */
@@ -16,11 +26,11 @@ export function readContext(db,roots,viewer) {
   const facts=new Map(roots.map(f=>[f.id,f])),sources=new Map(),evidence=new Map(),messages=new Map(),tombstones=new Map()
   const refs=[...new Set(roots.flatMap(f=>[...(f.possibleDuplicates || []),...(f.conflicts || []),...(f.supersedes || []),f.supersededBy].filter(Boolean)))].filter(id=>!facts.has(id))
   for(const id of refs) facts.set(id,null)
-  for(const part of chunks(refs)) for(const row of db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${marks(part)})`,viewer.account,...part)) {const f=parse(row);facts.set(f.id,f)}
+  for(const part of chunks(refs)) for(const row of db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${marks(part)})`,viewer.account,...part)) {const f=parse(row);if(f) facts.set(f.id,f)}
   const allFacts=[...facts.values()].filter(Boolean)
   for(const f of allFacts) sources.set(f.id,[])
   for(const part of chunks(allFacts.map(f=>f.id))) for(const row of db.all(`SELECT fe.fact_id,fe.evidence_id,e.body FROM memory_fact_evidence fe LEFT JOIN memory_evidence e ON e.id=fe.evidence_id WHERE fe.fact_id IN (${marks(part)}) ORDER BY fe.fact_id,fe.evidence_id`,...part)) {
-    sources.get(row.fact_id).push(row.evidence_id);evidence.set(row.evidence_id,parse(row))
+    sources.get(row.fact_id).push(row.evidence_id);const e=parse(row);if(e) evidence.set(row.evidence_id,e)
   }
   const mids=[...new Set([...evidence.values()].filter(Boolean).map(e=>e.messageId).filter(Boolean))]
   for(const mid of mids) messages.set(mid,null)
@@ -29,7 +39,7 @@ export function readContext(db,roots,viewer) {
   for(const [kind,values] of Object.entries(keys)) for(const part of chunks(values)) {
     for(const row of db.all(`SELECT * FROM memory_tombstones WHERE account=? AND kind=? AND key IN (${marks(part)}) ORDER BY deleted_at DESC,rowid DESC`,viewer.account,kind,...part)) {
       const key=deletionKey(kind,row.key,row)
-      if(!tombstones.has(key)) tombstones.set(key,parse(row))
+      if(!tombstones.has(key)) tombstones.set(key,barrierBody(row))
     }
   }
   return {facts,sources,evidence,messages,tombstones}
@@ -83,7 +93,7 @@ export function createFactQueries({db,now,policy,visibilityStamp,revision,canRea
     }
     if(after) {conditions.push(`(${order}<? OR (${order}=? AND id>?))`);params.push(after.time,after.time,after.id)}
     const rows=db.all(`SELECT body,${order} AS sort_time,id FROM memory_facts WHERE ${conditions.join(' AND ')} ORDER BY ${order} DESC,id ASC LIMIT ?`,...params,limit+1)
-    const more=rows.length>limit,selected=rows.slice(0,limit),facts=selected.map(parse),read=readContext(db,facts,scope)
+    const more=rows.length>limit,selected=rows.slice(0,limit),facts=selected.map(parse).filter(Boolean),read=readContext(db,facts,scope)
     const items=facts.filter(f=>canRead(f,scope,{...options,at:options.at ?? now(),policy:p,read})).map(f=>materialize(f,scope,p,read)).filter(Boolean)
     if(visibilityStamp(scope)!==stamp) fail('STALE_CURSOR','读取期间来源或范围已变化，请重试')
     const last=selected.at(-1),nextCursor=more && last ? Buffer.from(JSON.stringify({v:1,key,stamp,at,time:last.sort_time,id:last.id})).toString('base64url') : null
@@ -121,7 +131,7 @@ export function createFactQueries({db,now,policy,visibilityStamp,revision,canRea
     // Re-read the ranked source facts and validate them in a bounded batch even
     // for a cache hit. Cached scoring is never authority to disclose a record.
     const ids=ranked.map(h=>h.it.id),facts=[]
-    for(const part of chunks(ids)) for(const row of db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${marks(part)})`,scope.account,...part)) facts.push(parse(row))
+    for(const part of chunks(ids)) for(const row of db.all(`SELECT body FROM memory_facts WHERE account=? AND id IN (${marks(part)})`,scope.account,...part)) {const f=parse(row);if(f) facts.push(f)}
     const read=readContext(db,facts,scope),p=policy()
     const result=ranked.map(h=>{
       const f=read.facts.get(h.it.id)

@@ -2,7 +2,7 @@
 // 业务代码只通过这里读写，不直接拼 SQL。
 
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { mkdirSync, writeFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { openDatabase, toJson, fromJson } from './db.js'
 import { migrate, schemaVersion, LATEST_VERSION } from './migrations.js'
@@ -91,27 +91,38 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
   function putAsset(buf, { mime, width = null, height = null, sourceKind = 'inbound' }) {
     if (!Buffer.isBuffer(buf) || !buf.length) throw new Error('资产内容是空的')
     const sha = createHash('sha256').update(buf).digest('hex')
-    const existing = db.get('SELECT * FROM assets WHERE sha256 = ?', sha)
-    if (existing && existing.state === 'stored') return rowAsset(existing)
     const rel = join(sha.slice(0, 2), sha + (EXT[mime] || '.bin'))
     const abs = join(filesDir, rel)
-    if (!existsSync(abs)) {
-      mkdirSync(dirname(abs), { recursive: true })
-      const tmp = `${abs}.tmp-${process.pid}`
-      writeFileSync(tmp, buf)
-      renameSync(tmp, abs)
+    const healthy = () => {
+      try { const stat = statSync(abs); return stat.isFile() && stat.size === buf.length } catch { return false }
     }
-    return db.tx(() => {
-      const again = db.get('SELECT * FROM assets WHERE sha256 = ?', sha)
-      if (again) {
-        if (again.state !== 'stored') db.run("UPDATE assets SET state = 'stored', path = ? WHERE id = ?", rel, again.id)
-        return rowAsset(db.get('SELECT * FROM assets WHERE id = ?', again.id))
-      }
-      const id = newId('ast')
-      db.run('INSERT INTO assets(id, sha256, mime, bytes, width, height, path, source_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        id, sha, mime, buf.length, width, height, rel, sourceKind, now())
-      return rowAsset(db.get('SELECT * FROM assets WHERE id = ?', id))
-    })
+    const existing = db.get('SELECT * FROM assets WHERE sha256 = ?', sha)
+    // A 'stored' row is only reusable when its file is actually present and the
+    // expected size. Missing/truncated media is repaired from the bytes we hold.
+    if (existing && existing.state === 'stored' && healthy()) return rowAsset(existing)
+    mkdirSync(dirname(abs), { recursive: true })
+    const tmp = `${abs}.tmp-${process.pid}-${Date.now()}`
+    try {
+      writeFileSync(tmp, buf)
+      const record = db.tx(() => {
+        const again = db.get('SELECT * FROM assets WHERE sha256 = ?', sha)
+        if (again) {
+          if (again.state !== 'stored' || again.path !== rel) db.run("UPDATE assets SET state = 'stored', path = ? WHERE id = ?", rel, again.id)
+          return rowAsset(db.get('SELECT * FROM assets WHERE id = ?', again.id))
+        }
+        const id = newId('ast')
+        db.run('INSERT INTO assets(id, sha256, mime, bytes, width, height, path, source_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          id, sha, mime, buf.length, width, height, rel, sourceKind, now())
+        return rowAsset(db.get('SELECT * FROM assets WHERE id = ?', id))
+      })
+      // Rename only after the row is committed: a failed transaction never
+      // leaves an orphan media file, and the next put repairs a failed rename.
+      renameSync(tmp, abs)
+      return record
+    } catch (error) {
+      try { rmSync(tmp, { force: true }) } catch {}
+      throw error
+    }
   }
   const assets = {
     put: putAsset,
@@ -166,6 +177,9 @@ export function createStorage({ file, filesDir, log, now = () => Date.now() }) {
       if (!Array.isArray(sourceMessageIds) || !sourceMessageIds.length) throw new Error('请求必须关联来源消息')
       const sources = sourceMessageIds.map((id) => messages.get(id))
       if (sources.some((m) => !m || m.chatId !== chatId || m.authorId !== String(actorId))) throw new Error('请求来源必须属于当前聊天的同一提出者')
+      // A request must never be built from a recalled message: the recall event
+      // and request creation can race, and appendSource already rejects recalls.
+      if (sources.some((m) => m.recalledAt != null)) throw new Error('请求来源包含已撤回的消息')
       if (new Set(sources.map((m) => m.account)).size !== 1) throw new Error('请求不能混用不同账号的消息')
       const id = newId('req')
       const t = now()

@@ -3,8 +3,8 @@ import { askModel } from '../core/llm.js'
 import { fail, hash, scopeOf, scopeKey } from './contracts.js'
 
 export function ensureRuntime(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS wp6_model_budget(day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
-    CREATE TABLE IF NOT EXISTS wp6_model_calls(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, kind TEXT NOT NULL, expires_at INTEGER NOT NULL);`)
+  db.tx(() => db.exec(`CREATE TABLE IF NOT EXISTS wp6_model_budget(day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS wp6_model_calls(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, kind TEXT NOT NULL, expires_at INTEGER NOT NULL);`))
 }
 export function reserveCall(db, scope, kind, c, now) {
   return db.tx(() => {

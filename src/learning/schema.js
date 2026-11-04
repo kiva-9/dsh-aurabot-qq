@@ -1,9 +1,11 @@
 import { ensureRuntime } from './runtime.js'
 
 // 模块自有表，避免与主线程的 storage migrations 或 memory 迁移互相覆盖。
+// DDL 放在一个事务里：任一表/索引失败时整体回滚，不留“半套 schema”。
 export function ensureSchema(db) {
-  ensureRuntime(db)
-  db.exec(`
+  db.tx(() => {
+    ensureRuntime(db)
+    db.exec(`
     CREATE TABLE IF NOT EXISTS wp6_learning_records(
       id TEXT PRIMARY KEY,scope_key TEXT NOT NULL,account_id TEXT NOT NULL,chat_id TEXT NOT NULL,persona_id TEXT NOT NULL,
       kind TEXT NOT NULL CHECK(kind IN ('expression','jargon')),item_key TEXT NOT NULL,data_json TEXT NOT NULL,
@@ -20,6 +22,7 @@ export function ensureSchema(db) {
     CREATE TABLE IF NOT EXISTS wp6_learning_audit(
       id INTEGER PRIMARY KEY,record_id TEXT NOT NULL,scope_key TEXT NOT NULL,action TEXT NOT NULL,actor_id TEXT NOT NULL,
       revision INTEGER NOT NULL,at INTEGER NOT NULL,note TEXT NOT NULL DEFAULT '');
+    CREATE INDEX IF NOT EXISTS wp6_learning_audit_record ON wp6_learning_audit(record_id, id DESC);
     CREATE TABLE IF NOT EXISTS wp6_learning_versions(
       record_id TEXT NOT NULL REFERENCES wp6_learning_records(id) ON DELETE CASCADE,revision INTEGER NOT NULL,snapshot_json TEXT NOT NULL,
       PRIMARY KEY(record_id,revision));
@@ -38,8 +41,11 @@ export function ensureSchema(db) {
     CREATE TABLE IF NOT EXISTS wp6_learning_uses(
       record_id TEXT NOT NULL REFERENCES wp6_learning_records(id) ON DELETE CASCADE,request_id TEXT NOT NULL,at INTEGER NOT NULL,
       PRIMARY KEY(record_id,request_id));
+    CREATE INDEX IF NOT EXISTS wp6_learning_uses_at ON wp6_learning_uses(at);
     CREATE TABLE IF NOT EXISTS wp6_learning_shared_usage(
       record_id TEXT NOT NULL REFERENCES wp6_learning_records(id) ON DELETE CASCADE,viewer_scope TEXT NOT NULL,
       last_used_at INTEGER NOT NULL,uses INTEGER NOT NULL,PRIMARY KEY(record_id,viewer_scope));
+    CREATE INDEX IF NOT EXISTS wp6_learning_shared_usage_last ON wp6_learning_shared_usage(last_used_at);
   `)
+  })
 }

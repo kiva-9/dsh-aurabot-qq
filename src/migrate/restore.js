@@ -27,7 +27,21 @@ wp6_model_budget wp6_model_calls wp6_mood_states wp6_mood_events wp6_mood_seen w
 wp6_learning_audit wp6_learning_versions wp6_learning_checkpoints wp6_learning_queue wp6_learning_seen wp6_learning_uses
 wp6_learning_shared_usage sticker_items sticker_quota sticker_sources sticker_tasks sticker_qq sticker_uses sticker_legacy sticker_decisions sticker_decision_requests
 retrieval_source_outbox retrieval_source_scans retrieval_source_clock retrieval_source_discovery
-background_work_state service_calls service_call_requests service_call_outcomes restore_records restore_runs`.split(/\s+/))
+background_work_state service_calls service_call_requests service_call_outcomes restore_records restore_runs
+search_results search_reference_bytes search_budgets search_limits bili_screenshots image_derivative_manifest`.split(/\s+/))
+// Runtime-owned derived tables. They are caches/receipts, never authoritative
+// state: restore archives their rows in the offline ledger and clears the
+// candidate so the owning module rebuilds them after review. A real installation
+// always has at least the search/bili tables once those modules are set up, so
+// refusing the whole database for them made disaster recovery unusable.
+const DERIVED_TABLES = new Map([
+  ['search_reference_bytes', 'clearedSearchReferenceBytes'],
+  ['search_results', 'clearedSearchResults'],
+  ['search_budgets', 'clearedSearchBudgets'],
+  ['search_limits', 'clearedSearchLimits'],
+  ['bili_screenshots', 'clearedBiliScreenshots'],
+  ['image_derivative_manifest', 'clearedImageDerivatives'],
+])
 const USAGE_BASE = 'id account_id chat_id request_id service model role status billing started_at duration_ms input_tokens output_tokens cached_tokens input_count input_chars credits amount currency'
 const USAGE_EXTRA = 'provider finished_at attempts usage_complete business_status business_error operation_id stage source_ids_json error_code finish_reason'.split(' ')
 const BACKGROUND_NAMES = new Set(['memory','learning:expression','learning:jargon','mood'])
@@ -436,7 +450,10 @@ function reconcile(current, candidate, runId, at) {
     // Merge observed rows, never calculate or infer missing fees. A conflicting
     // receipt id needs human reconciliation and refuses this preparation.
     const candidateAdapter={run:(sql,...params)=>candidate.prepare(sql).run(...params),
-      all:(sql,...params)=>candidate.prepare(sql).all(...params),exec:sql=>candidate.exec(sql)}
+      all:(sql,...params)=>candidate.prepare(sql).all(...params),exec:sql=>candidate.exec(sql),
+      // reconcile already holds BEGIN IMMEDIATE; domain initializers only need a
+      // synchronous transaction boundary around their DDL.
+      tx:fn=>fn()}
     if([current,candidate].some(db=>['service_calls','service_call_requests','service_call_outcomes'].some(table=>has(db,table)))) {
       createUsageLedger({storage:{db:candidateAdapter},getAccount:()=>''})
       archiveTable('service_calls');archiveTable('service_call_requests');archiveTable('service_call_outcomes')
@@ -572,8 +589,38 @@ function reconcile(current, candidate, runId, at) {
       candidate.prepare('INSERT INTO memory_audit(fact_id,account,chat,persona,at,body) VALUES(?,?,?,?,?,?)').run(row.id,row.account,row.chat,row.persona,at,JSON.stringify(audit))
       bump('isolatedFacts')
     }
-    for (const table of ['memory_profiles','memory_overrides','memory_episodes']) {
+    // Profiles and episodes are derived from facts and can be rebuilt. Manual
+    // overrides are user-authored data: keep them in the candidate, but mark
+    // them review-only and leave it to the operator to re-confirm entries after
+    // the underlying facts are independently approved. Never silently delete.
+    for (const table of ['memory_profiles','memory_episodes']) {
       archiveTable(table); candidate.exec(`DELETE FROM ${quote(table)}`)
+    }
+    const overrides = new Map()
+    for (const [source, sourceDb] of [['backup', candidate], ['current', current]]) {
+      for (const row of rows(sourceDb, 'memory_overrides')) {
+        archive(source, 'memory_overrides', row)
+        const body = json(row.body, `memory override ${row.scope_key}/${row.subject}`)
+        // Old releases may have written only one of the two arrays. Preserve the
+        // rest of the body instead of refusing the entire restore.
+        body.aliases = Array.isArray(body.aliases) ? body.aliases : []
+        body.entries = Array.isArray(body.entries) ? body.entries : []
+        const revision = integer(row.revision, 'memory override revision', 1)
+        const key = `${row.scope_key}\u0000${row.subject}`
+        const old = overrides.get(key)
+        if (!old || revision > old.revision) overrides.set(key, { row, body, revision })
+      }
+    }
+    if (overrides.size) {
+      if (!has(candidate, 'memory_overrides')) ensureMemorySchema(candidateAdapter)
+      archiveTable('memory_overrides')
+      candidate.exec('DELETE FROM memory_overrides')
+      for (const { row, body, revision } of overrides.values()) {
+        const downgraded = { ...body, revision, restore: { state: 'review', runId, at,
+          reason: 'Offline restore: manual profile override preserved for review; entries stay inactive until facts and sources are re-approved' } }
+        insertRow('memory_overrides', { scope_key: row.scope_key, subject: row.subject, body: JSON.stringify(downgraded), revision })
+        counts.preservedMemoryOverrides = (counts.preservedMemoryOverrides || 0) + 1
+      }
     }
     isolateBackground(current,candidate,{archive,insertRow,bump,adapter:candidateAdapter})
     for (const row of rows(candidate, 'memory_quarantine')) {
@@ -701,10 +748,23 @@ function reconcile(current, candidate, runId, at) {
     for(const table of ['wp6_learning_queue','wp6_mood_states','wp6_mood_events','wp6_mood_seen','retrieval_source_outbox','retrieval_source_scans','retrieval_source_discovery']) {
       if(has(candidate,table)) { archiveTable(table); candidate.exec(`DELETE FROM ${quote(table)}`) }
     }
+    // Search caches, B站截图索引和图片派生清单都不是权威数据：原样归档到
+    // restore_records 后清空候选库，由各自模块在复核后按需重建。保留空表结构，
+    // 避免恢复候选在启动时因缺少运行时表而再次失败。
+    for (const [table, counter] of DERIVED_TABLES) {
+      if (!has(candidate, table)) continue
+      // Reference-image BLOBs are pure cache and can be large; count them for
+      // the report but do not expand binary payloads into the audit ledger.
+      if (table !== 'search_reference_bytes') archiveTable(table)
+      const cleared = Number(candidate.prepare(`SELECT COUNT(*) AS n FROM ${quote(table)}`).get().n)
+      candidate.exec(`DELETE FROM ${quote(table)}`)
+      if (cleared) counts[counter] = (counts[counter] || 0) + cleared
+    }
     // Never execute trigger SQL from a backup. Memory triggers are rebuilt from
     // this release's initializer; retrieval creates its own triggers when enabled.
     ensureMemorySchema({db:{exec:sql=>candidate.exec(sql),tx:fn=>fn()}})
     const summary={counts,knownBarriersMerged:true,deletionHistoryComplete:false,switchAllowed:false,backgroundRequiresReview:true,
+      retention:{searchCaches:'archived-and-cleared; rebuilt on demand',biliScreenshots:'archived-and-cleared; asset references require re-capture',imageDerivatives:'archived-and-cleared; transient thumbnails',memoryOverrides:'preserved as review-only; re-confirm entries after facts are approved'},
       rebuildRequired:['Retrieval indexes, worker database and source triggers require reviewed source rebuild; no external vector state was restored.']}
     candidate.prepare('INSERT INTO restore_runs VALUES(?,?,?)').run(runId,at,JSON.stringify(summary))
     integrity(candidate)
