@@ -1,7 +1,7 @@
 // B 站：签名、Cookie / 链接 / 分享卡片解析、刷一轮（评论、分享、记忆）、回复别人、看你发来的视频。用假的 B 站和假的模型测。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -156,7 +156,7 @@ test('弹幕结果未知后同一请求不自动重发', async () => {
   assert.equal(calls, 1)
 })
 
-function fakes({ decisions, replyText = '是呀 我也觉得', cfgOver = {}, global = {}, postError = null, thinkTimeoutMs } = {}) {
+function fakes({ decisions, replyText = '是呀 我也觉得', cfgOver = {}, global = {}, postError = null, thinkTimeoutMs, now = Date.now } = {}) {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-case-'))
   const posted = []
   const sent = []
@@ -200,7 +200,7 @@ function fakes({ decisions, replyText = '是呀 我也觉得', cfgOver = {}, glo
     add: (m) => facts.push(m.text),
   }
   const b = duty.createBili({ getConfig: () => cfg, hub, storage: { epochs: { current: () => epoch } }, memory, log: { info() {}, warn() {}, debug() {} }, api: fakeApi,
-    thinkTimeoutMs, think: (prompt) => hub.runSystemTurn('test', 'test', prompt) })
+    thinkTimeoutMs, now, think: (prompt) => hub.runSystemTurn('test', 'test', prompt) })
   const context = (chat = 'private:10000001', actorId = cfg.ownerQQ) => ({ scope: scope(chat), personaSnapshot: hub.personaFor(chat), actorId, requestId: 'req:manual', epoch })
   return { b, posted, sent, events, facts, reads, prompts, context, cfg, hub, memory, fakeApi, bump: () => epoch++, persona: (id) => { personaId = id } }
 }
@@ -378,6 +378,50 @@ test('自动浏览只读取当前主人私聊/本角色，显式事实 persona �
   ])
   assert.match(f.prompts[0], /OWNER_PRIVATE/); assert.match(f.prompts[0], /THIS_PERSONA/)
   assert.doesNotMatch(f.prompts.join('\n'), /GROUP_SECRET|ACCOUNT_SECRET|PERSONA_SECRET/)
+})
+
+test('面板副作用路由只接受 POST', async () => {
+  const { postOnly } = await import('../src/modules/bili/index.js')
+  let calls = 0
+  const handler = postOnly(async () => { calls++; return { ok: true } })
+  assert.equal((await handler({ method: 'GET' })).code, 'METHOD_NOT_ALLOWED')
+  assert.equal((await handler({})).code, 'METHOD_NOT_ALLOWED')
+  assert.equal((await handler({ method: 'POST' })).ok, true)
+  assert.equal(calls, 1)
+})
+
+test('force:true 不绕过 maxRunsPerDay', async () => {
+  const f = fakes({ decisions: [], cfgOver: { maxRunsPerDay: 1 } })
+  assert.equal((await f.b.run({ force: true })).ok, true)
+  const second = await f.b.run({ force: true })
+  assert.equal(second.ok, false)
+  assert.match(second.message, /额度已用完/)
+})
+
+test('回复失败不写 repliedFeed，未知结果仍由 actions 屏障阻止自动重发', async () => {
+  const f = fakes({ decisions: [], postError: new Error('connection reset') })
+  assert.equal((await f.b.checkReplies()).replied, 0)
+  assert.equal(f.posted.length, 1)
+  const root = join(process.env.AURABOT_DATA_DIR, 'bili-v2')
+  const state = readdirSync(root).filter(name => !name.startsWith('quota-')).map(name => JSON.parse(readFileSync(join(root, name), 'utf8')))
+    .find(row => Array.isArray(row.repliedFeed))
+  assert.deepEqual(state.repliedFeed, [], '失败不能写入已回复去重')
+  assert.equal((await f.b.checkReplies()).replied, 0)
+  assert.equal(f.posted.length, 1, '未知结果不盲目重发')
+})
+
+test('自动浏览遇到 pauseReason 不再触发搜索/点赞', async () => {
+  let clock = Date.parse('2026-01-01T12:00:00+08:00')
+  const f = fakes({ decisions: [], now: () => clock, cfgOver: { reply: false, maxCommentsPerDay: 5, intervalHours: 1 } })
+  const error = Object.assign(new Error('风控'), { code: -352 })
+  f.fakeApi.postComment = async () => { throw error }
+  await f.b.comment('BV1bbbbbbbbb', '测试', f.context())
+  assert.match(f.b.state().pauseReason, /风控/)
+  let searchCalls = 0
+  f.fakeApi.search = async () => { searchCalls++; return [] }
+  clock += 2 * 3600_000
+  await f.b.tick()
+  assert.equal(searchCalls, 0)
 })
 
 test('B站未知提交结果持久去重，重复调用不重发；没有 rpid 不记经历', async () => {

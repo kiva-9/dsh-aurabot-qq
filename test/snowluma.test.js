@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
-import { createSnowLumaManager, generatePassword } from '../src/snowluma/manager.js'
+import { createSnowLumaManager, generatePassword, isPathWithin, killProcessTree } from '../src/snowluma/manager.js'
 
 const FAKE = `
 import http from 'node:http'
@@ -55,6 +55,26 @@ before(async () => {
 })
 
 after(() => { mgr?.dispose() })
+
+test('进程路径按目录边界判断，前缀相同的兄弟目录不算', () => {
+  const win = { platform: 'win32' }
+  assert.equal(isPathWithin('C:\\Aurabot\\snowluma', 'C:\\Aurabot\\snowluma\\index.mjs', win), true)
+  assert.equal(isPathWithin('C:\\Aurabot\\snowluma', 'C:\\Aurabot\\snowluma', win), true)
+  assert.equal(isPathWithin('C:\\Aurabot\\snowluma', 'C:\\Aurabot\\snowluma-old\\index.mjs', win), false)
+  assert.equal(isPathWithin('C:\\Aurabot\\snowluma', 'C:\\Aurabot\\snowluma2\\index.mjs', win), false)
+  assert.equal(isPathWithin('/opt/snowluma', '/opt/snowluma/index.mjs'), true)
+  assert.equal(isPathWithin('/opt/snowluma', '/opt/snowluma-old/index.mjs'), false)
+})
+
+test('杀进程树：Windows taskkill /T /F，POSIX 杀进程组', async () => {
+  const calls = []
+  await killProcessTree(321, { platform: 'win32', exec: (cmd, args, opts, cb) => { calls.push({ cmd, args }); cb() } })
+  assert.deepEqual(calls[0], { cmd: 'taskkill', args: ['/pid', '321', '/T', '/F'] })
+  calls.length = 0
+  await killProcessTree(654, { platform: 'linux', kill: (pid, sig) => calls.push({ pid, sig }) })
+  assert.deepEqual(calls[0], { pid: -654, sig: 'SIGKILL' })
+  assert.equal(await killProcessTree(0), false)
+})
 
 test('生成的密码满足 SnowLuma 规则', () => {
   for (let i = 0; i < 20; i++) {
@@ -109,4 +129,12 @@ test('认不出号时先注入，连上后核对：是机器人号就通过，�
   assert.equal((await mgr.attachBot()).ok, true)
   assert.equal(await mgr.confirmLogin('20000002'), true)
   assert.match(mgr.lastAttach.message, /已核对/)
+})
+
+test('stop 会等待 SnowLuma 退出并释放端口', async () => {
+  const r = await mgr.stop()
+  assert.equal(r.ok, true, r.message)
+  let running = true
+  for (let i = 0; i < 40 && running; i++) { running = await mgr.running(); if (running) await new Promise(resolve => setTimeout(resolve, 100)) }
+  assert.equal(running, false)
 })

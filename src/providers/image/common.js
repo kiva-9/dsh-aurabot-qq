@@ -1,4 +1,5 @@
 // 生图服务适配层的公共约定。每个协议一个适配器：openai / gemini / comfyui / http。
+// 结果 URL 默认走 core/net 的公共地址校验下载；provider 返回 127.0.0.1 / 内网地址会被拒绝。
 //
 // 适配器：create(profile, { fetchImpl, log }) → {
 //   protocol,
@@ -26,6 +27,8 @@
 //   quota       额度用完 / 限流（可以晚点重试）
 //   transient   确定没执行的临时故障（可以重试）
 //   unknown     请求可能已经被服务接收（超时、断线）：不能盲目重发，可能重复计费
+
+import { fetchImage } from '../../core/net.js'
 
 export class ProviderError extends Error {
   constructor(kind, message, { retryable, maybeCharged, status } = {}) {
@@ -441,7 +444,7 @@ export function imageMime(buf) {
 }
 
 /** 结果里的图：base64 或 url（url 只从服务返回的结果里来，不接受用户给的本地路径）。 */
-export async function outputFrom(item, { fetchImpl = fetch, signal, maxBytes = MAX_IMAGE_BYTES } = {}) {
+export async function outputFrom(item, { fetchImpl, signal, maxBytes = MAX_IMAGE_BYTES } = {}) {
   byteLimit(maxBytes)
   let buf = null
   try {
@@ -457,9 +460,17 @@ export async function outputFrom(item, { fetchImpl = fetch, signal, maxBytes = M
       if (encoded.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || (encoded.includes('=') && encoded.length % 4 !== 0)) throw new ProviderError('invalid', '图片 base64 格式不对')
       buf = Buffer.from(encoded, 'base64')
     } else if (item?.url || typeof item === 'string') {
-      const r = await request(fetchImpl, item?.url || item, { method: 'GET' }, { timeoutMs: 120000, signal, maxBytes })
-      if (!r.ok) throw new ProviderError('unknown', `下载生成结果失败（${r.status}）`, { status: r.status })
-      buf = r.buf
+      const target = item?.url || item
+      if (fetchImpl) {
+        // 显式注入的 fetch（适配器测试/受信依赖）沿用原路径。
+        const r = await request(fetchImpl, target, { method: 'GET' }, { timeoutMs: 120000, signal, maxBytes })
+        if (!r.ok) throw new ProviderError('unknown', `下载生成结果失败（${r.status}）`, { status: r.status })
+        buf = r.buf
+      } else {
+        // 生产默认：服务返回的 URL 只允许公网 http(s)，逐跳校验重定向并固定 DNS 解析。
+        try { buf = await fetchImage(target, { maxBytes, timeoutMs: 120000, signal }) }
+        catch (error) { throw new ProviderError('unknown', `下载生成结果失败：${error?.message || '地址不可用'}`, { maybeCharged: true, retryable: false }) }
+      }
     }
     if (!buf?.length) throw new ProviderError('invalid', '生图服务没有返回图片')
     if (buf.length > maxBytes) throw new ProviderError('invalid', '生成的图太大了')
