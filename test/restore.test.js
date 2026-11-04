@@ -17,6 +17,8 @@ import { PNG } from './helpers/images.js'
 import { createUsageLedger } from '../src/diagnostics/usage.js'
 import { createLearning } from '../src/learning/index.js'
 import { createMood } from '../src/features/mood.js'
+import { createSearchStore } from '../src/search/store.js'
+import { createBili } from '../src/bili/duty.js'
 import { scopeKey } from '../src/memory/scope.js'
 
 const scope={account:'fixture-bot',chat:'group:1',persona:''}
@@ -590,4 +592,61 @@ test('CLI exposes preparation only; malformed args never touch a library',async 
   const output=JSON.parse(result.stdout);assert.equal(output.state,'isolated');assert.equal(output.switchAllowed,false)
   assert.ok(read(output.reportPath).limitations.length)
   assert.ok(readdirSync(f.outputDir).includes('current-original'))
+})
+
+test('real startup schemas from search, bili and image processing pass prepareRestore',async t=>{
+  const f=fixture(t),item=f.fact()
+  const search=createSearchStore(f.storage.db,{now:()=>1_000})
+  search.save({schemaVersion:1,id:'srch_fixture',type:'web-search',provider:'tavily',status:'complete',
+    scope:{account:scope.account,chat:scope.chat},actorId:'alice',requestId:'req-fixture',turnId:'turn-fixture',
+    query:'fixture',createdAt:1_000,expiresAt:9_999_999_999_999,cache:{key:'fixture',ttlMs:1000},sources:[],citations:[],candidates:[],failures:[]},
+  [{id:'candidate-1',mime:'image/png',buf:Buffer.from('reference-bytes')}])
+  const bili=createBili({getConfig:()=>({bili:{cookie:''},botQQ:scope.account,enabled:false,speakUp:{}}),hub:{},memory:{},storage:f.storage,log:{warn(){}},api:{}})
+  f.storage.db.run(`INSERT INTO bili_screenshots(id,account,chat,persona,asset_id,bvid,cid,source_json,created_at)
+    VALUES('shot','fixture-bot','group:1','','asset-fixture','BV1','1','{}',1000)`)
+  // Same DDL as src/runtime/media.js prepareForModel: transient derivative metadata.
+  f.storage.db.exec(`CREATE TABLE IF NOT EXISTS image_derivative_manifest (
+    source_asset_id TEXT PRIMARY KEY, derivative_sha256 TEXT NOT NULL, mime TEXT NOT NULL,
+    width INTEGER NOT NULL, height INTEGER NOT NULL, purpose TEXT NOT NULL, state TEXT NOT NULL, updated_at INTEGER NOT NULL)`)
+  f.storage.db.run(`INSERT INTO image_derivative_manifest VALUES('${item.id}','derivative','image/jpeg',64,64,'model-thumbnail','transient',1000)`)
+  bili.stop()
+  f.backup();await f.close()
+  const result=await f.run()
+  assert.equal(result.state,'isolated')
+  assert.equal(result.counts.clearedSearchResults,1)
+  assert.equal(result.counts.clearedSearchReferenceBytes,1)
+  assert.equal(result.counts.clearedBiliScreenshots,1)
+  assert.equal(result.counts.clearedImageDerivatives,1)
+  assert.match(result.retention.searchCaches,/archived-and-cleared/)
+  assert.match(result.retention.memoryOverrides,/review-only/)
+  const db=f.open(result.candidateDb)
+  const names=new Set(db.prepare("SELECT name FROM sqlite_schema WHERE type='table'").all().map(r=>r.name))
+  for(const table of ['search_results','search_reference_bytes','search_budgets','search_limits','bili_screenshots','image_derivative_manifest'])
+    assert.ok(names.has(table),`${table} must remain available for runtime setup`)
+  for(const table of ['search_results','search_reference_bytes','bili_screenshots','image_derivative_manifest'])
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0,`${table} must be cleared`)
+  assert.ok(db.prepare("SELECT 1 FROM restore_records WHERE source_table='bili_screenshots'").get())
+})
+
+test('manual profile overrides survive restore as review-only user data',async t=>{
+  const f=fixture(t),{item}=f.fact()
+  await f.memory.buildProfile('alice',{scope})
+  f.memory.setOverrides('alice',{aliases:['旧别名'],entries:[{section:'preferences',text:'alice 喜欢咖啡',factIds:[item.id]}]},{
+    ...admin,expectedRevision:0})
+  f.backup()
+  // A newer manual edit after the backup must win; restore must not resurrect the older body.
+  f.memory.setOverrides('alice',{aliases:['新别名'],entries:[{section:'preferences',text:'alice 喜欢咖啡',factIds:[item.id]}]},{
+    ...admin,expectedRevision:1})
+  await f.close()
+  const result=await f.run(),db=f.open(result.candidateDb)
+  assert.equal(result.counts.preservedMemoryOverrides,1)
+  const row=db.prepare("SELECT body,revision FROM memory_overrides WHERE subject='alice'").get()
+  assert.equal(row.revision,2)
+  const body=JSON.parse(row.body)
+  assert.deepEqual(body.aliases,['新别名'])
+  assert.equal(body.entries.length,1)
+  assert.equal(body.restore.state,'review')
+  assert.equal(body.restore.runId,result.runId)
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM memory_profiles').get().n,0,'derived profiles still rebuild')
+  assert.ok(db.prepare("SELECT 1 FROM restore_records WHERE source_table='memory_overrides' AND source='current'").get())
 })

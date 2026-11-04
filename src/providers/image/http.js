@@ -2,7 +2,7 @@
 // 安全约定：只做占位符替换和 JSON 路径取值，不支持任何 JS 模板 / eval —— 配置是可以被导入分享的，不能变成执行代码的入口。
 // 占位符的转义沿用语音那边的 fill / pick，免得两套映射行为不一致。
 
-import { ProviderError, MODES, request, classifyHttp, outputFrom, imageMime, imageInfo } from './common.js'
+import { ProviderError, MODES, request, classifyHttp, outputFrom, imageMime, imageInfo, checkRequest, mergeCapabilities } from './common.js'
 import { fill, pick } from '../../voice/tts.js'
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -116,7 +116,8 @@ function toItems(v) {
  * profile: { apiKey, extra: { headers, modes, maxInputs, submit, response, status?, cancel? } }（字段见 validateHttpProfile）
  * status.bodyType 默认为 none；POST JSON 用 bodyType: 'json', body: '{"id":"{taskId}"}'。
  */
-export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
+export function createHttpImages(profile, { fetchImpl } = {}) {
+  const requestFetch = fetchImpl || fetch
   const x = profile?.extra || {}
   const s = x.submit || {}
   const res = x.response || {}
@@ -166,6 +167,10 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
 
   async function submit(req, { signal } = {}) {
     assertProfile()
+    const caps = mergeCapabilities(capabilities(), profile.capabilities)
+    if (!caps.modes.includes(req?.mode)) throw new ProviderError('unsupported', `这个生图服务不支持「${req?.mode}」模式`)
+    const why = checkRequest(req, caps)
+    if (why) throw new ProviderError(/不支持|最多收/.test(why) ? 'unsupported' : 'invalid', why)
     const inputs = orderedInputs(req)
     const vars = varsFor(req, {
       imagesJson: JSON.stringify(inputs.map((im) => ({ role: im.role, mime: im.mime, base64: Buffer.from(im.buf).toString('base64') }))),
@@ -202,7 +207,7 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
     Object.assign(headers, headersFor(vars))
     if (bodyType === 'multipart') for (const k of Object.keys(headers)) if (k.toLowerCase() === 'content-type') delete headers[k]
 
-    const r = await request(fetchImpl, url, { method, headers, ...(body !== undefined ? { body } : {}) }, { signal })
+    const r = await request(requestFetch, url, { method, headers, ...(body !== undefined ? { body } : {}) }, { signal })
     if (!r.ok) throw classifyHttp(r.status, r.json || r.text)
 
     if ((res.kind || 'json') === 'image') {
@@ -230,7 +235,7 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
       body = fillTemplate(st.body, vars, 'json')
       if (!Object.keys(headers).some(k => k.toLowerCase() === 'content-type')) headers['content-type'] = 'application/json'
     }
-    const r = await request(fetchImpl, fillTemplate(st.url, vars, 'url'), { method: methodOf(st.method, 'GET'), headers, ...(body !== undefined ? { body } : {}) }, { signal, timeoutMs: 60000 })
+    const r = await request(requestFetch, fillTemplate(st.url, vars, 'url'), { method: methodOf(st.method, 'GET'), headers, ...(body !== undefined ? { body } : {}) }, { signal, timeoutMs: 60000 })
     if (!r.ok) throw classifyHttp(r.status, r.json || r.text)
     if (!r.json) throw new ProviderError('unknown', '查状态没返回 JSON：' + r.text.slice(0, 160), { maybeCharged: true })
     // 状态值统一按字符串比较，免得 2 和 "2"、true 和 "true" 对不上
@@ -249,7 +254,7 @@ export function createHttpImages(profile, { fetchImpl = fetch } = {}) {
 
   async function cancel(providerTaskId, { signal } = {}) {
     const vars = varsFor({}, { taskId: providerTaskId })
-    const r = await request(fetchImpl, fillTemplate(x.cancel.url, vars, 'url'), { method: methodOf(x.cancel.method), headers: headersFor(vars) }, { signal, timeoutMs: 30000 })
+    const r = await request(requestFetch, fillTemplate(x.cancel.url, vars, 'url'), { method: methodOf(x.cancel.method), headers: headersFor(vars) }, { signal, timeoutMs: 30000 })
     if (r.ok) return { ok: true, message: '已取消' }
     return { ok: false, message: classifyHttp(r.status, r.json || r.text).message }
   }

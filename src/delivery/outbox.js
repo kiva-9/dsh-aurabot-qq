@@ -38,12 +38,12 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
 
   function metadata(batchId) {
     const saved = db.get('SELECT value FROM meta WHERE key = ?', metaKey(batchId))
-    if (!saved) return { outcomes: {}, requiresGuard: false, claim: null }
+    if (!saved) return { outcomes: {}, requiresGuard: false, claim: null, batchKind: null, account: null, cancelRequested: null }
     const m = fromJson(saved.value)
     if (!m || typeof m !== 'object' || !m.outcomes || typeof m.outcomes !== 'object' || Array.isArray(m.outcomes)) {
       throw new Error(`outbox 批次 ${batchId} 的恢复记录损坏，停止发送`)
     }
-    return m
+    return { batchKind: null, account: null, cancelRequested: null, ...m }
   }
   const saveMetadata = (batchId, m) => db.run(
     'INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', metaKey(batchId), toJson(m))
@@ -59,7 +59,7 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
    * 重复调用省略 epoch 时沿用原代次；提供了 epoch 则必须匹配。
    * job 有取消 guard 时传 requiresGuard:true，堵住 enqueue 后、deliver 前崩溃的恢复窗口。
    */
-  function enqueue({ batchId = newId('obx'), chatId, requestId = null, epoch, items, requiresGuard = false }) {
+  function enqueue({ batchId = newId('obx'), chatId, requestId = null, epoch, items, requiresGuard = false, batchKind = null, account = null }) {
     if (typeof batchId !== 'string' || !batchId.trim()) throw new Error('batchId 必须是非空字符串')
     if (!Array.isArray(items) || !items.length) throw new Error('没有要发的内容')
     const parts = items.map((it) => ({ kind: it.kind || 'other', payload: fromJson(toJson({
@@ -83,6 +83,8 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
       }
       const m = metadata(batchId)
       m.requiresGuard ||= Boolean(requiresGuard)
+      if (batchKind) m.batchKind ||= String(batchKind)
+      if (account) m.account ||= String(account)
       saveMetadata(batchId, m)
     })
     return batchId
@@ -161,6 +163,10 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
   function pending(r, token, shouldSend) {
     const m = metadata(r.batchId)
     if (m.claim?.token !== token || (m.requiresGuard && !shouldSend)) return false
+    if (m.cancelRequested) {
+      setState(r, token, 'pending', 'canceled', { error: `已请求取消：${m.cancelRequested.reason || '取消'}` })
+      return false
+    }
     if (db.get('SELECT state FROM outbox WHERE id = ?', r.id)?.state !== 'pending') return false
     if (r.epoch !== storage.epochs.current(r.chatId)) {
       setState(r, token, 'pending', 'canceled', { error: '会话代次已变' })
@@ -177,7 +183,8 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
         message = await resolve(r.payload.message, { chatId: r.chatId, requestId: r.requestId, epoch: r.epoch })
         if (!pending(r, token, shouldSend)) return
         if (shouldSend) {
-          const verdict = shouldSend({ ...r, ...row(db.get('SELECT * FROM outbox WHERE id = ?', r.id)) })
+          const m = metadata(r.batchId)
+          const verdict = shouldSend({ ...r, ...row(db.get('SELECT * FROM outbox WHERE id = ?', r.id)), batchKind: kindOf(r.batchId, m), account: m.account })
           // 同步 guard 后不额外让出执行权；异步 guard 完成后仍须再次核对 epoch。
           const allowed = verdict && typeof verdict.then === 'function' ? await verdict : verdict
           if (!allowed) {
@@ -217,6 +224,8 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
       return
     }
   }
+
+  const kindOf = (batchId, m) => m.batchKind || (/^(?:image|image-notice):/.test(String(batchId)) ? 'job' : 'sessionReply')
 
   function runClaimed(batchId, token, shouldSend) {
     // 先登记 promise 再运行用户回调，阻止同步重入 deliver/retry。
@@ -270,11 +279,13 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
    * requiresGuard 批次没有提供 shouldSend 时保留 pending，交回 job worker 检查后发送。
    * 不重置 failed/skipped/unknown；恢复只算自己成功 claim 的批次。
    */
-  async function recover({ maxAgeMs = 2 * 60_000, shouldSend } = {}) {
+  async function recover({ maxAgeMs = 2 * 60_000, shouldSend, batchKind } = {}) {
     if (shouldSend !== undefined && typeof shouldSend !== 'function') throw new TypeError('shouldSend 必须是函数')
     const result = { stuck: 0, stale: 0, resumed: 0 }
     const batches = db.all("SELECT batch_id FROM outbox WHERE state IN ('pending', 'sending') GROUP BY batch_id ORDER BY MIN(created_at)")
     for (const { batch_id: batchId } of batches) {
+      // 按批次类型恢复：sessionReply 用启动恢复 guard，job 留给各自 job worker。
+      if (batchKind && kindOf(batchId, metadata(batchId)) !== batchKind) continue
       const claim = claimBatch(batchId, { shouldSend, maxAgeMs })
       result.stuck += claim.stuck
       result.stale += claim.stale
@@ -286,9 +297,28 @@ export function createOutbox({ storage, send, resolve = async (m) => m, log, now
     return result
   }
 
-  /** 作废还没真正发到网关的段，包括 resolve / guard / 重试等待中的段。 */
+  /**
+   * 作废还没真正发到网关的段，包括 resolve / guard / 重试等待中的段。
+   * 已经 sending 的段不能改状态（网关可能已经收到），只记 cancel_requested，
+   * 由 transmit 在最后一个 await 之后按 epoch / signal 再拦一次。
+   */
   function cancelPending(chatId, reason = '已取消') {
-    return db.run("UPDATE outbox SET state = 'canceled', last_error = ?, updated_at = ? WHERE chat_id = ? AND state = 'pending'", reason, now(), chatId).changes
+    return db.tx(() => {
+      const rows = db.all("SELECT id, batch_id, state FROM outbox WHERE chat_id = ? AND state IN ('pending', 'sending')", chatId)
+      let changed = 0
+      for (const r of rows) {
+        if (r.state === 'sending') {
+          const m = metadata(r.batch_id)
+          m.cancelRequested = { at: now(), reason }
+          saveMetadata(r.batch_id, m)
+          db.run("UPDATE outbox SET last_error = ?, updated_at = ? WHERE id = ? AND state = 'sending'", `已请求取消：${reason}`, now(), r.id)
+          changed++
+        } else {
+          changed += db.run("UPDATE outbox SET state = 'canceled', last_error = ?, updated_at = ? WHERE id = ? AND state = 'pending'", reason, now(), r.id).changes
+        }
+      }
+      return changed
+    })
   }
 
   const byPlatformId = (chatId, pid) => {

@@ -28,7 +28,7 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${server.address().port}/v1`
 })
 after(() => { server.closeAllConnections(); server.close() })
-const adapter = (extra = {}, overrides = {}) => createOpenAIImages({ baseUrl, apiKey: 'local-mock-key', model: 'mock-image-model', extra, ...overrides })
+const adapter = (extra = {}, overrides = {}) => createOpenAIImages({ baseUrl, apiKey: 'local-mock-key', model: 'mock-image-model', extra, ...overrides }, { fetchImpl: fetch })
 const req = (overrides = {}) => ({ mode: 'text', prompt: '一只猫', size: '1024x1024', n: 1, inputs: [], ...overrides })
 const expectError = (kind) => (e) => { assert.equal(e.kind, kind); assert.equal(e.maybeCharged, kind === 'unknown'); return true }
 const reset = () => { seen.length = 0; reply = () => ({ status: 200, body: { data: [{ b64_json: PNG.toString('base64') }] } }) }

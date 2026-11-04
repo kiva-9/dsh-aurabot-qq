@@ -9,9 +9,13 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { buildWav } from './wav.js'
 import { dataDir } from '../core/store.js'
+import { createSearchHttp } from '../search/net.js'
 
 export const TTS_PROVIDERS = ['none', 'openai', 'http']
 const MAX_AUDIO_BYTES = 20 * 1024 * 1024
+// 只用于服务返回的音频地址：拒绝私网/保留地址，重定向逐跳再校验。
+const resultHttp = createSearchHttp({ allowAnyPort: false })
+const sameOrigin = (a, b) => { try { return new URL(a).origin === new URL(b).origin } catch { return false } }
 
 function outDir() {
   const d = dataDir('voice-cache')
@@ -54,6 +58,15 @@ async function fetchBytes(url, init, timeoutMs) {
   const buf = Buffer.concat(chunks, size)
   if (!r.ok) throw new Error(`语音服务返回 HTTP ${r.status}：${buf.toString('utf8', 0, 160)}`)
   return { buf, type: r.headers.get('content-type') || '' }
+}
+
+/** JSON 里返回的音频地址：和配置服务同源（本地 TTS 服务常见）才允许本机地址，否则只放行公网。 */
+async function fetchResultBytes(url, serviceUrl, timeoutMs) {
+  if (!sameOrigin(url, serviceUrl)) {
+    const r = await resultHttp.read(url, { method: 'GET', maxBytes: MAX_AUDIO_BYTES, timeoutMs, maxRedirects: 4, retries: 0 })
+    return { buf: r.body, type: String(r.headers?.['content-type'] || '') }
+  }
+  return fetchBytes(url, { method: 'GET' }, timeoutMs)
 }
 
 function audioAssert(ok) {
@@ -230,7 +243,7 @@ async function httpSynth(text, c, voice, speed) {
       return audio(Buffer.from(encoded, 'base64'))
     }
     if (!/^https?:\/\//.test(v)) throw new Error('返回的音频地址不对')
-    const result = await fetchBytes(v, { method: 'GET' }, c.timeoutMs || 120000)
+    const result = await fetchResultBytes(v, url, c.timeoutMs || 120000)
     return audio(result.buf, result.type)
   }
   return audio(buf, type)

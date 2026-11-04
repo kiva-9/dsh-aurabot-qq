@@ -2,7 +2,9 @@
 // 打开后，主人私聊里她要执行删根目录、格式化、关机、下载后直接执行这类命令时，
 // 先发 QQ 问主人；回复「确认」才放行，回复「取消」、超时、发不出确认都拦下。
 // 放在 DSH 的 tools/pre-execute：这里返回 deny 工具就不会执行，比提示词可靠。
-// 正则挡不住 base64、脚本文件和别名，这不是沙箱，只防手滑和模型误判。
+// ⚠ 这里只检查 bash / pwsh 的命令原文，挡不住 base64、脚本文件、别名和任何
+//   真正的攻击者。它不是安全边界，不是沙箱，只防手滑和模型误判；不要把它
+//   当成权限系统。
 
 import { redact } from '../core/redact.js'
 
@@ -14,21 +16,23 @@ const DEFAULT_TIMEOUT_MS = 60_000
 // 宁少勿多：只收真正致命的那几类，别把日常命令拦了。
 const ROOT_TARGET = String.raw`(?:\/\*?|~\/?\*?|\$HOME\/?\*?|[a-zA-Z]:[\\\/]?\*?)`
 const DANGER_RULES = [
-  { label: '递归删除根目录或盘符', re: new RegExp(String.raw`\brm\s+(?:-[a-z]*(?:r[a-z]*f|f[a-z]*r)[a-z]*|-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*|--recursive\s+--force|--force\s+--recursive)(?:\s+--no-preserve-root)?\s+["']?${ROOT_TARGET}["']?(?:\s|$|;|&)`, 'i') },
+  { label: '递归删除根目录或盘符', re: new RegExp(String.raw`["']?\brm\b["']?\s+(?:-[a-z]*(?:r[a-z]*f|f[a-z]*r)[a-z]*|-[a-z]*r[a-z]*\s+-[a-z]*f[a-z]*|-[a-z]*f[a-z]*\s+-[a-z]*r[a-z]*|--recursive\s+--force|--force\s+--recursive)(?:\s+--no-preserve-root)?(?:\s+--)?\s+["']?${ROOT_TARGET}["']?(?:\s|$|;|&)`, 'i') },
   { label: '递归删除根目录或盘符', re: /\bRemove-Item\b(?=[^\n]*\s-(?:Recurse|r)\b)[^\n]*\s["']?(?:[a-zA-Z]:[\\/]?\*?|\/|~)["']?(?:\s|$)/i },
-  { label: '递归删除盘符', re: /\b(?:del|erase)\s+(?:\/[a-z]+\s+)*[a-zA-Z]:[\\/]?\*?(?:\s|$)/i },
+  { label: '递归删除盘符', re: /\b(?:del|erase)\s+(?:\/[a-z]+(?:\s+|(?=\/)))*[a-zA-Z]:[\\/]?\*?(?:\s|$)/i },
   { label: '递归删除盘符', re: /\b(?:rd|rmdir)\s+\/s\b[^\n]*\s[a-zA-Z]:[\\/]?(?:\s|$)/i },
   { label: '清空磁盘或分区', re: /\b(?:mkfs(?:\.\w+)?|mke2fs|fdisk|parted|diskpart|wipefs)\b/i },
   { label: '格式化磁盘', re: /\bformat(?:\.com)?\s+[a-zA-Z]:/i },
   { label: '关闭或重启电脑', re: /(?:^|[;&|]\s*|\bsudo\s+)(?:shutdown|reboot|halt|poweroff|Stop-Computer|Restart-Computer)(?:\s|$|;|&)/im },
-  { label: '下载后直接执行', re: /\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b/i },
+  { label: '下载后直接执行', re: /\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:env\s+)?(?:[a-z]:[\\/])?(?:[\\/](?:usr[\\/])?bin[\\/])?(?:ba|z|k|da)?sh\b/i },
   { label: '下载后直接执行', re: /\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^\n|]*\|\s*(?:iex|Invoke-Expression)\b/i },
+  { label: '编码执行的 PowerShell 命令', re: /\b(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b[^\n]*?(?:-encodedcommand|-enc(?:odedcommand)?|-e)\s+["']?[A-Za-z0-9+/=]{16,}/i },
+  { label: '下载后直接执行', re: /\b(?:Invoke-Expression|iex)\b[^\n]*(?:DownloadString|Invoke-WebRequest|Invoke-RestMethod|\biwr\b|\birm\b|New-Object\s+(?:System\.)?Net\.WebClient)/i },
   { label: '删除卷影副本或引导配置', re: /\b(?:vssadmin\s+delete\s+shadows|bcdedit|wbadmin\s+delete)\b/i },
   { label: '改注册表系统项', re: /\breg(?:\.exe)?\s+(?:add|delete)\s+(?:HKLM|HKEY_LOCAL_MACHINE)\b/i },
   { label: '直接写磁盘', re: /\bdd\s+[^\n]*\bof=\/dev\/|>\s*\/dev\/(?:sd|nvme|disk|hd)/i },
   { label: '改账户或管理员组', re: /\bnet\s+(?:user\s+\S+\s+\S+\s+\/add|localgroup\s+\S+\s+\S+\s+\/add)\b/i },
   { label: '夺取系统目录权限', re: /\b(?:takeown|icacls)\b[^\n]*(?:[a-zA-Z]:\\Windows|[a-zA-Z]:\\Program Files)/i },
-  { label: '放开根目录权限', re: /\bchmod\s+-R\s+0?777\s+\/(?:\s|$)/i },
+  { label: '放开根目录权限', re: /\bchmod\s+(?:-[A-Za-z]+\s+)*(?:0?777|a\+rwx)\s+\/(?:\s|$)/i },
   { label: 'fork 炸弹', re: /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}/ },
 ]
 

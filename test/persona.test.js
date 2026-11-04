@@ -65,6 +65,23 @@ test('绑定：具体聊天 → 群聊/私聊默认 → 全局；快照带版本
   assert.throws(() => ps.bind('chat:nope', 'a'), (e) => e.code === 'BAD_SCOPE')
 })
 
+test('bindingRevision 按聊天生效范围计算，别的聊天换绑定不影响本聊天', () => {
+  const ps = createPersonaStore({ storage: storage() })
+  ps.create({ id: 'a', name: 'A', layers: L('a'), publish: true })
+  ps.create({ id: 'b', name: 'B', layers: L('b'), publish: true })
+  ps.create({ id: 'c', name: 'C', layers: L('c'), publish: true })
+  ps.bind('global', 'a')
+  ps.bind('chat:group:1', 'b')
+  ps.bind('chat:group:2', 'c')
+  const one = ps.resolve('group:1').bindingRevision, two = ps.resolve('group:2').bindingRevision
+  ps.bind('chat:group:2', 'a')
+  assert.equal(ps.resolve('group:1').bindingRevision, one, '另一个聊天换卡不影响本聊天')
+  assert.ok(ps.resolve('group:2').bindingRevision > two, '本聊天换卡后才递增')
+  const before = ps.resolve('group:1').bindingRevision
+  ps.bind('chat:group:1', null)
+  assert.ok(ps.resolve('group:1').bindingRevision > before)
+})
+
 test('在用的卡不能归档；绑定指向的卡出问题时报错，不随便换成第一张', () => {
   const s = storage()
   const ps = createPersonaStore({ storage: s })
@@ -114,7 +131,7 @@ test('旧版人格：数据目录里的 Markdown 原样导入，旧的「当前�
   assert.deepEqual(lan.published.layers.tags, ['冷淡'])
   assert.ok(svc.store.get('dafeiyu'), '内置卡也在')
   assert.deepEqual(s.legacy.get('personas-markdown-v1').report.badId, ['坏名字'])
-  assert.equal(svc.textOf(svc.snapshotFor('group:1')), '你是小蓝，一个话很少的人。')
+  assert.ok(svc.textOf(svc.snapshotFor('group:1')).startsWith('你是小蓝，一个话很少的人。\n\n【平时怎么做】'), '旧卡原文在前，只补默认平时习惯')
   // 再初始化一次不重复导入
   createPersonaService({ storage: s, legacyDir: old, legacyCurrent: 'lan', bundledDir: bundled })
   assert.equal(svc.store.revisions('lan').length, 1)
@@ -199,4 +216,27 @@ test('默认按聊天类型分卡：私聊绑私房版、群聊绑群骚版，�
   const edited = Object.fromEntries(svc4.store.bindings().map((b) => [b.scope, b.personaId]))
   assert.equal(edited['kind:private'], undefined)
   assert.equal(edited['kind:group'], undefined)
+})
+
+test('说话风格归人设卡：卡没写用默认，写了以卡为准；旧版整篇卡只补平时习惯；运行规则里不再写死风格', async () => {
+  const { DEFAULT_STYLE, DEFAULT_BEHAVIOR } = await import('../src/persona/compiler.js')
+  const empty = compilePersona(normalizeLayers({ identity: { name: '小蓝' } }))
+  assert.ok(empty.includes(DEFAULT_STYLE) && empty.includes(DEFAULT_BEHAVIOR), '空卡用默认习惯')
+  const own = compilePersona(normalizeLayers({ identity: { name: '小蓝' }, behavior: { text: '话少' }, style: { text: '一次一条，十个字以内' } }))
+  assert.ok(!own.includes(DEFAULT_STYLE) && !own.includes(DEFAULT_BEHAVIOR), '卡写了就不叠默认')
+  const onlyExamples = compilePersona(normalizeLayers({ style: { examples: ['嗯'] } }))
+  assert.ok(!onlyExamples.includes(DEFAULT_STYLE), '只有示例也算卡自己定了风格')
+  const legacy = compilePersona(normalizeLayers({ legacy: { body: '你是小蓝。' } }))
+  assert.ok(legacy.startsWith('你是小蓝。'), '旧卡原文不动')
+  assert.ok(legacy.includes(DEFAULT_BEHAVIOR), '旧卡补默认的平时习惯（以前在规则里对所有卡生效）')
+  assert.ok(!legacy.includes(DEFAULT_STYLE), '旧卡不补说话长度，原文自己定')
+  const legacyOwn = compilePersona(normalizeLayers({ legacy: { body: '你是小蓝。' }, behavior: { text: '话少' } }))
+  assert.ok(!legacyOwn.includes(DEFAULT_BEHAVIOR), '旧卡写了分层习惯就不补')
+  const { rulesText } = await import('../src/persona/personas.js')
+  const { normalize } = await import('../src/core/config.js')
+  for (const kind of ['private', 'social']) {
+    const r = rulesText(kind, normalize({}))
+    for (const s of ['一到三句', '查户口', '撒娇', '私聊里主动一点', '闲聊以自然纯文本']) assert.ok(!r.includes(s), `${kind} 规则不该写死：${s}`)
+    assert.ok(r.includes('|||') && r.includes('<poke>'), '协议标记仍在规则里')
+  }
 })

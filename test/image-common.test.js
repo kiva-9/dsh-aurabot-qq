@@ -148,8 +148,15 @@ test('request：读取断线/超时/取消都是 unknown；发送前取消是确
 })
 
 test('outputFrom：严格元数据、base64、下载上限；无法拿到结果不谎称未计费', async () => {
-  for (const item of [{ b64_json: PNG.toString('base64') }, { b64: PNG.toString('base64') }, `data:image/png;base64,${PNG.toString('base64')}`, { url: `${base}/png` }]) assert.deepEqual(await outputFrom(item), { buf: PNG, mime: 'image/png' })
-  for (const item of [{ b64: PNG.subarray(0, 12).toString('base64') }, { b64: '%%%junk' }, { b64: 42 }, 'file:///tmp/x', `${base}/missing`, { b64: PNG.toString('base64') }, { url: `${base}/png` }]) await assert.rejects(outputFrom(item, { maxBytes: 16 }), checkError('unknown', true))
+  for (const item of [{ b64_json: PNG.toString('base64') }, { b64: PNG.toString('base64') }, `data:image/png;base64,${PNG.toString('base64')}`]) assert.deepEqual(await outputFrom(item), { buf: PNG, mime: 'image/png' })
+  assert.deepEqual(await outputFrom({ url: `${base}/png` }, { fetchImpl: fetch }), { buf: PNG, mime: 'image/png' })
+  for (const item of [{ b64: PNG.subarray(0, 12).toString('base64') }, { b64: '%%%junk' }, { b64: 42 }, 'file:///tmp/x', `${base}/missing`, { b64: PNG.toString('base64') }, { url: `${base}/png` }]) await assert.rejects(outputFrom(item, { maxBytes: 16, fetchImpl: fetch }), checkError('unknown', true))
+})
+
+test('outputFrom：provider 返回的本机/内网结果地址默认被拒绝', async () => {
+  for (const url of ['http://127.0.0.1:9/x.png', 'http://[::1]:9/x.png', 'http://169.254.169.254/latest/meta-data']) {
+    await assert.rejects(outputFrom({ url }), checkError('unknown', true))
+  }
 })
 
 test('index：HTTP 静态登记，capability 空模式保留，本地不接受编辑或假图', async () => {

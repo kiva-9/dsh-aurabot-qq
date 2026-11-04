@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -234,7 +234,7 @@ test('explicit loopback probe enables durable incremental indexing and hybrid to
   f.cfg.retrieval.index.path = f.storage.db.file // Normalization must discard even a late UI-injected primary path.
   const row = f.fact('小明喜欢咖啡'), privateFact = f.fact('私密咖啡', P)
   const state = await f.api.ensureReady()
-  assert.ok(state.service.config.index.path.startsWith(join(f.dir, 'modules-data', 'retrieval')))
+  assert.ok(state.service.config.index.path.startsWith(join(realpathSync(f.dir), 'modules-data', 'retrieval')))
   await f.panel('health', {}, 'GET'); await f.panel('sync', { chatId: S.chat })
   assert.equal(f.state.requests.length, 0)
   assert.equal(f.storage.db.get('SELECT state FROM retrieval_source_outbox WHERE source_id=?', row.id).state, 'pending')

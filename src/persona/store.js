@@ -285,7 +285,21 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
   }
 
   const bindings = () => db.all('SELECT scope, persona_id, updated_at FROM persona_bindings ORDER BY scope').map((r) => ({ scope: r.scope, personaId: r.persona_id, updatedAt: r.updated_at }))
-  const bindingRevision = () => Number(db.get("SELECT value FROM sequences WHERE name = 'persona.bindings'")?.value || 0)
+  const legacyBindingRevision = () => Number(db.get('SELECT value FROM sequences WHERE name = ?', 'persona.bindings')?.value || 0)
+  /**
+   * 每个聊天只在自己实际生效的绑定变化时才换 revision。别的聊天/别的 scope
+   * 新增绑定不会让这个聊天的生图参考图失效。
+   */
+  function bindingRevisionFor(chatId, scope, personaId, revision) {
+    const key = `persona.bindingRevision:${String(chatId || '').slice(0, 200)}`
+    const signature = [scope, personaId, revision].join('|')
+    const saved = storage.meta.get(key)
+    if (saved && saved.signature === signature && Number.isSafeInteger(Number(saved.revision))) return Number(saved.revision)
+    // 首次计算沿用旧全局序号做基线，之后按聊天单调递增。
+    const value = saved ? storage.nextSeq('persona.bindings') : legacyBindingRevision()
+    storage.meta.set(key, { signature, revision: value })
+    return value
+  }
 
   /**
    * 这个聊天现在该用哪张卡的哪个版本。按 具体聊天 → 群聊/私聊默认 → 全局 找；
@@ -302,7 +316,7 @@ export function createPersonaStore({ storage, now = () => Date.now() }) {
         return { error: `「${scope}」绑定的人设 ${b.persona_id} ${!p ? '不存在' : p.archived_at ? '已归档' : '还没发布'}`, scope }
       }
       const rev = revisionRow(p.id, p.current_revision)
-      return { personaId: p.id, name: p.name, revision: Number(p.current_revision), bindingRevision: bindingRevision(), scope, layers: parse(rev.layers_json) }
+      return { personaId: p.id, name: p.name, revision: Number(p.current_revision), bindingRevision: bindingRevisionFor(chatId, scope, p.id, Number(p.current_revision)), scope, layers: parse(rev.layers_json) }
     }
     return { error: '没有设置全局默认人设', scope: 'global' }
   }

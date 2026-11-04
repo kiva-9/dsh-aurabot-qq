@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { deflateSync } from 'node:zlib'
 import { createStorage } from '../src/storage/index.js'
-import { createImageService, imageFailureText } from '../src/jobs/image.js'
+import { createImageService, imageFailureText, publicProfileSnapshot } from '../src/jobs/image.js'
 import { createJobRunner } from '../src/jobs/runner.js'
 import { normalize, mergeFromPanel } from '../src/core/config.js'
 
@@ -13,7 +14,7 @@ function setup(t, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'aurabot-image-service-'))
   const storage = createStorage({ file: ':memory:', filesDir: join(dir, 'assets') })
   const cfg = normalize({ enabled: true, dryRun: false, botQQ: '20', ownerQQ: '10', imageGen: {
-    enabled: true, stylePrompt: 'old style', profiles: [{ id: 'p', name: 'fixture', protocol: 'openai', baseUrl: 'https://image.example/v1', apiKey: 'private-key', model: 'fixture', capabilities: { modes: ['text', 'reference', 'edit', 'mask'], maxInputs: 4 } }],
+    enabled: true, stylePrompt: 'old style', profiles: [{ id: 'p', name: 'fixture', protocol: 'openai', baseUrl: 'https://image.example/v1', apiKey: 'private-key', model: 'fixture', capabilities: { modes: ['text', 'reference', 'edit', 'mask'], maxInputs: 4 }, extra: { headers: { authorization: 'Bearer snapshot-secret' } } }],
   }, ...extra })
   const calls = []; const sends = []
   const hub = { sendImageAssets: async (chatId, ids, note, options) => { sends.push({ chatId, ids, options }); return { delivered: ids.length, batchId: options.batchId } }, noteToSession() {}, sendText: async () => {} }
@@ -149,6 +150,57 @@ test('任务登记时冻结服务、风格和尺寸，删除配置后仍使用�
   assert.equal(s.sends[0].options.batchId, `image:${j.id}`)
 })
 
+test('image_job_configs 不保存 apiKey 和认证头，提交时从当前 profile 取', async (t) => {
+  const s = setup(t), job = s.enqueue()
+  const raw = s.storage.db.get('SELECT profile_json FROM image_job_configs WHERE job_id = ?', job.id).profile_json
+  assert.doesNotMatch(raw, /private-key|snapshot-secret/)
+  assert.doesNotMatch(raw, /headers/)
+  assert.deepEqual(publicProfileSnapshot({ id: 'p', apiKey: 'k', extra: { headers: { authorization: 'Bearer x' }, modes: ['text'] }, model: 'm' }),
+    { id: 'p', extra: { modes: ['text'] }, model: 'm' })
+  s.cfg.imageGen.profiles[0].apiKey = 'rotated-key'
+  await s.runner.drain()
+  assert.equal(s.runner.get(job.id).state, 'delivered', s.runner.get(job.id).error)
+  assert.equal(s.calls[0].options.headers.authorization, 'Bearer rotated-key')
+})
+
+test('旧 image_job_configs 里的明文密钥在服务启动时被清掉', async (t) => {
+  const s = setup(t), job = s.enqueue()
+  s.storage.db.run('UPDATE image_job_configs SET profile_json = ? WHERE job_id = ?', JSON.stringify({
+    id: 'p', apiKey: 'old-secret', extra: { headers: { authorization: 'Bearer old-secret' }, modes: ['text'] },
+  }), job.id)
+  createImageService({ storage: s.storage, getConfig: () => s.cfg, hub: s.hub })
+  const raw = s.storage.db.get('SELECT profile_json FROM image_job_configs WHERE job_id = ?', job.id).profile_json
+  assert.doesNotMatch(raw, /old-secret|headers/)
+  assert.deepEqual(JSON.parse(raw).extra, { modes: ['text'] })
+})
+
+test('蒙版在进入队列前校验 PNG/透明通道/底图尺寸', async (t) => {
+  const s = setup(t)
+  const base = s.storage.assets.put(require_png(4, 3, true), { mime: 'image/png' })
+  const valid = s.storage.assets.put(require_png(4, 3, true), { mime: 'image/png' })
+  const noAlpha = s.storage.assets.put(require_png(4, 3, false), { mime: 'image/png' })
+  const wrongSize = s.storage.assets.put(require_png(2, 2, true), { mime: 'image/png' })
+  const jpegMask = s.storage.assets.put(image, { mime: 'image/jpeg' })
+  const input = (maskAssetId) => ({ mode: 'mask', prompt: '换背景', refs: [{ assetId: base.id, role: 'base' }], maskAssetId })
+  assert.doesNotThrow(() => s.service.preview({ kind: 'image', chatId: 'private:10', actorId: '10', input: input(valid.id) }))
+  for (const [mask, message] of [[jpegMask, /PNG/], [noAlpha, /透明通道/], [wrongSize, /尺寸/]]) {
+    assert.throws(() => s.service.preview({ kind: 'image', chatId: 'private:10', actorId: '10', input: input(mask.id) }), message)
+  }
+  assert.equal(s.runner.list().length, 0)
+})
+
+// 本地构造合法的无/有 alpha PNG，不依赖生产解析器。
+function require_png(width, height, alpha) {
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]); const out = Buffer.alloc(body.length + 8)
+    let crc = 0xffffffff
+    for (const b of body) { crc ^= b; for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0) }
+    out.writeUInt32BE(data.length); body.copy(out, 4); out.writeUInt32BE((crc ^ 0xffffffff) >>> 0, out.length - 4)
+    return out
+  }
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = alpha ? 6 : 2
+  return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.alloc((width * (alpha ? 4 : 3) + 1) * height))), chunk('IEND', Buffer.alloc(0))])
+}
 test('试运行保留生成结果且不能记已送达，补发只发送资产不再生成', async (t) => {
   const s = setup(t, { dryRun: true }); const j = s.enqueue()
   await s.runner.drain()

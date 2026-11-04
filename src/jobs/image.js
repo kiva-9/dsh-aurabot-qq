@@ -2,7 +2,7 @@
 // 聊天这一轮马上结束（「在画了」），画好了后台直接发；失败、不确定的结果用中性的话告诉对方。
 
 import { adapterFor } from '../providers/image/index.js'
-import { checkRequest, ProviderError, MODE_LABEL } from '../providers/image/common.js'
+import { checkRequest, ProviderError, MODE_LABEL, imageInfo } from '../providers/image/common.js'
 import { toJson, fromJson } from '../storage/db.js'
 import { isOwner, checkAllowed, levelFor } from '../chat/access.js'
 import { canSee } from '../domain/scope.js'
@@ -10,6 +10,19 @@ import { resolveShape } from '../image/shapes.js'
 import { resolveArtwork } from '../image/gallery.js'
 import { appearanceOf } from '../persona/compiler.js'
 import { ensureDefaultReference, imageReferenceBytes, isDafeiyuPersona } from '../persona/references.js'
+
+/** 配置快照只存非机密字段：apiKey 和 extra.headers 等密钥在提交时从当前 profile 取。 */
+const SECRET_PROFILE_KEYS = new Set(['apikey', 'api_key', 'token', 'accesstoken', 'access_token', 'secret', 'password', 'authorization'])
+export function publicProfileSnapshot(profile) {
+  const copy = structuredClone(profile || {})
+  for (const key of Object.keys(copy)) if (SECRET_PROFILE_KEYS.has(key.toLowerCase())) delete copy[key]
+  if (copy.extra && typeof copy.extra === 'object' && !Array.isArray(copy.extra)) {
+    for (const key of Object.keys(copy.extra)) if (SECRET_PROFILE_KEYS.has(key.toLowerCase())) delete copy.extra[key]
+    // HTTP 映射的认证头可能带 {apiKey}，整组不落库；提交时用当前 profile 补回。
+    delete copy.extra.headers
+  }
+  return copy
+}
 
 /** 画图失败时发到聊天里的原因：服务商的状态码说人话，原文留在任务记录里给面板看。 */
 export function imageFailureText(message) {
@@ -30,8 +43,35 @@ export function imageFailureText(message) {
 export function createImageService({ storage, getConfig, hub, local, toImageBuffer, log, adapterDeps = {}, onDelivered, personaReferences, defaultReference = () => ensureDefaultReference(storage) }) {
   const cfg = () => getConfig().imageGen
 
+  // 旧版本可能已经把密钥写进 image_job_configs：启动时原地脱敏，避免继续留存。
+  try {
+    for (const row of storage.db.all('SELECT job_id, profile_json FROM image_job_configs')) {
+      const profile = fromJson(row.profile_json, null)
+      if (profile && (profile.apiKey || profile.extra?.headers)) storage.db.run('UPDATE image_job_configs SET profile_json = ? WHERE job_id = ?', toJson(publicProfileSnapshot(profile)), row.job_id)
+    }
+  } catch (error) { log?.warn?.('清理旧生图配置密钥失败：', error.message) }
+
   // 配置快照不进入 input_json：任务接口可展示输入，但绝不能把服务密钥一并返回。
   const savedProfile = (id) => fromJson(storage.db.get('SELECT profile_json FROM image_job_configs WHERE job_id = ?', id)?.profile_json, null)
+  // 仅内存的凭据快照：配置被删后同一个进程里还在排队/重试的任务仍能完成；
+  // 不落盘，重启后必须由当前配置提供。
+  const secretCache = new Map()
+  const cacheSecrets = (jobId, profile) => {
+    secretCache.delete(jobId)
+    secretCache.set(jobId, { apiKey: profile.apiKey, headers: profile.extra?.headers })
+    while (secretCache.size > 1000) secretCache.delete(secretCache.keys().next().value)
+  }
+  const resolvedProfile = (id) => {
+    const frozen = savedProfile(id)
+    if (!frozen) return null
+    // 密钥从当前配置按 id 取；任务本身仍使用登记时冻结的地址/模型/能力。
+    const current = profiles().find((p) => p.id === frozen.id)
+    const secret = current ? { apiKey: current.apiKey, headers: current.extra?.headers } : secretCache.get(id)
+    if (!secret) return frozen
+    const merged = { ...frozen, apiKey: secret.apiKey }
+    if (secret.headers) merged.extra = { ...(frozen.extra || {}), headers: secret.headers }
+    return merged
+  }
   const referenceVisible = (ref,job) => {
     if (ref.galleryId) {
       const persona = hub.personaFor?.(job.chatId), expected = job.input.persona
@@ -78,7 +118,21 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
       if (ref.assetId) imageReferenceBytes(storage, ref.assetId)
     }
     if (input.refs.filter((r) => r.role === 'base').length > 1) throw new ProviderError('invalid', '只能指定一张底图，其他图请选参考用途', { maybeCharged: false })
-    if (input.maskAssetId) imageReferenceBytes(storage, input.maskAssetId)
+    if (input.maskAssetId) validateMask(input)
+  }
+
+  /** 蒙版在 prepare 阶段就验证：PNG、有透明通道、和底图同尺寸，别等排队后才让服务拒绝。 */
+  function validateMask(input) {
+    const mask = imageReferenceBytes(storage, input.maskAssetId)
+    let info
+    try { info = imageInfo(mask.bytes) } catch { throw new ProviderError('invalid', '蒙版图片损坏或格式不支持', { maybeCharged: false }) }
+    if (info.mime !== 'image/png') throw new ProviderError('invalid', '蒙版必须是 PNG 图片', { maybeCharged: false })
+    if (!info.hasAlpha) throw new ProviderError('invalid', '蒙版 PNG 必须有透明通道', { maybeCharged: false })
+    const baseRef = (input.refs || []).find((r) => r.role === 'base' && r.assetId)
+    if (!baseRef) throw new ProviderError('invalid', '蒙版编辑需要一张底图', { maybeCharged: false })
+    let base
+    try { base = imageInfo(imageReferenceBytes(storage, baseRef.assetId).bytes) } catch { throw new ProviderError('invalid', '底图图片损坏或格式不支持', { maybeCharged: false }) }
+    if (info.width !== base.width || info.height !== base.height) throw new ProviderError('invalid', '蒙版和底图的尺寸必须一致', { maybeCharged: false })
   }
 
   function prepare(args) {
@@ -154,7 +208,8 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     const { input, profile } = prepare(args)
     return storage.db.tx(() => {
       const job = runner.enqueue({ ...args, input, profileId: profile.id })
-      storage.db.run('INSERT INTO image_job_configs(job_id, profile_json, created_at) VALUES (?, ?, ?)', job.id, toJson(profile), Date.now())
+      cacheSecrets(job.id, profile)
+      storage.db.run('INSERT INTO image_job_configs(job_id, profile_json, created_at) VALUES (?, ?, ?)', job.id, toJson(publicProfileSnapshot(profile)), Date.now())
       return job
     })
   }
@@ -256,7 +311,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     submit: async (job, attempt, execution = {}) => {
       if (!guard(job, execution)) throw new ProviderError('invalid', '任务已停止', { maybeCharged: false })
       const req = buildRequest(job, attempt)
-      const frozen = savedProfile(job.id)
+      const frozen = resolvedProfile(job.id)
       const picked = frozen ? { profile: frozen } : pickProfile(req, job.input.profileId)
       if (picked.error) throw new ProviderError('unsupported', picked.error, { maybeCharged: false })
       const save = () => storage.db.run('UPDATE jobs SET profile_id = ? WHERE id = ?', picked.profile.id, job.id)
@@ -267,7 +322,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     },
 
     poll: async (job, execution = {}) => {
-      const p = savedProfile(job.id) || profiles().find((x) => x.id === job.profileId)
+      const p = resolvedProfile(job.id) || profiles().find((x) => x.id === job.profileId)
       if (!p) throw new ProviderError('unknown', '这个任务用的生图服务被删掉了')
       const { adapter } = adapterFor(p, { local, toImageBuffer, ...adapterDeps })
       if (!adapter.poll) throw new ProviderError('unknown', '这个服务不能查进度')
@@ -275,7 +330,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     },
 
     cancel: async (job, execution = {}) => {
-      const p = savedProfile(job.id) || profiles().find((x) => x.id === job.profileId)
+      const p = resolvedProfile(job.id) || profiles().find((x) => x.id === job.profileId)
       if (!p) return { ok: false, message: '服务被删掉了' }
       const { adapter } = adapterFor(p, { local, toImageBuffer, ...adapterDeps })
       return adapter.cancel ? adapter.cancel(job.providerTaskId, { signal: execution.signal }) : { ok: false, message: '这个服务不支持取消（画好了也不会发出来）' }
@@ -312,6 +367,7 @@ export function createImageService({ storage, getConfig, hub, local, toImageBuff
     },
 
     notify: async (job, event, info, execution = {}) => {
+      if (['delivered', 'failed', 'unknown'].includes(event)) secretCache.delete(job.id)
       if (execution.shouldContinue?.() === false) return
       if (job.epoch !== storage.epochs.current(job.chatId) || (job.input.accountId && job.input.accountId !== String(getConfig().botQQ))) return
       if (event === 'delivered') {

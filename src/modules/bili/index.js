@@ -22,6 +22,14 @@ export function explicitDanmakuRequest(storage, ctx) {
   return texts.some(text => /(?:发|发送|投|写|打|加).{0,12}弹幕|弹幕.{0,12}(?:发|发送|投|写|打|加)|(?:^|\s)\/(?:danmaku|dm)\b/iu.test(text))
 }
 
+/** 面板副作用路由只接受 POST，避免 <img>/预取/地址栏 GET 直接触发。 */
+export function postOnly(handler) {
+  return async (req, ...args) => {
+    if (String(req?.method || '').toUpperCase() !== 'POST') return { ok: false, code: 'METHOD_NOT_ALLOWED', message: '这个操作只接受 POST' }
+    return handler(req, ...args)
+  }
+}
+
 export default {
   id: 'bili',
   name: 'B站',
@@ -149,8 +157,8 @@ export default {
     api.route('/bili/screenshots', async (req) => ({ ok: true, items: bili.panelScreenshots(http.query(req)) }))
     api.route('/bili/screenshot/image', async (req, res) => { const image = bili.panelScreenshot(http.query(req)); return image ? http.send(res, 200, image.bytes, image.mime) : http.send(res, 404, '') })
     api.route('/bili/account', async () => bili.account(true))
-    api.route('/bili/run', async () => bili.run({ force: true }))
-    api.route('/bili/replies', async () => bili.checkReplies())
+    api.route('/bili/run', postOnly(async () => bili.run({ force: true })))
+    api.route('/bili/replies', postOnly(async () => bili.checkReplies()))
     return bili
   },
 }

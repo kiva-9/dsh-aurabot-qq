@@ -7,7 +7,6 @@
 //   - 一批到期了但她还在回上一批：这批原样排着，后来的消息另开一批，不会把已到期的批次再拖长
 //   - 私聊里她还在跑这一轮时，到期的批次直接插进当前这一轮（steer）
 
-const BUSY_MAX_MS = 4 * 60_000 // 卡住保护：超过这么久就当上一轮已经结束
 const RANK = { context: 0, engaged: 1, interject: 2, must: 3 }
 
 export const realTimers = {
@@ -19,18 +18,22 @@ export const realTimers = {
 /**
  * @param {object} o
  * @param {(chat: object) => {enabled:boolean, waitMs:number, maxMs:number, mentionWaitMs:number, mediaExtraMs:number}} o.settings
- * @param {(chat: object, batch: object, info: {steer: boolean}) => Promise<void>} o.dispatch
- *   交给她。steer=false 时调度器已把这个聊天标成忙，回合结束（或交接失败）后要调 turnEnded。
+ * @param {(chat: object, batch: object, info: {steer: boolean, token: string}) => Promise<void>} o.dispatch
+ *   交给她。steer=false 时调度器已把这个聊天标成忙，回合结束（或交接失败）后要用同一个 token 调 turnEnded。
  * @param {(chatId: string) => boolean} [o.canSteer] 这个聊天当前这一轮还在跑、能插话
  * @param {(entry: object) => boolean} [o.mediaReady] 这条消息的图片 / 语音都处理好了没有
  */
 export function createScheduler({ settings, dispatch, canSteer = () => false, mediaReady = () => true, timers = realTimers, log }) {
   const open = new Map() // chatId → 正在攒的一批
   const ready = new Map() // chatId → [已到期、等着交的批次]
-  const busySince = new Map() // chatId → 这一轮开始的时间
+  const busySince = new Map() // chatId → { at, token }  这一轮的开始时间和回合令牌
   let disposed = false
+  let turnSeq = 0
 
-  const isBusy = (chatId) => busySince.has(chatId) && timers.now() - busySince.get(chatId) < BUSY_MAX_MS
+  // 回合令牌只在调度器内部产生：turn/end 必须带同一个令牌才能放开这个聊天。
+  // 不用「忙了多久就当作结束」这种隐式状态转换，否则长回合会被开第二个并发回合。
+  const newTurnToken = () => `turn-${++turnSeq}`
+  const isBusy = (chatId) => busySince.has(chatId)
 
   /**
    * 来了一条消息。entry: { messageId, actorId, mentioned, stickerOnly, mode }。
@@ -109,24 +112,37 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     const list = ready.get(chatId)
     if (!list || !list.length) return
     if (isBusy(chatId)) {
-      if (list[0].chat.kind === 'private' && canSteer(chatId)) {
+      if (list[0].chat.kind === 'private' && !list[0].noSteer && canSteer(chatId)) {
         ready.delete(chatId)
         run(merge(list), true)
       }
       return
     }
+    const token = newTurnToken()
     ready.delete(chatId)
-    busySince.set(chatId, timers.now())
-    run(merge(list), false)
+    busySince.set(chatId, { at: timers.now(), token })
+    run(merge(list), false, token)
   }
 
-  function run(batch, steer) {
+  function run(batch, steer, token) {
     Promise.resolve()
-      .then(() => { if (!disposed) return dispatch(batch.chat, batch, { steer }) })
+      .then(() => { if (!disposed) return dispatch(batch.chat, batch, { steer, token }) })
       .catch((error) => {
         log?.warn?.(`交给她失败（${batch.chat.chatId}）：`, error.message)
-        if (!steer) turnEnded(batch.chat.chatId)
+        if (steer) {
+          // 插话失败：批次不能丢。放回队首，等当前回合结束再交（不能立刻再 steer 同一批）。
+          batch.noSteer = true
+          requeue(batch.chat.chatId, batch)
+        } else turnEnded(batch.chat.chatId, token)
       })
+  }
+
+  function requeue(chatId, batch) {
+    if (disposed) return
+    const list = ready.get(chatId) || []
+    list.unshift(batch)
+    ready.set(chatId, list)
+    pump(chatId)
   }
 
   /** 排着的几批合成一批（按到达顺序）。 */
@@ -136,8 +152,14 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     return { chat: list.at(-1).chat, entries: list.flatMap((b) => b.entries), mode, mentioned: list.some((b) => b.mentioned), mediaTimedOut: list.some((b) => b.mediaTimedOut) }
   }
 
-  /** 这一轮结束（说完了 / 没说 / 出错）：放开，把这期间到期的批次交出去。 */
-  function turnEnded(chatId) {
+  /**
+   * 这一轮结束（说完了 / 没说 / 出错）：只有带着当前回合令牌才放开。
+   * 省略 token 是显式强制释放（重开会话 / 放弃聊天时用）。
+   */
+  function turnEnded(chatId, token) {
+    const busy = busySince.get(chatId)
+    if (!busy) return
+    if (token !== undefined && token !== null && busy.token !== token) return
     busySince.delete(chatId)
     pump(chatId)
   }
@@ -166,8 +188,11 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
   }
   function reserve(chatId) {
     if (disposed || isBusy(chatId) || open.has(chatId) || ready.get(chatId)?.length) return false
-    busySince.set(chatId, timers.now())
-    return true
+    const token = newTurnToken()
+    busySince.set(chatId, { at: timers.now(), token })
+    return token
   }
-  return { add, mediaSettled, turnEnded, drop, dispose, state, isBusy, reserve, hasOpen: (chatId) => open.has(chatId) }
+  /** 正在忙的聊天和各自忙了多久（给上层的卡死巡检用；调度器自己不做隐式超时）。 */
+  const busyChats = () => [...busySince].map(([chatId, b]) => ({ chatId, token: b.token, ageMs: timers.now() - b.at }))
+  return { add, mediaSettled, turnEnded, drop, dispose, state, isBusy, reserve, busyChats, tokenOf: (chatId) => busySince.get(chatId)?.token, hasOpen: (chatId) => open.has(chatId) }
 }

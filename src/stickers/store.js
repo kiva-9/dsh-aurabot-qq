@@ -444,11 +444,21 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     const callId = `${t.id}:${t.attempts}`
     let invoked = false
     controllers.add(ctrl)
-    const timeout = setTimeout(() => {
-      ctrl.abort(new Error('表情识别超时'))
-      try { if (repo.owns(t)) repo.db.run('UPDATE sticker_tasks SET error=? WHERE id=?', '识别已超时，等待调用结束释放并发槽', t.id) } catch (e) { log?.warn?.('记录表情识别超时失败：', e.message) }
-    }, clamp(cfg().analysisTimeoutMs, 60000, 10, 180000))
-    timeout.unref?.()
+    // 模型调用不保证尊重 AbortSignal。这里用 Promise.race 做硬超时：即使
+    // analyzer 永不结束，也要把任务写成 unknown 并释放并发槽。
+    const timeoutError = Object.assign(new Error('表情识别超时'), { code: 'MODEL_TIMEOUT' })
+    let timeoutResolve
+    const timedOut = new Promise((_, reject) => {
+      const timer = setTimeout(() => {
+        t.analysisOutcome = 'unknown'
+        ctrl.abort(timeoutError)
+        try { if (repo.owns(t)) repo.db.run('UPDATE sticker_tasks SET error=? WHERE id=?', '识别已超时，等待调用结束释放并发槽', t.id) } catch (e) { log?.warn?.('记录表情识别超时失败：', e.message) }
+        reject(timeoutError)
+      }, clamp(cfg().analysisTimeoutMs, 60000, 10, 180000))
+      timer.unref?.()
+      timeoutResolve = () => clearTimeout(timer)
+    })
+    timedOut.catch(() => {})
     try {
       let sampled = null, frames = it.frames.filter((f) => f.selection === 'manual'), images
       const readImage = a => {
@@ -483,9 +493,9 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       const coverage = animated ? (sampled ? 'sampled_partial' : 'manual_partial') : 'still_image'
       t.analysisOutcome = 'unknown'
       invoked = true
-      const response = await analyzer({ images, frames, coverage, hint: it.source?.hint || '', animated,
+      const response = await Promise.race([analyzer({ images, frames, coverage, hint: it.source?.hint || '', animated,
         policyVersion: t.input.policyVersion, signal: ctrl.signal, scope: modelScope, chatId: modelScope.chat,
-        operationId: it.id, callId, sourceMessageIds: it.source?.messageId ? [it.source.messageId] : [] })
+        operationId: it.id, callId, sourceMessageIds: it.source?.messageId ? [it.source.messageId] : [] }), timedOut])
       ctrl.signal.throwIfAborted()
       t.analysisOutcome = 'completed'
       const result = parseAnalysis(response, t.input.policyVersion)
@@ -529,7 +539,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
       if (invoked) reportModelOutcome(dsh, { callId, scope: modelScope, status: 'failed',
         code: error.code || (t.analysisOutcome === 'unknown' ? 'ANALYSIS_UNKNOWN' : 'ANALYSIS_FAILED') })
       throw error
-    } finally { clearTimeout(timeout); controllers.delete(ctrl) }
+    } finally { timeoutResolve?.(); controllers.delete(ctrl) }
   }
   async function processSync(t) {
     const it = repo.get(t.itemId)

@@ -66,6 +66,7 @@ before(async () => {
 // fetch 默认长连接，不主动断开 server.close() 会一直等下去
 after(() => { server.closeAllConnections(); server.close() })
 
+const make = (p, opts = {}) => createHttpImages(p, { fetchImpl: fetch, ...opts })
 const last = (path) => [...seen].reverse().find((r) => r.url.startsWith(path))
 
 function profile(extra, apiKey = 'sk-test') {
@@ -81,7 +82,7 @@ const asyncExtra = () => ({
 })
 
 test('同步 JSON：base64 结果取出来，提示词按 JSON 转义，尺寸拆成宽高', async () => {
-  const a = createHttpImages(profile({
+  const a = make(profile({
     submit: { method: 'POST', url: `${base}/sync-json?size={size}`, bodyType: 'json', body: '{"p":"{prompt}","neg":"{negativePrompt}","w":{width},"h":{height},"n":{n},"mode":"{mode}"}' },
     response: { kind: 'json', imagesPath: 'data.0.b64' },
   }))
@@ -102,8 +103,20 @@ test('同步 JSON：base64 结果取出来，提示词按 JSON 转义，尺寸�
   assert.equal(rec.headers['content-type'], 'application/json')
 })
 
+test('HTTP 适配器按声明能力拒绝未知模式和超量输入，MIME 与字节不符也不发', async () => {
+  const textOnly = make(profile({ modes: ['text'], maxInputs: 0, submit: { method: 'POST', url: `${base}/echo`, bodyType: 'json', body: '{}' }, response: { kind: 'json', imagesPath: 'images' } }))
+  await assert.rejects(textOnly.submit({ mode: 'edit', prompt: 'x', inputs: [{ buf: PNG, mime: 'image/png', role: 'base' }] }), (e) => e.kind === 'unsupported')
+  const one = make(profile({ modes: ['reference'], maxInputs: 1, submit: { method: 'POST', url: `${base}/echo`, bodyType: 'json', body: '{"images":{imagesJson}}' }, response: { kind: 'json', imagesPath: 'images' } }))
+  await assert.rejects(one.submit({ mode: 'reference', prompt: 'x', inputs: [
+    { buf: PNG, mime: 'image/png', role: 'identity' }, { buf: PNG, mime: 'image/png', role: 'style' },
+  ] }), (e) => e.kind === 'unsupported' && /最多收/.test(e.message))
+  const before = seen.length
+  await assert.rejects(one.submit({ mode: 'reference', prompt: 'x', inputs: [{ buf: JPG, mime: 'image/png', role: 'style' }] }), (e) => e.kind === 'invalid' && /MIME/.test(e.message))
+  assert.equal(seen.length, before)
+})
+
 test('同步直接图片：返回体就是图', async () => {
-  const a = createHttpImages(profile({
+  const a = make(profile({
     submit: { method: 'GET', url: `${base}/sync-raw?q={prompt}`, bodyType: 'none' },
     response: { kind: 'image' },
   }))
@@ -115,7 +128,7 @@ test('同步直接图片：返回体就是图', async () => {
 })
 
 test('异步：提交拿任务号 → 轮询 running → done（结果地址从服务下载），头部带上密钥', async () => {
-  const a = createHttpImages(profile(asyncExtra(), 'sk-abc'))
+  const a = make(profile(asyncExtra(), 'sk-abc'))
   const caps = a.capabilities()
   assert.equal(caps.async, true)
   assert.equal(caps.cancel, true)
@@ -134,7 +147,7 @@ test('异步：提交拿任务号 → 轮询 running → done（结果地址从�
 })
 
 test('异步失败：状态在 failedValues 里，带上 errorPath 的原因', async () => {
-  const a = createHttpImages(profile(asyncExtra()))
+  const a = make(profile(asyncExtra()))
   const r = await a.submit({ mode: 'text', prompt: 'fail', size: '64x64', inputs: [] })
   const p = await a.poll(r.providerTaskId)
   assert.equal(p.status, 'failed')
@@ -143,7 +156,7 @@ test('异步失败：状态在 failedValues 里，带上 errorPath 的原因', a
 })
 
 test('取消：按模板调用取消接口', async () => {
-  const a = createHttpImages(profile(asyncExtra(), 'sk-c'))
+  const a = make(profile(asyncExtra(), 'sk-c'))
   const r = await a.submit({ mode: 'text', prompt: '取消我', size: '64x64', inputs: [] })
   const c = await a.cancel(r.providerTaskId)
   assert.equal(c.ok, true)
@@ -157,14 +170,14 @@ test('取消：按模板调用取消接口', async () => {
 })
 
 test('{imagesJson}：原样插入带角色的图数组，底图排第一；{maskBase64} 正常替换', async () => {
-  const a = createHttpImages(profile({
+  const a = make(profile({
     modes: ['reference', 'edit', 'mask'], maxInputs: 4,
     submit: { method: 'POST', url: `${base}/echo`, bodyType: 'json', body: '{"prompt":"{prompt}","images":{imagesJson},"mask":"{maskBase64}"}' },
     response: { kind: 'json', imagesPath: 'images' },
   }))
   assert.deepEqual(a.capabilities().modes, ['reference', 'edit', 'mask'])
   assert.equal(a.capabilities().maxInputs, 4)
-  const mask = Buffer.from('maskbytes')
+  const mask = PNG
   const r = await a.submit({
     mode: 'mask', prompt: '换成红色',
     inputs: [{ buf: JPG, mime: 'image/jpeg', role: 'style' }, { buf: PNG, mime: 'image/png', role: 'base' }],
@@ -182,7 +195,7 @@ test('{imagesJson}：原样插入带角色的图数组，底图排第一；{mask
 })
 
 test('multipart：文本字段按模板填值，输入图用 imageField 重复字段，蒙版用 maskField', async () => {
-  const a = createHttpImages(profile({
+  const a = make(profile({
     modes: ['edit', 'mask'], maxInputs: 2,
     headers: { 'x-key': '{apiKey}', 'content-type': 'text/plain' },
     submit: { method: 'POST', url: `${base}/multipart`, bodyType: 'multipart', body: '{"prompt":"{prompt}","size":"{size}","steps":20}', imageField: 'images[]', maskField: 'mask_image' },
@@ -209,7 +222,7 @@ test('multipart：文本字段按模板填值，输入图用 imageField 重复�
 })
 
 test('HTTP 429 → quota，可以晚点重试', async () => {
-  const a = createHttpImages(profile({
+  const a = make(profile({
     submit: { method: 'POST', url: `${base}/limited`, bodyType: 'json', body: '{}' },
     response: { kind: 'json', imagesPath: 'data' },
   }))
@@ -236,7 +249,7 @@ test('配置检查：缺地址、方法不对、异步没配状态、缺图片�
   has(validateHttpProfile({ extra: { submit: { url: 'http://x', bodyType: 'xml' }, response: { imagesPath: 'a' } } }), /请求体类型不对/)
   has(validateHttpProfile({ extra: { submit: { url: 'http://x' }, response: { kind: 'html' } } }), /返回类型不对/)
   assert.deepEqual(validateHttpProfile(profile(asyncExtra())), [])
-  const e = await createHttpImages({ extra: {} }).submit({ mode: 'text', prompt: 'x', inputs: [] }).catch((err) => err)
+  const e = await make({ extra: {} }).submit({ mode: 'text', prompt: 'x', inputs: [] }).catch((err) => err)
   assert.equal(e.kind, 'invalid')
   assert.match(e.message, /没填提交地址/)
 })
@@ -252,7 +265,7 @@ test('POST JSON 轮询：恢复已有任务无需提交，URL 无任务号，bod
   tasks.set(id, { polls: 0 })
   const config = profile(postStatusExtra(), 'must-not-appear-in-body')
   assert.deepEqual(validateHttpProfile(config), [])
-  const adapter = createHttpImages(config), start = seen.length
+  const adapter = make(config), start = seen.length
   assert.equal((await adapter.poll(id)).status, 'running')
   const rec = last('/status-json')
   assert.equal(rec.url, '/status-json')
@@ -272,7 +285,7 @@ test('POST JSON 轮询保留失败状态/HTTP 错误分类及自定义 Content-T
   tasks.set('native-failed', { polls: 0, fail: true })
   const extra = postStatusExtra()
   extra.headers['Content-Type'] = 'application/json; charset=utf-8'
-  const adapter = createHttpImages(profile(extra))
+  const adapter = make(profile(extra))
   const failed = await adapter.poll('native-failed')
   assert.equal(failed.status, 'failed')
   assert.equal(failed.error.kind, 'invalid')
@@ -285,7 +298,7 @@ test('旧的 POST URL 轮询配置默认 none：不凭空添加 body 或 Content
   const extra = asyncExtra()
   extra.status.method = 'POST'
   let calls = 0
-  const adapter = createHttpImages(profile(extra), { fetchImpl: async (url, init) => {
+  const adapter = make(profile(extra), { fetchImpl: async (url, init) => {
     calls++
     assert.equal(url, `${base}/tasks/old-id`)
     assert.equal(init.method, 'POST')
@@ -304,7 +317,7 @@ test('{imagesDataUrls} 是完整 data URL 数组，底图优先且其余稳定�
     response: { imagesPath: 'images' },
   })
   assert.deepEqual(validateHttpProfile(config), [])
-  const adapter = createHttpImages(config), prompt = '蓝鲸 "{apiKey}"\n{imagesDataUrls}'
+  const adapter = make(config), prompt = '蓝鲸 "{apiKey}"\n{imagesDataUrls}'
   await adapter.submit({ mode: 'reference', prompt, inputs: [
     { buf: JPG, mime: 'image/jpeg', role: 'style' },
     { buf: PNG, mime: 'image/png', role: 'base' },
@@ -327,7 +340,7 @@ test('只声明 imagesDataUrls 就能收图；损坏字节与伪造 MIME 在发�
   })
   assert.deepEqual(validateHttpProfile(config), [])
   let calls = 0
-  const adapter = createHttpImages(config, { fetchImpl: async () => { calls++; return Response.json({ images: [] }) } })
+  const adapter = make(config, { fetchImpl: async () => { calls++; return Response.json({ images: [] }) } })
   for (const input of [{ buf: PNG, mime: 'text/html' }, { buf: PNG.subarray(0, 20), mime: 'image/png' }]) {
     await assert.rejects(adapter.submit({ mode: 'reference', inputs: [{ ...input, role: 'base' }] }), e => e.kind === 'invalid')
   }
@@ -357,7 +370,7 @@ test('轮询 body 校验：不能 GET 带体、静默丢体、缺任务号或发
     Object.assign(extra.status, patch)
     assert.ok(validateHttpProfile(profile(extra)).some(problem => message.test(problem)))
     let calls = 0
-    const adapter = createHttpImages(profile(extra), { fetchImpl: async () => { calls++; return Response.json({}) } })
+    const adapter = make(profile(extra), { fetchImpl: async () => { calls++; return Response.json({}) } })
     await assert.rejects(adapter.poll('existing-task'), e => e.kind === 'invalid')
     assert.equal(calls, 0)
   }
@@ -367,7 +380,7 @@ test('POST JSON 轮询传递取消信号，取消后不再轮询或重新提交'
   const controller = new AbortController(), calls = []
   let notifyStarted
   const started = new Promise(resolve => { notifyStarted = resolve })
-  const adapter = createHttpImages(profile(postStatusExtra()), { fetchImpl: async (url, init) => {
+  const adapter = make(profile(postStatusExtra()), { fetchImpl: async (url, init) => {
     calls.push({ url, init })
     notifyStarted()
     return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }))

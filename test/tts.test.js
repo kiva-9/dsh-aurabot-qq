@@ -102,6 +102,7 @@ before(async () => {
     if (req.url === '/b64') return json({ data: { audio: PCM.toString('base64') } })
     if (req.url === '/bad-b64') return json({ data: { audio: '!!!!' + PCM.toString('base64') } })
     if (req.url === '/url') return json({ data: { audio: base + '/pcm' } })
+    if (req.url === '/url-private-other') return json({ data: { audio: 'http://127.0.0.1:9/pcm' } })
     if (req.url === '/json-error') return json({ error: 'quota exceeded' })
     if (req.url === '/length') { res.writeHead(200, { 'content-length': 20 * 1024 * 1024 + 1 }); return res.flushHeaders() }
     if (req.url === '/compressed') { res.setHeader('content-encoding', 'gzip'); return res.end(gzipSync(Buffer.alloc(21 * 1024 * 1024))) }
@@ -159,6 +160,11 @@ test('真实 HTTP：直接音频/JSON base64/JSON URL 都使用显式 audioForma
   const result = await textToSpeech('x', http('/wav'))
   assert.deepEqual(readFileSync(result.file), WAV)
   for (const path of ['/json-error', '/bad-b64']) await assert.rejects(textToSpeech('x', http(path, { response: path === '/bad-b64' ? 'json-base64' : 'audio', jsonPath: 'data.audio', audioFormat: 'pcm_s16le' })), /不是音频|base64/)
+})
+
+test('JSON URL：跨源的 127.0.0.1 地址被拒绝，同源本地 TTS 服务仍可用', async () => {
+  await assert.rejects(textToSpeech('x', http('/url-private-other', { response: 'json-url', jsonPath: 'data.audio', audioFormat: 'pcm_s16le' })),
+    /禁止|私有|内网|公网|不合法|端口/)
 })
 
 test('真实 HTTP：Content-Length、chunked、解压后字节都受 20 MiB 上限，失败不落盘', async () => {

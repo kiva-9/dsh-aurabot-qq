@@ -10,7 +10,7 @@ import { normalize } from '../src/core/config.js'
 function setup(t, { search = {}, retrieval = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'aurabot-ref-routing-'))
   const storage = createStorage({ file: ':memory:', filesDir: join(dir, 'assets') })
-  const config = normalize({ botQQ: '20', ownerQQ: '10', imageGen: { enabled: true, profiles: [{
+  const config = normalize({ botQQ: '20', ownerQQ: '10', allow: { groups: ['42'] }, imageGen: { enabled: true, profiles: [{
     id: 'fixture', protocol: 'openai', baseUrl: 'https://unused.invalid/v1', model: 'fixture',
     capabilities: { modes: ['text', 'reference', 'edit'], maxInputs: 4 },
   }] } })

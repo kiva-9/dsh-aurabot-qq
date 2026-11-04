@@ -8,7 +8,8 @@ const EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp', 'im
 /**
  * profile: { baseUrl, apiKey, model, extra: { responseFormat?: 'b64_json'|'url'|'', imageField?: 'image[]'|'image', quality?, style? } }
  */
-export function createOpenAIImages(profile, { fetchImpl = fetch } = {}) {
+export function createOpenAIImages(profile, { fetchImpl } = {}) {
+  const requestFetch = fetchImpl || fetch
   const base = String(profile.baseUrl || '').replace(/\/+$/, '')
   const x = profile.extra || {}
   const auth = profile.apiKey ? { authorization: `Bearer ${profile.apiKey}` } : {}
@@ -45,7 +46,7 @@ export function createOpenAIImages(profile, { fetchImpl = fetch } = {}) {
     if (x.responseFormat) common.response_format = x.responseFormat
     if (x.quality) common.quality = x.quality
     if (req.mode === 'text') {
-      const r = await request(fetchImpl, `${base}/images/generations`, {
+      const r = await request(requestFetch, `${base}/images/generations`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify(common),
       }, { signal })
       return finish(r, signal)
@@ -66,7 +67,7 @@ export function createOpenAIImages(profile, { fetchImpl = fetch } = {}) {
       if (req.mask.buf.length >= 4 * 1024 * 1024) throw new ProviderError('invalid', 'OpenAI 蒙版必须小于 4 MiB')
     }
     if (req.mode === 'mask') form.append('mask', new Blob([req.mask.buf], { type: 'image/png' }), 'mask.png')
-    const r = await request(fetchImpl, `${base}/images/edits`, { method: 'POST', headers: { ...auth }, body: form }, { signal })
+    const r = await request(requestFetch, `${base}/images/edits`, { method: 'POST', headers: { ...auth }, body: form }, { signal })
     return finish(r, signal)
   }
 
