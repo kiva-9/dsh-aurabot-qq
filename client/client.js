@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
       }
       return latest
     }
+    // 保存成功后的草稿：保存期间没再编辑就直接用服务端保存好的配置；编辑过就把这段时间的改动叠到保存结果上。
+    const nextDraftAfterSave = (current, startDraft, saved) =>
+      !startDraft || JSON.stringify(current) === JSON.stringify(startDraft) ? clone(saved) : applyConfigChanges(clone(saved), startDraft, current)
     const pct = (v) => Math.round((Number(v) || 0) * 100)
     const cx = (...a) => a.filter(Boolean).join(' ')
     const timeAgo = (t) => {
@@ -3939,7 +3942,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         for (const p of body.imageGen?.profiles || []) for (const [key, value] of Object.entries(p.extra || {})) {
           if (['workflow', 'bindings', 'submit', 'response', 'status', 'cancel', 'headers'].includes(key) && value != null && (typeof value !== 'object' || Array.isArray(value))) { toast(`「${p.name}」的 ${key} 不是合法 JSON 对象，请修正后再保存`, 'err'); return { ok: false } }
         }
-        const bodyJson = JSON.stringify(body)
+        // 保存开始时的草稿：右上角开关等「直接保存」的内容可能和草稿不同（开关只改一项），
+        // 不能拿保存内容去判断用户在保存期间有没有继续编辑。
+        const startDraft = draft ? clone(draft) : null
         const expectedRevision = baseRef.current.revision ?? st?.configRevision ?? st?.config?.configRevision
         savingRef.current = true
         stateSeqRef.current++
@@ -3968,8 +3973,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         dirtyRef.current = false
         rebase(r.config, r.configRevision ?? r.config?.configRevision)
         setSt(r)
-        // 保存请求进行期间用户继续输入的内容不能被旧响应覆盖。
-        setDraft(current => JSON.stringify(current) === bodyJson ? clone(r.config) : current)
+        // 草稿换成刚保存好的配置；保存请求进行期间用户继续输入的内容叠回去，不被覆盖。
+        setDraft(current => nextDraftAfterSave(current, startDraft, r.config))
         toast(r.message || '保存好了', 'ok')
         return r
       }
