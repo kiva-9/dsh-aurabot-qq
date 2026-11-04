@@ -113,6 +113,7 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     }
     let viewer
     if (!c.admin) { try { viewer = scopeOf(c) } catch { return { items: [], total: 0 } } }
+    if (!c.accountId && !account()) return { items: [], total: 0, offset: 0, limit: 0, libraryScope: libraryScope() }
     const a = accountOf(c)
     const status = c.status || c.state
     let items = repo.library(a, c.admin && ['deleted', 'all'].includes(status)).filter((it) => c.admin ? (accountLibrary() || !c.chatId || it.scope.chat === c.chatId) : visible(it, viewer))
@@ -841,6 +842,8 @@ export function createStickerStore({ storage, dsh, getConfig = () => ({}), onebo
     const result = { total: 0, pending: 0, approved: 0, rejected: 0, disabled: 0, deleted: 0, libraryScope: libraryScope() }
     let viewer
     if (!c.admin) { try { viewer = scopeOf(c) } catch { return result } }
+    // 还没接入机器人号（全新安装）：没有账号范围，表情库就是空的，不报错
+    if (!c.accountId && !account()) return result
     for (const it of repo.library(accountOf(c), true)) {
       if (c.admin ? !accountLibrary() && c.chatId && it.scope.chat !== c.chatId : it.state !== 'approved' || !visible(it, viewer) || !assetOf(it) || !sourceValid(it) || deniedAtTarget(it, viewer)) continue
       result[it.state]++
