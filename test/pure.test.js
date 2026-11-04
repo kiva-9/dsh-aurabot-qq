@@ -235,7 +235,7 @@ test('规则：画画、唱歌只在功能真的能用时告诉她', async () =>
   const off = rulesText('social', normalize({ imageGen: { enabled: true } }))
   assert.doesNotMatch(off, /你会画画|你会唱歌/, '没配生图服务就不说会画')
   const on = rulesText('social', normalize({ imageGen: { enabled: true, baseUrl: 'https://x/v1', model: 'm' }, song: { enabled: true } }))
-  assert.match(on, /你会画画：只给主人画/)
+  assert.match(on, /你会画画（只给主人画）/)
   assert.match(on, /你会唱歌/)
 })
 

@@ -1110,8 +1110,22 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       if (d.interrupted) return
       const t = textOf(d.message)
       if (t) {
+        // 一轮里可能有好几个 step（工具调用前后各说一段）。以前直接覆盖，前面的话会静默丢掉（#205）。
+        // 没插话：按 step 累加，一起发；插过话（steer）：前面那段已经过时，只留最新的，免得前后矛盾。
+        // 同一个 step 可能被重复推送，用 (turn, step) 去重。
+        if (st.lastTurn !== d.turn) { st.text = ''; st.stepKeys = new Set() }
         st.lastTurn = d.turn
-        st.text = t
+        const stepKey = String(d.step ?? '')
+        st.stepKeys ||= new Set()
+        if (st.steered || !st.text) st.text = t
+        else if (stepKey && stepKey === st.lastStepKey) st.text = st.text.slice(0, st.text.length - (st.lastStepText || '').length) + t
+        else if (stepKey && st.stepKeys.has(stepKey)) return
+        else if (t === st.lastStepText) return // 没带 step 的重复推送：同一段不发两遍
+        else st.text = `${st.text}\n${t}`
+        if (stepKey) st.stepKeys.add(stepKey)
+        st.lastStepKey = stepKey
+        st.lastStepText = t
+        st.steered = false
       }
       return
     }
@@ -1144,6 +1158,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       }catch(error){log.debug('结束 Planner 决策：',error.message)}
       st.decisionId=null
       st.text = ''
+      st.stepKeys = new Set(); st.lastStepKey = null; st.lastStepText = ''; st.steered = false
       st.senders = new Set()
       st.requests = []
       st.directOwner = false
@@ -1876,6 +1891,31 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     scheduler.turnEnded(chatId, token ?? undefined)
   }
 
+  // 卡死巡检：调度器不再按时长隐式放开（长回合会被开出并发第二轮），但 turn/end 丢了（宿主崩了、
+  // 事件没送到、dispatch 卡在某个 await 上）时这个聊天会永远「忙」，之后的消息全部石沉大海。
+  // 这里只在「忙了很久 + DSH 那边这个会话确实没在跑」时才放开，且只带当时的令牌，不会误放新回合。
+  const STUCK_TURN_MS = 10 * 60_000
+  function sweepStuckTurns() {
+    if (disposed) return
+    for (const { chatId, token, ageMs } of scheduler.busyChats()) {
+      if (ageMs < STUCK_TURN_MS || proactiveRunning.has(chatId)) continue
+      const sessionId = map().chats[chatId]?.sessionId
+      const agent = sessionId ? (dsh.agents?.get?.(sessionId) || dsh.agents?.get?.('session-' + sessionId)) : null
+      if (agent?.status === 'running') continue
+      log.warn(`${chatId}：这一轮已经 ${Math.round(ageMs / 60000)} 分钟没结束、会话也不在运行，按卡死放开`)
+      if (sessionId) {
+        const key = sessionKey(sessionId)
+        stopTyping(key)
+        const st = turnState.get(key)
+        if (st && running.get(chatId) === st.turnId) { try { st.controller?.abort() } catch {} }
+      }
+      if (runningToken.get(chatId) === token || !runningToken.has(chatId)) { running.delete(chatId); runningToken.delete(chatId) }
+      scheduler.turnEnded(chatId, token)
+    }
+  }
+  const stuckSweep = setInterval(() => { try { sweepStuckTurns() } catch (error) { log.debug('卡死巡检失败：', error.message) } }, 60_000)
+  stuckSweep.unref?.()
+
   async function admit(agent, content) {
     if (content.length === 1) return content
     const att = dsh.attachments || dsh.get('attachments')
@@ -1981,7 +2021,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
       requestId: st.requests[0]?.id,
       signal: turnController?.signal })
     if (disposed || !getConfig().enabled || (chat.kind !== 'system' && !checkAllowed(getConfig(), chat).allowed) || isMuted?.(chat.chatId) || turnController?.signal.aborted || turnState.get(key) !== st ||
-      account !== String(getConfig().botQQ || '') || st.epoch !== storage.epochs.current(chat.chatId)) {if(turnState.get(key)===st&&st.controller===turnController)release(chat.chatId);return}
+      account !== String(getConfig().botQQ || '') || st.epoch !== storage.epochs.current(chat.chatId)) {if(!opts.steer&&turnState.get(key)===st&&st.controller===turnController)release(chat.chatId);return}
     if (hooks?.preparedPrompt) {
       try {
         const next = await hooks.preparedPrompt(content, { chat, chatId: chat.chatId, senderId, ...opts, sessionId,
@@ -1995,7 +2035,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
         return
       }
     }
-    if (disposed || !getConfig().enabled || (chat.kind !== 'system' && !checkAllowed(getConfig(), chat).allowed) || isMuted?.(chat.chatId) || turnController?.signal.aborted || turnState.get(key) !== st || st.controller !== turnController || account !== String(getConfig().botQQ || '') || st.epoch !== storage.epochs.current(chat.chatId)) { if (turnState.get(key) === st && st.controller === turnController) release(chat.chatId); return }
+    if (disposed || !getConfig().enabled || (chat.kind !== 'system' && !checkAllowed(getConfig(), chat).allowed) || isMuted?.(chat.chatId) || turnController?.signal.aborted || turnState.get(key) !== st || st.controller !== turnController || account !== String(getConfig().botQQ || '') || st.epoch !== storage.epochs.current(chat.chatId)) { if (!opts.steer && turnState.get(key) === st && st.controller === turnController) release(chat.chatId); return }
     const preparedContent = []
     for (const block of content) {
       if (block.type !== 'image' || !block.assetId) { preparedContent.push(block); continue }
@@ -2013,7 +2053,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     const admitted = await admit(agent, content)
     if (disposed || !getConfig().enabled || (chat.kind !== 'system' && !checkAllowed(getConfig(), chat).allowed) || isMuted?.(chat.chatId) || turnController?.signal.aborted || turnState.get(key) !== st || st.controller !== turnController ||
       account !== String(getConfig().botQQ || '') || st.epoch !== storage.epochs.current(chat.chatId)) {
-      if(turnState.get(key)===st&&st.controller===turnController)release(chat.chatId)
+      // 插话被拦下时当前这一轮还在跑，不能放开调度器（否则会并发开第二轮）
+      if(!opts.steer&&turnState.get(key)===st&&st.controller===turnController)release(chat.chatId)
       return
     }
     startTyping(key, chat)
@@ -2035,6 +2076,8 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     if (opts.steer && typeof agent.steer === 'function') {
       log.info(`${chat.chatId}：她还在忙，这句直接插进当前这一轮（steer）`)
       await agent.steer(message)
+      // 插话后模型会基于新消息重说：之前那段已经过时，下一段 assistant/message 覆盖而不是累加
+      st.steered = true
     } else {
       running.set(chat.chatId, st.turnId)
       if (st.schedulerToken) runningToken.set(chat.chatId, st.schedulerToken)
@@ -2362,6 +2405,7 @@ export function createHub({ dsh, getConfig, log, onebot, storage, canSend = () =
     },
     dispose: () => {
       disposed = true
+      clearInterval(stuckSweep)
       sessionNotes.clear(); imageNotes.clear()
       for (const st of turnState.values()) { st.controller?.abort(); st.system?.reject(new Error('后台事件已取消')) }
       scheduler.dispose(); media.dispose()

@@ -290,3 +290,67 @@ test('P2 groupName 失败负缓存：连续读取只请求一次网关', async (
   assert.equal(await f.hub.groupName(GROUP), GROUP)
   assert.equal(infoCalls, 1)
 })
+
+// ---------- 一轮多段发言（#205）、插话重说、卡死巡检 ----------
+
+const textOfCall = (c) => JSON.stringify(c.params?.message ?? c.params)
+
+test('一轮里工具前后两段发言都发出去；同一 step 重复推送不重复', async (t) => {
+  const f = await hubFixture(t, { config: { merge: { enabled: false } } })
+  const chat = privateChat()
+  const sends = () => f.calls.filter((c) => c.action === 'send_private_msg')
+  await f.hub.pushToSession(chat, [{ type: 'text', text: '先开会话' }], OWNER)
+  await until(() => sends().length >= 1)
+  const sid = f.hub.sessions()[chat.chatId].sessionId
+  const before = sends().length
+  const ev = (type, data) => f.hub.onSessionEvent({ id: sid }, { type, data })
+  ev('turn/start', { turn: 50 })
+  ev('assistant/message', { turn: 50, step: 1, message: { content: [{ type: 'text', text: '我先查一下天气' }] } })
+  ev('assistant/message', { turn: 50, step: 1, message: { content: [{ type: 'text', text: '我先查一下天气' }] } })
+  ev('assistant/message', { turn: 50, step: 2, message: { content: [{ type: 'text', text: '明天下雨记得带伞' }] } })
+  ev('turn/end', { turn: 50, reason: { kind: 'completed' } })
+  await until(() => /明天下雨/.test(sends().slice(before).map(textOfCall).join('\n')))
+  await flush()
+  const out = sends().slice(before).map(textOfCall).join('\n')
+  assert.match(out, /我先查一下天气/, 'step1 的话不能丢')
+  assert.match(out, /明天下雨记得带伞/)
+  assert.equal(out.split('我先查一下天气').length - 1, 1, '同一 step 重复推送只发一次')
+})
+
+test('插话（steer）之后的新一段覆盖旧段，只发最新的', async (t) => {
+  const f = await hubFixture(t, { config: { merge: { enabled: false } } })
+  const chat = privateChat()
+  const sends = () => f.calls.filter((c) => c.action === 'send_private_msg')
+  await f.hub.pushToSession(chat, [{ type: 'text', text: '先开会话' }], OWNER)
+  await until(() => sends().length >= 1)
+  const sid = f.hub.sessions()[chat.chatId].sessionId
+  const before = sends().length
+  const ev = (type, data) => f.hub.onSessionEvent({ id: sid }, { type, data })
+  ev('turn/start', { turn: 60 })
+  ev('assistant/message', { turn: 60, step: 1, message: { content: [{ type: 'text', text: '旧的半截回答' }] } })
+  await f.hub.pushToSession(chat, [{ type: 'text', text: '等等我改主意了' }], OWNER, { steer: true })
+  ev('assistant/message', { turn: 60, step: 2, message: { content: [{ type: 'text', text: '好，那就按新的来' }] } })
+  ev('turn/end', { turn: 60, reason: { kind: 'completed' } })
+  await until(() => sends().length > before)
+  await flush()
+  const out = sends().slice(before).map(textOfCall).join('\n')
+  assert.match(out, /按新的来/)
+  assert.doesNotMatch(out, /旧的半截回答/)
+})
+
+test('调度器 busyChats 报告忙了多久，令牌不对不能放开', () => {
+  const timers = fakeTimers()
+  const sch = createScheduler({ settings: () => settings, dispatch: async () => {}, timers })
+  const token = sch.reserve(pm.chatId)
+  assert.ok(token)
+  timers.advance(11 * 60_000)
+  const [busy] = sch.busyChats()
+  assert.equal(busy.chatId, pm.chatId)
+  assert.equal(busy.token, token)
+  assert.ok(busy.ageMs >= 11 * 60_000)
+  sch.turnEnded(pm.chatId, 'turn-wrong')
+  assert.equal(sch.isBusy(pm.chatId), true)
+  sch.turnEnded(pm.chatId, token)
+  assert.equal(sch.isBusy(pm.chatId), false)
+  sch.dispose()
+})

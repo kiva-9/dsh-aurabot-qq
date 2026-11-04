@@ -121,9 +121,27 @@ export function isSilence(text) {
   return ['', SILENCE, '［沉默］', '(沉默)', '（沉默）'].includes(stringOf(text).trim())
 }
 
+/**
+ * 模型漏进正文的内部语法，发到 QQ 前先洗掉（代码块/行内代码里的不动）：
+ * - `<br>`：模型把换行写成 HTML 标签，原样发出去很难看，当换行；
+ * - DSML 工具调用收尾标记（想调工具又没调时漏出来的 `</｜｜DSML｜｜ invoke>` 之类）；
+ * - 行首的历史消息编号（上下文给历史消息加的 `m00879b`，长会话里模型会抄）。只认 5 位以上，避免误伤型号。
+ * 洗完是空的就按沉默处理。
+ */
+export function cleanModelArtifacts(value) {
+  const parts = stringOf(value).split(/(`{3,}[\s\S]*?(?:`{3,}|$)|`[^`\r\n]*`)/)
+  for (let i = 0; i < parts.length; i += 2) {
+    parts[i] = parts[i]
+      .replace(/<\/?\s*[｜|]{1,2}\s*DSML\s*[｜|]{1,2}[^>\r\n]*>/g, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/(^|\n)[ \t]*m\d{5,}[a-z]?(?![\p{L}\p{N}])[ \t]*[，,:：]?[ \t]*/gu, '$1')
+  }
+  return parts.join('')
+}
+
 /** 原始 block 是唯一内容来源。模型只能引用这些 ID，不能提供媒体路径或替代语音。 */
 export function createReplySource(value) {
-  const text = stringOf(value), blocks = [], ranges = protectedReplyRanges(text)
+  const text = cleanModelArtifacts(value), blocks = [], ranges = protectedReplyRanges(text)
   const add = (type, start, end, extra = {}) => blocks.push({ id: `b${blocks.length}`, type, start, end, raw: text.slice(start, end), ...extra })
   let from = 0, at = 0, rangeAt = 0
   while (at < text.length) {

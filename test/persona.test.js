@@ -217,3 +217,21 @@ test('默认按聊天类型分卡：私聊绑私房版、群聊绑群骚版，�
   assert.equal(edited['kind:private'], undefined)
   assert.equal(edited['kind:group'], undefined)
 })
+
+test('说话风格归人设卡：卡没写用默认，写了以卡为准；旧版整篇卡不补；运行规则里不再写死风格', async () => {
+  const { DEFAULT_STYLE, DEFAULT_BEHAVIOR } = await import('../src/persona/compiler.js')
+  const empty = compilePersona(normalizeLayers({ identity: { name: '小蓝' } }))
+  assert.ok(empty.includes(DEFAULT_STYLE) && empty.includes(DEFAULT_BEHAVIOR), '空卡用默认习惯')
+  const own = compilePersona(normalizeLayers({ identity: { name: '小蓝' }, behavior: { text: '话少' }, style: { text: '一次一条，十个字以内' } }))
+  assert.ok(!own.includes(DEFAULT_STYLE) && !own.includes(DEFAULT_BEHAVIOR), '卡写了就不叠默认')
+  const onlyExamples = compilePersona(normalizeLayers({ style: { examples: ['嗯'] } }))
+  assert.ok(!onlyExamples.includes(DEFAULT_STYLE), '只有示例也算卡自己定了风格')
+  assert.equal(compilePersona(normalizeLayers({ legacy: { body: '你是小蓝。' } })), '你是小蓝。')
+  const { rulesText } = await import('../src/persona/personas.js')
+  const { normalize } = await import('../src/core/config.js')
+  for (const kind of ['private', 'social']) {
+    const r = rulesText(kind, normalize({}))
+    for (const s of ['一到三句', '查户口', '撒娇', '私聊里主动一点', '闲聊以自然纯文本']) assert.ok(!r.includes(s), `${kind} 规则不该写死：${s}`)
+    assert.ok(r.includes('|||') && r.includes('<poke>'), '协议标记仍在规则里')
+  }
+})

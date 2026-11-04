@@ -133,14 +133,16 @@ test('人格与规则通过提示词变量注入', () => {
   assert.match(persona, /大肥鱼/)
   assert.match(persona, /鲸鱼/)
   assert.doesNotMatch(persona, /想发表情包时在末尾加|标签和正文分开/)
-  const stickerRule = persona.split('\n').find(line => line.includes('表情包由独立决策'))
+  // 表情包是协议不是风格：只写在运行规则里，人设卡不再重复一遍
+  assert.doesNotMatch(persona, /表情包由独立决策/)
+  const stickerRule = fake.variables.get('aurabot_rules_social')().split('\n').find(line => line.includes('表情包由独立决策'))
   assert.ok(stickerRule)
   assert.match(stickerRule, /不输出 <sticker:标签>.*不为普通回复调用 qq_send_sticker/)
   assert.match(stickerRule, /真实用户明确要求发表情包.*调用一次登记建议/)
   assert.match(stickerRule, /登记不代表已发送.*未确认送达前不要声称已发送/)
   for (const kind of ['social', 'private']) {
     const rules = fake.variables.get(`aurabot_rules_${kind}`)()
-    assert.ok(rules.split('\n').includes(stickerRule), '人格与系统提示使用同一表情规则')
+    assert.ok(rules.split('\n').includes(stickerRule), '私聊/群聊规则使用同一表情规则')
     assert.match(rules, /<face:名字>/, '保留 QQ 小黄脸')
     assert.doesNotMatch(rules, /若写 <sticker:标签>|不必在每条回复中附标签/)
   }

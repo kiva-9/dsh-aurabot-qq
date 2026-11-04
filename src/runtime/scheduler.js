@@ -192,5 +192,7 @@ export function createScheduler({ settings, dispatch, canSteer = () => false, me
     busySince.set(chatId, { at: timers.now(), token })
     return token
   }
-  return { add, mediaSettled, turnEnded, drop, dispose, state, isBusy, reserve, tokenOf: (chatId) => busySince.get(chatId)?.token, hasOpen: (chatId) => open.has(chatId) }
+  /** 正在忙的聊天和各自忙了多久（给上层的卡死巡检用；调度器自己不做隐式超时）。 */
+  const busyChats = () => [...busySince].map(([chatId, b]) => ({ chatId, token: b.token, ageMs: timers.now() - b.at }))
+  return { add, mediaSettled, turnEnded, drop, dispose, state, isBusy, reserve, busyChats, tokenOf: (chatId) => busySince.get(chatId)?.token, hasOpen: (chatId) => open.has(chatId) }
 }
