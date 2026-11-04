@@ -289,7 +289,9 @@ export function apply(ctx) {
     settleDecision: (result) => use('stickers')?.settleDecision?.(result),
     completeTurn: (result) => use('stickers')?.completeTurn?.(result),
     collect: async (s, chatId) => (use('stickers')?.collect ? use('stickers').collect(s, chatId) : { ok: false, reason: '表情包模块关着' }),
-    library: () => use('stickers')?.library?.({ admin: true, accountId: String(cfg.botQQ), status: 'all' }) ?? { items: [] },
+    // 还没接入机器人号（全新安装、向导没走完）时没有账号范围，表情库就是空的；
+    // 不能让这里抛错，否则面板 /state 整个打不开，向导也就没法填账号。
+    library: () => cfg.botQQ ? use('stickers')?.library?.({ admin: true, accountId: String(cfg.botQQ), status: 'all' }) ?? { items: [] } : { items: [] },
   }
   const tts = {
     speak: async (text, profile) => {

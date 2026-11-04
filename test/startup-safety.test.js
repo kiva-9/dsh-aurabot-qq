@@ -33,3 +33,42 @@ test('必要数据备份失败写出不完整清单并中断迁移', () => {
   assert.equal(manifest.complete, false); assert.equal(manifest.failed.length, 1)
   rmSync(dir, { recursive: true, force: true })
 })
+
+test('全新安装（还没填机器人号）时面板 /state 能打开，向导才填得了账号', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aurabot-fresh-'))
+  process.env.AURABOT_DATA_DIR = dir
+  process.env.AURABOT_WORKSPACE = join(dir, 'ws')
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ schemaVersion: 2, model: { provider: 'p', model: 'm' }, snowluma: { autoStart: false, autoAttach: false, dir: join(dir, 'no-snowluma') } }))
+  const fake = createFakeDsh({ brain: async () => '好' })
+  const { apply } = await import('../src/host.js')
+  const app = apply(fake.ctx)
+  await app.ready
+  const state = await fake.call('/state')
+  const body = state.json()
+  assert.notEqual(body.ok, false, body.message)
+  assert.equal(body.config.botQQ, '')
+  assert.equal(body.config.setupDone, false)
+  assert.equal(body.stickers.count, 0)
+  await fake.dispose()
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('全新安装时表情、人格等常用面板接口也不因账号为空报错', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aurabot-fresh-routes-'))
+  process.env.AURABOT_DATA_DIR = dir
+  process.env.AURABOT_WORKSPACE = join(dir, 'ws')
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ schemaVersion: 2, snowluma: { autoStart: false, autoAttach: false, dir: join(dir, 'no-snowluma') } }))
+  const fake = createFakeDsh({ brain: async () => '好' })
+  const { apply } = await import('../src/host.js')
+  const app = apply(fake.ctx)
+  await app.ready
+  const failures = []
+  for (const path of ['/state', '/stickers/stats', '/stickers/list', '/stickers/tasks', '/persona/list', '/logs']) {
+    const r = await fake.call(path)
+    const body = r.json?.() || {}
+    if (r.status >= 500 || /账号范围与当前机器人不匹配/.test(String(body.message || ''))) failures.push(`${path}: ${r.status} ${body.message || ''}`)
+  }
+  assert.deepEqual(failures, [])
+  await fake.dispose()
+  rmSync(dir, { recursive: true, force: true })
+})
