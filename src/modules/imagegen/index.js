@@ -2,6 +2,7 @@
 // 画图是后台任务：聊天这一轮马上回「在画了」，画好直接发出来；取消只能取消自己的。
 
 import { canUseArtwork, artworkList, resolveArtwork } from '../../image/gallery.js'
+import { checkAllowed, isOwner } from '../../chat/access.js'
 import { createJobRunner, STATE_LABEL, ACTIVE } from '../../jobs/runner.js'
 import { createImageService } from '../../jobs/image.js'
 import { MODE_LABEL, ROLES } from '../../providers/image/common.js'
@@ -247,6 +248,28 @@ export default {
       const selected = scope && resolveArtwork(id, runner.get, scope), asset = selected && storage.assets.get(selected.assetId)
       return asset?.state === 'stored' && /^image\/(png|jpeg|gif|webp|bmp)$/.test(asset.mime) ? { ...selected, asset } : null
     }
+    /** 面板请求的聊天必须合法且在白名单里；面板身份固定是主人。 */
+    const panelChat = (value) => {
+      const chat = String(value || ''), m = /^(private|group):(\d+)$/.exec(chat)
+      if (!m) return null
+      const cfg = api.config(), owner = String(cfg.ownerQQ || '')
+      const allowed = checkAllowed(cfg, m[1] === 'private' ? { kind: 'private', userId: m[2] } : { kind: 'group', groupId: m[2], userId: owner })
+      if (!allowed.allowed) return null
+      if (cfg.imageGen?.ownerOnly && !isOwner(cfg, owner)) return null
+      return { chat, kind: m[1], id: m[2], account: String(cfg.botQQ), actorId: owner }
+    }
+    const panelJobReadable = (job) => Boolean(job && job.kind === 'image' && panelChat(job.chatId) && String(job.input?.accountId || '') === String(api.config().botQQ))
+    const jobAssetReadable = (assetId, chatId = '') => {
+      const wanted = String(chatId || ''), id = String(assetId || '')
+      if (!id) return false
+      const rows = storage.db.all("SELECT id FROM jobs WHERE kind='image' AND (output_json LIKE ? OR input_json LIKE ?) ORDER BY created_at DESC LIMIT 50", `%${JSON.stringify(id)}%`, `%${JSON.stringify(id)}%`)
+      for (const row of rows) {
+        const job = runner.get(row.id)
+        if (!panelJobReadable(job) || (wanted && job.chatId !== wanted)) continue
+        if ((job.output?.assetIds || []).includes(id) || (job.input?.refs || []).some(ref => ref.assetId === id)) return true
+      }
+      return false
+    }
     api.route('/imagegen/gallery', async req => {
       const q = http.query(req), scope = galleryScope(q.chatId, q.personaId)
       if (!scope) return { ok: false, code: 'SCOPE_REQUIRED', message: '当前聊天或人设不可用' }
@@ -274,17 +297,34 @@ export default {
     })
     api.route('/imagegen/profiles', async () => ({ ok: true, list: svc.profiles().map((p) => svc.profileInfo(p)) }))
     api.route('/imagegen/jobs', async (req) => {
-      const q = http.query(req)
-      return { ok: true, list: runner.list({ chatId: q.chatId || undefined, limit: Number(q.limit) || 40 }).map(jobView) }
+      const q = http.query(req), chat = panelChat(q.chatId || `private:${api.config().ownerQQ}`)
+      if (!chat) return { ok: false, code: 'SCOPE_REQUIRED', message: '只能查看主人私聊或白名单聊天的生图任务' }
+      const actorId = String(q.actorId || api.config().ownerQQ || '')
+      if (!/^\d+$/.test(actorId)) return { ok: false, message: '请求者参数不对' }
+      return { ok: true, scope: { chatId: chat.chat, actorId }, list: runner.list({ chatId: chat.chat, actorId, limit: Number(q.limit) || 40 }).map(jobView) }
     })
-    api.route('/imagegen/job', async (req) => { const j = runner.get(http.query(req).id); return j ? { ok: true, job: jobView(j) } : { ok: false, message: '没有这个任务' } })
-    api.route('/imagegen/cancel', async (req) => runner.cancel((await http.body(req)).id, { force: true }))
-    api.route('/imagegen/resend', async (req) => runner.resend((await http.body(req)).id))
+    api.route('/imagegen/job', async (req) => {
+      const j = runner.get(http.query(req).id)
+      return panelJobReadable(j) ? { ok: true, job: jobView(j) } : { ok: false, message: '没有这个任务或不在当前范围' }
+    })
+    api.route('/imagegen/cancel', async (req) => {
+      const b = await http.body(req), job = runner.get(b.id)
+      if (!panelJobReadable(job)) return { ok: false, message: '没有这个任务或不在当前范围' }
+      return runner.cancel(job.id, { force: true })
+    })
+    api.route('/imagegen/resend', async (req) => {
+      const b = await http.body(req), job = runner.get(b.id)
+      if (!panelJobReadable(job)) return { ok: false, message: '没有这个任务或不在当前范围' }
+      return runner.resend(job.id)
+    })
     // 面板工作台：主人直接下一个任务（文生图 / 用已有的图当输入 / 蒙版），画好发到指定聊天
     api.route('/imagegen/submit', async (req) => {
-      const b = await http.body(req)
-      const chatId = String(b.chatId || `private:${api.config().ownerQQ}`)
+      const b = await http.body(req), cfg = api.config()
+      if (cfg.imageGen?.enabled !== true) return { ok: false, code: 'FEATURE_DISABLED', message: '生图功能没打开' }
+      if (!svc.profiles().length) return { ok: false, code: 'NO_PROFILE', message: '还没配置生图服务' }
+      const chatId = String(b.chatId || `private:${cfg.ownerQQ}`)
       if (!/^(private|group):\d+$/.test(chatId)) return { ok: false, message: '要发到哪个聊天？' }
+      if (!panelChat(chatId)) return { ok: false, code: 'SCOPE_REQUIRED', message: '这个聊天不在白名单里，不能发图' }
       const contextId = `panel:image:${randomUUID()}`
       const context = { account: String(api.config().botQQ), chatId, actorId: String(api.config().ownerQQ), requestId: contextId, turnId: contextId, authority: 'owner-panel' }
       let refs
@@ -335,8 +375,19 @@ export default {
       } catch (error) { return { ok: false, message: error.message || '图片损坏或格式不支持' } }
     })
     api.route('/imagegen/asset', async (req, res) => {
-      const a = storage.assets.get(http.query(req).id)
-      if (!a) return { ok: false, message: '没有这张图' }
+      const q = http.query(req), id = String(q.id || ''), explicitChat = q.chatId ? String(q.chatId) : ''
+      let a = null
+      if (id) {
+        // 先按画廊/任务归属核对：不能只凭全局 asset id 读别人的图。
+        const scoped = galleryAsset(id, galleryScope(explicitChat || `private:${api.config().ownerQQ}`, q.personaId))
+        if (scoped) a = scoped.asset
+        else if (jobAssetReadable(id, explicitChat)) a = storage.assets.get(id)
+        else {
+          const asset = storage.assets.get(id)
+          if (asset?.sourceKind === 'upload' && panelChat(explicitChat || `private:${api.config().ownerQQ}`)) a = asset
+        }
+      }
+      if (!a || a.state !== 'stored') return { ok: false, message: '没有这张图或不在当前范围' }
       const { readFileSync } = await import('node:fs')
       http.send(res, 200, readFileSync(storage.assets.pathOf(a)), a.mime)
     })

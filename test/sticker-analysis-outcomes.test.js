@@ -35,9 +35,9 @@ function fixture(t) {
   } }
   const ledger = createUsageLedger({ storage, getAccount: () => cfg.botQQ })
   const unsubscribe = observeModelUsage(dsh, (event) => { events.push(event); ledger.record(event) })
-  const create = () => {
+  const create = (extra = {}) => {
     const s = createStickerStore({ storage, dsh, getConfig: () => cfg, autoStart: false,
-      download: async () => PNG, onebot: { call: () => assert.fail('QQ must not be called') } })
+      download: async () => PNG, onebot: { call: () => assert.fail('QQ must not be called') }, ...extra })
     stores.push(s); return s
   }
   const store = create()
@@ -50,13 +50,34 @@ function fixture(t) {
     assert.ok(abs.startsWith(resolve(tmpdir()) + sep) && abs.includes('aurabot-sticker-outcomes-'))
     rmSync(abs, { recursive: true, force: true })
   })
-  return { storage, cfg, behavior, calls, events, store, source, create,
+  return { storage, cfg, behavior, calls, events, store, source, segment, create,
     async run() { assert.equal((await store.collect(segment, source)).ok, true); await store.drain() },
     task: () => store.queueStatus({ ...ADMIN, kind: 'analyze' }).items[0],
     item: () => store.list(ADMIN).items[0],
     row: () => storage.db.get('SELECT * FROM service_calls'),
   }
 }
+
+test('识别模型不响应 AbortSignal 时硬超时写 unknown 并释放并发槽', async (t) => {
+  const f = fixture(t)
+  f.cfg.stickers.analysisTimeoutMs = 10
+  let calls = 0
+  const store = f.create({ analyze: async () => { calls++; return new Promise(() => {}) } })
+  assert.equal((await store.collect(f.segment, f.source)).ok, true)
+  await store.drain()
+  assert.equal(calls, 1)
+  assert.equal(store.queueStatus({ ...ADMIN }).running, 0)
+  const task = store.queueStatus({ ...ADMIN, kind: 'analyze' }).items[0]
+  assert.equal(task.state, 'unknown')
+  assert.equal(store.list(ADMIN).items[0].analysis.state, 'unknown')
+  // 同一个模块还能继续处理下一张，说明并发槽确实释放了。
+  f.cfg.stickers.analysisTimeoutMs = 20
+  const segment2 = { ...f.segment, data: { ...f.segment.data, file: 'base64://' + Buffer.concat([PNG, Buffer.from('x')]).toString('base64') } }
+  const message2 = f.storage.messages.ingest({ account: '100', chatId: 'group:1', authorId: '200', platformMsgId: '2', segments: [segment2] })
+  const okStore = f.create({ analyze: async () => JSON.stringify(answer()) })
+  assert.equal((await okStore.collect(segment2, { ...f.source, messageId: message2.id })).ok, true)
+  await okStore.drain()
+})
 
 test('sticker JSON accepts only a whole single JSON fence, preserving its schema', () => {
   const json = JSON.stringify(answer())

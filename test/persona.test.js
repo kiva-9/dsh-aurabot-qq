@@ -65,6 +65,23 @@ test('绑定：具体聊天 → 群聊/私聊默认 → 全局；快照带版本
   assert.throws(() => ps.bind('chat:nope', 'a'), (e) => e.code === 'BAD_SCOPE')
 })
 
+test('bindingRevision 按聊天生效范围计算，别的聊天换绑定不影响本聊天', () => {
+  const ps = createPersonaStore({ storage: storage() })
+  ps.create({ id: 'a', name: 'A', layers: L('a'), publish: true })
+  ps.create({ id: 'b', name: 'B', layers: L('b'), publish: true })
+  ps.create({ id: 'c', name: 'C', layers: L('c'), publish: true })
+  ps.bind('global', 'a')
+  ps.bind('chat:group:1', 'b')
+  ps.bind('chat:group:2', 'c')
+  const one = ps.resolve('group:1').bindingRevision, two = ps.resolve('group:2').bindingRevision
+  ps.bind('chat:group:2', 'a')
+  assert.equal(ps.resolve('group:1').bindingRevision, one, '另一个聊天换卡不影响本聊天')
+  assert.ok(ps.resolve('group:2').bindingRevision > two, '本聊天换卡后才递增')
+  const before = ps.resolve('group:1').bindingRevision
+  ps.bind('chat:group:1', null)
+  assert.ok(ps.resolve('group:1').bindingRevision > before)
+})
+
 test('在用的卡不能归档；绑定指向的卡出问题时报错，不随便换成第一张', () => {
   const s = storage()
   const ps = createPersonaStore({ storage: s })

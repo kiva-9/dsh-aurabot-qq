@@ -122,10 +122,24 @@ test('参考图生成：构图参考，不要求保留底图', async () => {
   assert.doesNotMatch(parts[1].text, /保留/)
 })
 
-test('文生图即使带了输入图也不发图', async () => {
+test('能力和字节校验：超量输入、MIME 伪装在提交前拒绝', async () => {
+  const before = seen.length
+  await assert.rejects(adapter({ maxInputs: 1 }).submit({ mode: 'reference', prompt: 'x', inputs: [
+    { buf: PNG, mime: 'image/png', role: 'identity' }, { buf: PNG, mime: 'image/png', role: 'style' },
+  ] }), (e) => e.kind === 'unsupported' && /最多收/.test(e.message))
+  await assert.rejects(adapter().submit({ mode: 'reference', prompt: 'x', inputs: [{ buf: JPG, mime: 'image/png', role: 'style' }] }),
+    (e) => e.kind === 'invalid' && /MIME/.test(e.message))
+  assert.equal(seen.length, before)
   reply(200, { candidates: [{ content: { parts: [imagePart()] } }] })
-  await adapter().submit({ mode: 'text', prompt: 'x', inputs: [{ buf: PNG, mime: 'image/png', role: 'style' }] })
-  assert.equal(last().body.contents[0].parts.length, 1)
+  assert.equal((await adapter({ maxInputs: 1 }).submit({ mode: 'reference', prompt: 'x', inputs: [{ buf: PNG, mime: 'image/png', role: 'style' }] })).status, 'done')
+})
+
+test('文生图带输入图会在提交前拒绝，不悄悄丢图', async () => {
+  reply(200, { candidates: [{ content: { parts: [imagePart()] } }] })
+  const before = seen.length
+  await assert.rejects(adapter().submit({ mode: 'text', prompt: 'x', inputs: [{ buf: PNG, mime: 'image/png', role: 'style' }] }),
+    (e) => e.kind === 'invalid' && /不需要/.test(e.message))
+  assert.equal(seen.length, before)
 })
 
 test('审核拦截 → invalid', async () => {

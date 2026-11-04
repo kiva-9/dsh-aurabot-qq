@@ -8,10 +8,42 @@ import { spawn, execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { connect } from 'node:net'
-import { join } from 'node:path'
+import { join, win32 as winPath, posix as posixPath } from 'node:path'
 import { registerSecret } from '../core/redact.js'
 
 export const DOWNLOAD_PAGE = 'https://github.com/SnowLuma/SnowLuma/releases/latest'
+
+/** 路径是否真的在 dir 里面（按分隔符边界，而不是字符串前缀）。 */
+export function isPathWithin(dir, file, { platform = process.platform } = {}) {
+  const p = platform === 'win32' ? winPath : posixPath
+  const base = p.resolve(String(dir || '')), target = p.resolve(String(file || ''))
+  const norm = value => platform === 'win32' ? value.toLowerCase() : value
+  return norm(target) === norm(base) || norm(target).startsWith(norm(base) + p.sep)
+}
+
+/** 杀整棵进程树：Windows taskkill /T /F，POSIX 杀进程组。 */
+export async function killProcessTree(pid, { platform = process.platform, kill = process.kill, exec = execFile } = {}) {
+  const n = Number(pid)
+  if (!Number.isSafeInteger(n) || n <= 0) return false
+  if (platform === 'win32') {
+    await new Promise(resolve => {
+      try { exec('taskkill', ['/pid', String(n), '/T', '/F'], { windowsHide: true }, () => resolve()) }
+      catch (error) { resolve() }
+    })
+    return true
+  }
+  try { kill(-n, 'SIGKILL') } catch (error) { try { kill(n, 'SIGKILL') } catch (e) {} }
+  return true
+}
+
+function waitChildExit(child, timeoutMs = 5000) {
+  if (!child || child.exitCode !== null) return Promise.resolve(true)
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { child.removeListener?.('exit', onExit); resolve(false) }, timeoutMs)
+    const onExit = () => { clearTimeout(timer); resolve(true) }
+    child.once?.('exit', onExit)
+  })
+}
 
 function readJsonSafe(file) {
   try {
@@ -256,7 +288,7 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
       token = ''
     }
     try {
-      child = spawnImpl(exe, ['./index.mjs'], { cwd: inst.dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: false })
+      child = spawnImpl(exe, ['./index.mjs'], { cwd: inst.dir, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
     } catch (error) {
       return { ok: false, message: `启动失败：${error.message}` }
     }
@@ -298,12 +330,13 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
     return { ok: false, message: '等了 30 秒控制台还没起来' }
   }
 
-  function stop() {
-    if (!child) return { ok: false, message: '不是插件启动的 SnowLuma（或已经停了），请在它自己的窗口里关' }
-    try {
-      child.kill()
-    } catch (error) {}
-    return { ok: true, message: '已停止' }
+  async function stop() {
+    const me = child
+    if (!me) return { ok: false, message: '不是插件启动的 SnowLuma（或已经停了），请在它自己的窗口里关' }
+    await killProcessTree(me.pid)
+    const exited = await waitChildExit(me)
+    if (child === me) { child = null; childPid = 0 }
+    return { ok: true, message: exited ? '已停止' : '已发送停止信号，进程可能还在退出' }
   }
 
   async function processes() {
@@ -414,7 +447,7 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
     const pid = Number(line ? line.trim().split(/\s+/).pop() : 0)
     if (!pid) return 0
     const path = await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).Path`], { windowsHide: true }, (e, so) => res(String(so || '').trim())))
-    return path.toLowerCase().startsWith(inst.dir.toLowerCase()) ? pid : 0
+    return isPathWithin(inst.dir, path) ? pid : 0
   }
 
   /**
@@ -425,11 +458,11 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
     const inst = detectInstall(cfg().dir)
     if (!inst.installed) return { ok: false, message: inst.reason }
     if (child) {
-      try { child.kill() } catch (error) {}
+      await stop()
     } else if (await running()) {
       const pid = await findRunningPid()
       if (!pid) return { ok: false, message: '有一个 SnowLuma 在运行，但不是配置目录里那份，没法替你重置' }
-      try { process.kill(pid) } catch (error) { return { ok: false, message: '停不掉正在运行的 SnowLuma：' + error.message } }
+      try { await killProcessTree(pid) } catch (error) { return { ok: false, message: '停不掉正在运行的 SnowLuma：' + error.message } }
     }
     for (let i = 0; i < 20 && (await running()); i++) await new Promise((r) => setTimeout(r, 500))
     try { unlinkSync(join(inst.dir, 'config', 'webui.json')) } catch (error) {}
@@ -500,9 +533,13 @@ export function createSnowLumaManager({ getConfig, log, savePassword, portWaitMs
       return lastAttach
     },
     webuiUrl: () => base() + '/',
-    dispose() {
-      // DSH 退出时连带停掉自己启动的 SnowLuma
-      try { child?.kill() } catch (error) {}
+    async dispose() {
+      // DSH 退出时连带停掉自己启动的 SnowLuma，并等它真正退出。
+      if (!child) return
+      const me = child
+      await killProcessTree(me.pid)
+      await waitChildExit(me)
+      if (child === me) { child = null; childPid = 0 }
     },
   }
 }

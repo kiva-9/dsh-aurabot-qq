@@ -15,6 +15,7 @@ import { selectSong } from './selection.js'
 import { audioHash, songCacheKey, readSongCache, writeSongCache } from './cache.js'
 import { readZip } from './zip.js'
 import { createJobRunner, ACTIVE } from '../jobs/runner.js'
+import { createSearchHttp } from '../search/net.js'
 
 export const APPLIO_REPO = 'https://github.com/IAHispano/Applio.git'
 export const APPLIO_COMMIT = 'c817f1f83f689ef72e0dfeb1c17ae990b9248506'
@@ -23,6 +24,14 @@ const TORCH_INDEX = 'https://download.pytorch.org/whl/cu128'
 const CN_PYPI = 'https://mirrors.aliyun.com/pypi/simple'
 const CN_TORCH = 'https://mirrors.aliyun.com/pytorch-wheels/cu128/'
 const CN_PYTHON = 'https://registry.npmmirror.com/-/binary/python-build-standalone'
+// 网易云返回的下载地址不可信：只放行公网 http(s)，重定向逐跳校验，不读本机文件。
+const songHttp = createSearchHttp({ allowAnyPort: false })
+
+/** 下载翻唱源音频；provider/上游返回的地址必须经过公网校验。可测入口。 */
+export async function downloadSongBytes(url, { signal, maxBytes = 60 * 1024 * 1024, timeoutMs = 120_000 } = {}) {
+  const r = await songHttp.read(url, { maxBytes, timeoutMs, maxRedirects: 4, retries: 1, signal })
+  return r.body
+}
 
 /** 自动模式下判断要不要用国内镜像：官方源 4 秒内连不上或者很慢就用。 */
 export async function shouldUseCnMirror(mode, fetchImpl = fetch) {
@@ -354,9 +363,26 @@ export function clipWindow(durationSec, maxSec, start = 'auto') {
   return { start: s, length: maxSec }
 }
 
+/**
+ * 杀整棵进程树：Windows 用 taskkill /T /F（SIGTERM 不会递归），POSIX 杀进程组。
+ * 导出是为了单测参数，真实调用不暴露给用户。
+ */
+export function killProcessTree(pid, { platform = process.platform, kill = process.kill, spawnTaskkill } = {}) {
+  const n = Number(pid)
+  if (!Number.isSafeInteger(n) || n <= 0) return false
+  if (platform === 'win32') {
+    try { (spawnTaskkill || ((args, opts) => spawn('taskkill', args, opts)))(['/pid', String(n), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }) }
+    catch (error) { try { kill(n, 'SIGKILL') } catch (e) {} }
+    return true
+  }
+  try { kill(-n, 'SIGKILL') } catch (error) { try { kill(n, 'SIGKILL') } catch (e) {} }
+  return true
+}
+
 function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000, signal } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, signal })
+    // POSIX 下单独开进程组，超时/取消时能把 Python/ffmpeg 派生进程一起杀掉。
+    const child = spawn(cmd, args, { cwd, env: { ...process.env, ...env }, windowsHide: true, signal, detached: process.platform !== 'win32' })
     let tail = ''
     const feed = (buf) => {
       const s = String(buf)
@@ -365,10 +391,12 @@ function run(cmd, args, { cwd, env, log, onLine, timeoutMs = 30 * 60_000, signal
     }
     child.stdout.on('data', feed)
     child.stderr.on('data', feed)
-    const timer = setTimeout(() => { try { child.kill() } catch (error) {}; reject(new Error(`${basename(cmd)} 运行超时`)) }, timeoutMs)
-    child.on('error', (e) => { clearTimeout(timer); reject(e) })
+    const onAbort = () => killProcessTree(child.pid)
+    signal?.addEventListener('abort', onAbort, { once: true })
+    const timer = setTimeout(() => { killProcessTree(child.pid); reject(new Error(`${basename(cmd)} 运行超时`)) }, timeoutMs)
+    child.on('error', (e) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); reject(e) })
     child.on('exit', (code) => {
-      clearTimeout(timer)
+      clearTimeout(timer); signal?.removeEventListener('abort', onAbort)
       if (code === 0) resolve(tail)
       else {
         log?.debug(`${basename(cmd)} 失败（code ${code}）：${tail.slice(-800)}`)
@@ -712,8 +740,8 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
     check()
     // ffmpeg -i 会把时长打在 stderr 里，退出码是 1，这里自己接
     return new Promise((resolve, reject) => {
-      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file], { windowsHide: true, signal: execution()?.signal })
-      const timer = setTimeout(() => { c.kill(); reject(new Error('音频时长检查超时')) }, 30000)
+      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file], { windowsHide: true, signal: execution()?.signal, detached: process.platform !== 'win32' })
+      const timer = setTimeout(() => { killProcessTree(c.pid); reject(new Error('音频时长检查超时')) }, 30000)
       let s = ''
       c.stderr.on('data', (b) => { s = (s + b).slice(-8000) })
       c.on('exit', () => {
@@ -729,8 +757,8 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
   async function meanVolume(file) {
     check()
     return new Promise((resolve, reject) => {
-      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { windowsHide: true, signal: execution()?.signal })
-      const timer = setTimeout(() => { c.kill(); reject(new Error('音频音量检查超时')) }, 60000)
+      const c = spawn(P().ffmpeg, ['-hide_banner', '-i', file, '-af', 'volumedetect', '-f', 'null', '-'], { windowsHide: true, signal: execution()?.signal, detached: process.platform !== 'win32' })
+      const timer = setTimeout(() => { killProcessTree(c.pid); reject(new Error('音频音量检查超时')) }, 60000)
       let s = ''
       c.stderr.on('data', (b) => { s = (s + b).slice(-8000) })
       c.on('exit', () => { clearTimeout(timer); const m = s.match(/mean_volume:\s*(-?[\d.]+|-inf)/); resolve(m ? (m[1] === '-inf' ? -200 : Number(m[1])) : 0) })
@@ -747,13 +775,13 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
     job.songKey = pick.track.id
     progress('downloading', '下载歌曲', { title: job.title, track: job.actualTrack, match: job.match })
     check()
-    const r = await fetch(pick.url, { signal: AbortSignal.any([AbortSignal.timeout(120_000), ...[execution()?.signal].filter(Boolean)]) })
-    if (!r.ok) throw new Error(`下载失败（HTTP ${r.status}）`)
-    const chunks = []; let size = 0
-    if (Number(r.headers.get('content-length')) > 60 * 1024 * 1024) { await r.body.cancel(); throw new Error('歌太大了') }
-    for await (const part of r.body) { check(); size += part.length; if (size > 60 * 1024 * 1024) throw new Error('歌太大了'); chunks.push(Buffer.from(part)) }
+    let buf
+    try { buf = await downloadSongBytes(pick.url, { signal: AbortSignal.any([AbortSignal.timeout(120_000), ...[execution()?.signal].filter(Boolean)]) }) }
+    catch (error) {
+      if (error?.code === 'TOO_LARGE') throw new Error('歌太大了')
+      throw new Error(`下载失败：${error?.message || '地址不可用'}`)
+    }
     check()
-    const buf = Buffer.concat(chunks)
     const file = join(dir, 'song.mp3')
     writeFileSync(file, buf)
     return file
@@ -883,6 +911,12 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
 
   const inactive = () => Object.assign(new Error('翻唱已取消、停用或请求范围已改变'), { code: 'JOB_INACTIVE', kind: 'invalid', billing: 'none' })
   const hash = (v) => createHash('sha256').update(v).digest('hex')
+  function removeJobWork(id) {
+    const root = join(work(), 'work')
+    let names = []
+    try { names = readdirSync(root) } catch { return }
+    for (const name of names) if (name === String(id) || name.startsWith(String(id) + '-')) removeWork(join(root, name))
+  }
   function removeWork(dir) {
     if (!dir) return
     const root = resolve(work(), 'work'), target = resolve(dir), rel = relative(root, target)
@@ -998,7 +1032,11 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, onSung, onResu
         // Local-script dispatch may have external effects; without a receipt do not retry it.
         if (!settings.localSong) { e.kind ||= 'invalid'; e.billing = 'none' }
         throw e
-      } finally { if (current?.id === job.id) current = null }
+      } finally {
+        // 成功、失败、取消都清掉工作目录；保留调试时才留着。
+        if (!settings.keepWork) removeJobWork(job.id)
+        if (current?.id === job.id) current = null
+      }
     },
     store(job, outputs, execution) { guarded(job, execution).assertActive(); return outputs },
     async deliver(job, rawExecution) {

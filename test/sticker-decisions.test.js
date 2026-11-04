@@ -191,6 +191,21 @@ test('无合适项、非法输出、模型超时不回退第一张，超时同�
   assert.equal(f.calls.length, 3)
 })
 
+test('ready 选择超时未领取会被取消，不会永久卡住后续聊天', async t => {
+  const f = fixture(t, { readyTtlMs: 30_000 }); await f.add('猫猫')
+  const firstTurn = f.turn(), first = await f.store.decideForReply(firstTurn)
+  assert.equal(first.decision, 'send')
+  assert.equal(f.store.claimDecision({ ...f.permit(firstTurn, first), itemId: 'not-used-yet' }).decision, 'skip')
+  // 尚未过期：同一聊天的新决策看到 BUSY 而不是覆盖。
+  const busy = await f.store.decideForReply(f.turn())
+  assert.equal(busy.code, 'BUSY')
+  f.advance(30_001)
+  const next = await f.store.decideForReply(f.turn())
+  assert.equal(next.decision, 'send')
+  const rows = f.store.decisions({ admin: true, accountId: '100', chatId: 'group:1' }).items
+  assert.ok(rows.some(row => row.id === first.decisionId && row.state === 'cancelled' && row.code === 'READY_EXPIRED'))
+})
+
 test('缩图服务失去响应时总期限依然生效，不触发模型或重新抽取', async t => {
   const f = fixture(t, { decisionTimeoutMs: 1000 }); await f.add('猫猫')
   const store = f.create({ decisionPreview: () => new Promise(() => {}) }), turn = f.turn()

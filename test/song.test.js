@@ -26,6 +26,23 @@ test('截一段：歌比上限长就从副歌附近截，短歌整首', () => {
   assert.deepEqual(studio.clipWindow(130, 120), { start: 10, length: 120 })
 })
 
+test('子进程清理：Windows 用 taskkill /T /F，POSIX 杀整个进程组', () => {
+  const calls = []
+  assert.equal(studio.killProcessTree(123, { platform: 'win32', spawnTaskkill: (args, opts) => calls.push({ args, opts }) }), true)
+  assert.deepEqual(calls[0].args, ['/pid', '123', '/T', '/F'])
+  assert.equal(calls[0].opts.windowsHide, true)
+  calls.length = 0
+  assert.equal(studio.killProcessTree(456, { platform: 'linux', kill: (pid, sig) => calls.push({ pid, sig }) }), true)
+  assert.deepEqual(calls[0], { pid: -456, sig: 'SIGKILL' })
+  assert.equal(studio.killProcessTree(0), false)
+})
+
+test('翻唱下载：上游返回的本机/内网地址被拒绝', async () => {
+  for (const url of ['http://127.0.0.1:9/song.mp3', 'http://[::1]:9/song.mp3', 'http://169.254.169.254/x', 'file:///tmp/song.mp3']) {
+    await assert.rejects(studio.downloadSongBytes(url), /HTTP|禁止|私有|内网|端口|不合法/)
+  }
+})
+
 test('挑歌：钢琴版、伴奏这类排到最后，点歌时本来就要钢琴版就不排', () => {
   const list = [{ id: 1, name: '稻香 (钢琴版)' }, { id: 2, name: '稻香', alias: '伴奏' }, { id: 3, name: '稻香(治愈版)' }, { id: 4, name: '稻香' }]
   assert.deepEqual(studio.rankCandidates(list, '稻香').map((x) => x.id), [3, 4, 1, 2])
@@ -106,6 +123,16 @@ async function makeZip(entries) {
   return Buffer.concat([...locals, cd, end])
 }
 const fakePth = (n = 2) => Buffer.concat([Buffer.from('PK'), Buffer.alloc(n * 1024 * 1024, 7)])
+
+test('zip 解压上限：单文件、总大小和 entry 数都有硬限制', async () => {
+  const { readZip } = await import('../src/song/zip.js')
+  const bomb = await makeZip([{ name: 'huge.pth', data: Buffer.alloc(2 * 1024 * 1024, 7) }])
+  assert.throws(() => readZip(bomb, () => true, { maxEntryBytes: 1024 }), /太大/)
+  const many = await makeZip([{ name: 'a.pth', data: Buffer.from('a') }, { name: 'b.pth', data: Buffer.from('b') }, { name: 'c.pth', data: Buffer.from('c') }])
+  assert.throws(() => readZip(many, () => true, { maxEntries: 2 }), /文件太多/)
+  assert.throws(() => readZip(many, () => true, { maxTotalBytes: 2 }), /总大小/)
+  assert.equal(readZip(many).length, 3)
+})
 
 test('导入音色：zip 里的 .pth 和 .index 自动识别，单个音色时 index 自动配对，中文文件名不乱码', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'import-'))

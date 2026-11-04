@@ -66,6 +66,9 @@ export function createStickerDecisionService({ storage, repo, getConfig, account
     sameStickerCooldownMs: Math.max(number(cfg().sameStickerCooldownMs, 600_000, 0, 86_400_000), number(cfg().cooldownMs, 60_000, 0, 86_400_000)),
     recentWindowSize: number(cfg().recentWindowSize, 6, 0, 100), candidateCount: number(cfg().candidateCount, 20, 1, 32),
     decisionTimeoutMs: number(cfg().decisionTimeoutMs, 15_000, 1000, 120_000),
+    // ready 是「选好了但还没被发送方领取」。调用方异常或整轮被取消时不会 claim，
+    // 没有 TTL 就会一直占着 BUSY，聊天再也发不出表情。
+    readyTtlMs: number(cfg().readyTtlMs, 300_000, 30_000, 3_600_000),
   })
   const get = id => db.get('SELECT rowid AS seq,* FROM sticker_decisions WHERE id=?', id)
   const requestsOf = c => [...new Set((Array.isArray(c.requestIds) ? c.requestIds : c.requestId ? [c.requestId] : []).map(String))].sort()
@@ -104,8 +107,24 @@ export function createStickerDecisionService({ storage, repo, getConfig, account
   const skip = (id, code, reason, fields) => {
     const row = get(id)
     if (row?.state === 'selecting') update(id, 'skipped', code, reason, fields)
-    else if (row) return refused(row.code, row.reason, id)
+    else if (row?.state === 'ready') {
+      // 选择成功后 decorate / 调用方抛出：把 ready 兜底取消，释放占用。
+      update(id, 'cancelled', code, reason, fields)
+      active.delete(decode(row.owner_json)?.token)
+      owned.delete(id)
+      return { decisionId: id, decision: 'skip', code, reason }
+    } else if (row) return refused(row.code, row.reason, id)
     return { decisionId: id, decision: 'skip', code, reason }
+  }
+  /** 过期未领取的 ready 决策不能永久占着 BUSY。 */
+  function expireReady(c) {
+    const ttl = opts().readyTtlMs, rows = db.all("SELECT * FROM sticker_decisions WHERE account=? AND chat=? AND state='ready' AND updated_at < ?", c.accountId, c.chatId, now() - ttl)
+    for (const row of rows) {
+      update(row.id, 'cancelled', 'READY_EXPIRED', '表情选择超时未发送，已释放')
+      active.delete(decode(row.owner_json)?.token)
+      owned.delete(row.id)
+    }
+    return rows.length
   }
   const refused = (code, reason, id = null) => ({ decisionId: id, decision: 'skip', code, reason })
   function recover(c) {
@@ -172,6 +191,7 @@ export function createStickerDecisionService({ storage, repo, getConfig, account
   function reserve(c, sources, explicit, o) {
     return db.tx(() => {
       recover(c)
+      expireReady(c)
       const old = db.get('SELECT * FROM sticker_decisions WHERE account=? AND chat=? AND epoch=? AND turn_key=?', c.accountId, c.chatId, c.epoch, c.turnId) ||
         (c.requestIds.length ? db.get(`SELECT d.* FROM sticker_decision_requests r JOIN sticker_decisions d ON d.id=r.decision_id WHERE r.account=? AND r.chat=? AND r.epoch=? AND r.request_id IN (${c.requestIds.map(() => '?').join(',')}) LIMIT 1`, c.accountId, c.chatId, c.epoch, ...c.requestIds) : null)
       if (old) {
@@ -348,7 +368,10 @@ export function createStickerDecisionService({ storage, repo, getConfig, account
       clearTimeout(timer); o.signal?.removeEventListener('abort', abort)
       controllers.delete(controller)
       const row = get(id)
-      if (row?.state !== 'ready') { active.delete(owner.token); owned.delete(id) }
+      if (row?.state === 'ready' && controller.signal.aborted) {
+        update(id, 'cancelled', 'CANCELLED', '本轮已取消，未领取的表情已作废')
+        active.delete(owner.token); owned.delete(id)
+      } else if (row?.state !== 'ready') { active.delete(owner.token); owned.delete(id) }
       if (callMade && dsh) {
         const success = row?.state === 'ready' || row?.code === 'NO_MATCH'
         const status = success ? 'success' : ['STALE_CONTEXT', 'CANCELLED'].includes(row?.code) ? 'discarded' : 'failed'
@@ -371,6 +394,7 @@ export function createStickerDecisionService({ storage, repo, getConfig, account
     const c = identity(input)
     if (!c) return refused('STALE_CONTEXT', '决策范围已失效', input.decisionId || null)
     return db.tx(() => {
+      expireReady(c)
       const row = get(input.decisionId)
       if (!validateRow(row, c, input, 'ready')) {
         if (row?.state === 'ready' && matches(row, c, input)) { update(row.id, 'cancelled', 'STALE_CONTEXT', '请求或素材已失效'); active.delete(decode(row.owner_json)?.token); owned.delete(row.id) }

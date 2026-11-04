@@ -444,27 +444,25 @@ test('撤回或修改来源后不能继续使用已批准素材', async (t) => {
   assert.equal(store.segmentFor(it, 'group:1'), null)
 })
 
-test('识别超时不放行，也不提前释放未结束外部调用的并发槽', async (t) => {
+test('识别超时硬结算 unknown 并释放并发槽，不需要等外部调用结束', async (t) => {
   const f = fixture(t, { analysisTimeoutMs: 10, concurrency: 1 })
-  const entered = gate(), unblock = gate()
-  const store = f.create({ analyze: async () => { entered.release(); await unblock.promise; return answer() } })
+  const entered = gate()
+  const store = f.create({ analyze: async () => { entered.release(); return new Promise(() => {}) } })
   const { item } = await store.addFromBuffer(PNG, { chatId: 'group:1', toQQ: false })
   const work = store.tick()
   await entered.promise
-  await new Promise((resolve) => setTimeout(resolve, 25))
-  assert.match(store.queueStatus(admin).items[0].error, /超时/)
-  assert.equal(store.retryAnalysis(item.id, admin).state, 'running')
-  const next = f.create({ storage: f.open() })
-  assert.equal(await next.tick(), 0)
-  unblock.release()
   await work
+  assert.match(store.queueStatus(admin).items[0].error, /超时/)
   assert.equal(store.get(item.id, admin).analysis.state, 'unknown')
-  assert.equal(store.get(item.id, admin).state, 'pending')
+  assert.equal(store.queueStatus(admin).running, 0)
+  const next = f.create({ storage: f.open() })
   assert.equal(next.retryAnalysis(item.id, admin).code, 'ANALYSIS_UNKNOWN')
   const task = next.queueStatus(admin).items.find((j) => j.kind === 'analyze')
   assert.equal(next.retryTask(task.id, admin).code, 'NOT_RETRYABLE')
+  // 并发槽已释放：下一张可以正常进入识别。
+  const added = await next.addFromBuffer(Buffer.concat([PNG, Buffer.from('next')]), { chatId: 'group:1', toQQ: false })
   await next.drain()
-  assert.equal(next.get(item.id, admin).analysis.state, 'unknown')
+  assert.equal(next.get(added.item.id, admin).analysis.state, 'done')
 })
 
 test('QQ 已成功但回执事务失败，保守 unknown 不因数据库异常自动重复收藏', async (t) => {

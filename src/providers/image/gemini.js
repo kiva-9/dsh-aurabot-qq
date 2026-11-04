@@ -1,7 +1,7 @@
 // Google Gemini 原生多模态生图：POST {baseUrl}/models/{model}:generateContent，图和文字放在同一条 user 消息的 parts 里。
 // Gemini 没有蒙版编辑，也没有「哪张图是干什么的」字段：角色只能写进文字说明里，按图的顺序告诉模型。
 
-import { ProviderError, request, classifyHttp, outputFrom } from './common.js'
+import { ProviderError, request, classifyHttp, outputFrom, checkRequest, mergeCapabilities } from './common.js'
 
 const DEFAULT_BASE = 'https://generativelanguage.googleapis.com/v1beta'
 const RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9']
@@ -50,7 +50,8 @@ function classify(r) {
 /**
  * profile: { baseUrl?, apiKey, model, extra: { aspectRatio?, responseModalities?, maxInputs? } }
  */
-export function createGeminiImages(profile, { fetchImpl = fetch } = {}) {
+export function createGeminiImages(profile, { fetchImpl } = {}) {
+  const requestFetch = fetchImpl || fetch
   const base = String(profile.baseUrl || DEFAULT_BASE).replace(/\/+$/, '')
   const x = profile.extra || {}
   const auth = profile.apiKey ? { 'x-goog-api-key': profile.apiKey } : {}
@@ -64,6 +65,10 @@ export function createGeminiImages(profile, { fetchImpl = fetch } = {}) {
 
   async function submit(req, { signal } = {}) {
     if (!profile.model) throw new ProviderError('invalid', '这个生图服务还没填模型')
+    const caps = mergeCapabilities(capabilities(), profile.capabilities)
+    if (!caps.modes.includes(req?.mode)) throw new ProviderError('unsupported', `这个生图服务不支持「${req?.mode}」模式`)
+    const why = checkRequest(req, caps)
+    if (why) throw new ProviderError(/不支持|最多收/.test(why) ? 'unsupported' : 'invalid', why)
     // 正常会被 checkRequest 挡住；这里兜底，免得悄悄丢掉蒙版当普通编辑做
     if (req.mode === 'mask') throw new ProviderError('unsupported', 'Gemini 不支持蒙版编辑')
     // 文生图一律不带图；其余底图放第一张，其他按原顺序
@@ -74,7 +79,7 @@ export function createGeminiImages(profile, { fetchImpl = fetch } = {}) {
     const aspectRatio = aspectRatioFor(req.size) || x.aspectRatio
     if (aspectRatio) generationConfig.imageConfig = { aspectRatio }
     const body = { contents: [{ role: 'user', parts }], generationConfig }
-    const r = await request(fetchImpl, `${base}/models/${encodeURIComponent(profile.model)}:generateContent`, {
+    const r = await request(requestFetch, `${base}/models/${encodeURIComponent(profile.model)}:generateContent`, {
       method: 'POST', headers: { 'content-type': 'application/json', ...auth }, body: JSON.stringify(body),
     }, { signal })
     if (!r.ok) throw classify(r)
